@@ -4,11 +4,10 @@ name: publish-crates
 on:
   workflow_dispatch:
 
-# crates.io rate-limits; publish one crate at a time with settle waits.
 jobs:
   publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     permissions:
       contents: read
     steps:
@@ -23,6 +22,7 @@ jobs:
       - name: Publish to crates.io
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          CARGO_HTTP_USER_AGENT: "reelforge-publish (github.com/sergii-ziborov/ReelForge)"
         shell: bash
         run: |
           set -euo pipefail
@@ -31,62 +31,43 @@ jobs:
             exit 1
           fi
 
-          wait_for_crate() {
+          # crates.io rejects clients without a descriptive User-Agent.
+          export CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse
+
+          crate_exists() {
             local name="$1"
             local ver="$2"
-            echo "Waiting for ${name}@${ver} on crates.io index..."
-            for i in $(seq 1 40); do
-              if cargo search "$name" --limit 10 2>/dev/null | grep -E "^${name} = " | head -1 | grep -q "${ver}"; then
-                echo "Found ${name} ${ver}"
-                return 0
-              fi
-              # Fallback: sparse index can lag; also try curl
-              if curl -fsS "https://crates.io/api/v1/crates/${name}/${ver}" >/dev/null 2>&1; then
-                echo "API sees ${name} ${ver}"
-                # still give the index a moment
-                sleep 15
-                return 0
-              fi
-              sleep 15
-            done
-            echo "Timed out waiting for ${name}@${ver}"
-            return 1
+            curl -fsS -A "reelforge-publish" \
+              "https://crates.io/api/v1/crates/${name}/${ver}" >/dev/null 2>&1
           }
 
           publish_one() {
             local pkg="$1"
             echo "==== Publishing ${pkg} ===="
-            cargo publish -p "${pkg}" --locked 2>&1 || {
-              # Already published is OK on re-runs
-              if cargo search "${pkg}" --limit 5 2>/dev/null | grep -q "^${pkg} = "; then
-                echo "${pkg} already on crates.io; continuing"
-                return 0
-              fi
-              return 1
-            }
+            if crate_exists "${pkg}" "0.1.0"; then
+              echo "${pkg} 0.1.0 already on crates.io; skip"
+              return 0
+            fi
+            # cargo publish waits until the crate is available after upload.
+            cargo publish -p "${pkg}" --locked
+            # Extra settle time for dependents' index resolution.
+            sleep 25
           }
 
-          VER="0.1.0"
-
           publish_one reelforge-core
-          wait_for_crate reelforge-core "$VER"
-
           publish_one reelforge-compose
-          wait_for_crate reelforge-compose "$VER"
-
           publish_one reelforge-fx
-          wait_for_crate reelforge-fx "$VER"
-
           publish_one reelforge-io
-          wait_for_crate reelforge-io "$VER"
-
           publish_one reelforge-text
-          wait_for_crate reelforge-text "$VER"
-
           publish_one reelforge
-          wait_for_crate reelforge "$VER"
-
           publish_one reelforge-cli
-          wait_for_crate reelforge-cli "$VER"
 
           echo "All crates published."
+          for c in reelforge-core reelforge-compose reelforge-fx reelforge-io reelforge-text reelforge reelforge-cli; do
+            if crate_exists "$c" "0.1.0"; then
+              echo "OK $c 0.1.0"
+            else
+              echo "MISSING $c 0.1.0"
+              exit 1
+            fi
+          done
