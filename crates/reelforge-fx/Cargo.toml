@@ -1,0 +1,25 @@
+[package]
+name = "reelforge-fx"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+description = "Video and audio effects for ReelForge"
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+reelforge-core = { workspace = true }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+reelforge-compose = { workspace = true }
+
+[[bench]]
+name = "frame_ops"
+harness = false
+
+[lints]
+workspace = true

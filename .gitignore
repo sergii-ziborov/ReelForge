@@ -1,0 +1,17 @@
+/target/
+**/*.rs.bk
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+/docs/private/
+*.mp4
+*.webm
+*.mov
+*.mkv
+*.wav
+*.mp3
+*.gif
+!media/.gitkeep

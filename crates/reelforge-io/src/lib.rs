@@ -1,0 +1,23 @@
+//! Decode and encode media containers and streams for `ReelForge`.
+//!
+//! File I/O uses the host `ffmpeg` / `ffprobe` CLI — no link-time `libav`
+//! dependency. Set `REELFORGE_FFMPEG` / `REELFORGE_FFPROBE` or put the tools on
+//! `PATH`.
+
+mod audio_file;
+mod error;
+mod ffmpeg;
+mod filtergraph;
+mod image_clip;
+mod options;
+mod video_file;
+mod write;
+
+pub use audio_file::{AudioFileClip, layout_for_channels, open_audio};
+pub use error::{IoError, Result};
+pub use ffmpeg::{AudioProbe, FfmpegTools, VideoProbe, ffmpeg_available, frame_to_rgb24};
+pub use filtergraph::{FilterGraph, FilterOp, run_filtergraph};
+pub use image_clip::ImageClip;
+pub use options::{OpenAudioOptions, OpenVideoOptions, WriteVideoOptions};
+pub use video_file::{VideoFileClip, open_video};
+pub use write::{write_duration, write_video};

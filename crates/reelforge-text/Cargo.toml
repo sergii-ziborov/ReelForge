@@ -1,0 +1,20 @@
+[package]
+name = "reelforge-text"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+description = "Text and title clips for ReelForge"
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+fontdue = { workspace = true }
+reelforge-compose = { workspace = true }
+reelforge-core = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

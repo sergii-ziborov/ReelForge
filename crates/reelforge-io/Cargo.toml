@@ -1,0 +1,24 @@
+[package]
+name = "reelforge-io"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+description = "Media decode and encode for ReelForge"
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+image = { workspace = true }
+reelforge-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true
