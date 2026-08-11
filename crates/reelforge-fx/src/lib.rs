@@ -59,7 +59,7 @@ pub use mirror::{MirrorX, MirrorY};
 pub use painting::Painting;
 pub use resize::Resize;
 pub use rotate::Rotate;
-pub use scale::{ResizeFilter, resize_bilinear};
+pub use scale::{ResizeFilter, resize_bicubic, resize_bilinear};
 pub use scroll::Scroll;
 pub use slide::{SlideIn, SlideOut, SlideSide};
 pub use speed::Speed;

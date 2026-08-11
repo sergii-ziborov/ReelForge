@@ -1,7 +1,7 @@
-//! Resize effect (nearest-neighbor or bilinear).
+//! Resize effect (nearest / bilinear / bicubic).
 
 use crate::raster::{resize_nearest, resolve_resize_size};
-use crate::scale::{ResizeFilter, resize_bilinear};
+use crate::scale::{ResizeFilter, resize_bicubic, resize_bilinear};
 use reelforge_core::{Duration, Frame, Result, Size, Time, VideoClip, VideoEffect};
 use std::sync::Arc;
 
@@ -78,6 +78,22 @@ impl Resize {
     pub const fn bilinear(self) -> Self {
         self.with_filter(ResizeFilter::Bilinear)
     }
+
+    /// Use Catmull–Rom bicubic sampling (highest quality path).
+    #[must_use]
+    pub const fn bicubic(self) -> Self {
+        self.with_filter(ResizeFilter::Bicubic)
+    }
+
+    /// Exact size with bicubic filtering.
+    #[must_use]
+    pub const fn to_bicubic(size: Size) -> Self {
+        Self {
+            width: Some(size.width),
+            height: Some(size.height),
+            filter: ResizeFilter::Bicubic,
+        }
+    }
 }
 
 impl VideoEffect for Resize {
@@ -115,6 +131,7 @@ impl VideoClip for ResizedVideo {
         match self.filter {
             ResizeFilter::Nearest => resize_nearest(&frame, self.target),
             ResizeFilter::Bilinear => resize_bilinear(&frame, self.target),
+            ResizeFilter::Bicubic => resize_bicubic(&frame, self.target),
         }
     }
 }

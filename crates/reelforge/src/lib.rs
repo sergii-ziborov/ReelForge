@@ -24,7 +24,7 @@ pub use reelforge_fx::{
     HeadBlur, Identity, InvertColors, Loop, LumContrast, Margin, MaskColor, MasksAnd, MasksOr,
     MirrorX, MirrorY, MultiplyColor, MultiplyStereoVolume, Painting, Resize, ResizeFilter, Rotate,
     Scroll, SlideIn, SlideOut, SlideSide, Speed, SuperSample, TimeMirror, TimeSymmetrize,
-    VolumeGain, resize_bilinear, validate_gain,
+    VolumeGain, resize_bicubic, resize_bilinear, validate_gain,
 };
 pub use reelforge_io::{
     AudioFileClip, FilterGraph, FilterOp, ImageClip, IoError, OpenAudioOptions, OpenVideoOptions,
@@ -53,7 +53,8 @@ pub mod prelude {
         VideoEffect, VideoFileClip, VolumeGain, WriteGifOptions, WriteVideoOptions,
         apply_audio_effects, apply_video_effects, burn_in_layers, composite_video,
         composite_video_with_background, concatenate_audio, concatenate_video, ffmpeg_available,
-        open_audio, open_video, parse_srt, resize_bilinear, run_filtergraph, subclip_audio,
+        open_audio, open_video, parse_srt, resize_bicubic, resize_bilinear, run_filtergraph,
+        subclip_audio,
         subclip_video, text_clip, validate_gain, write_av, write_gif, write_video,
     };
 }
