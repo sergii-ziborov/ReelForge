@@ -1,24 +1,40 @@
 //! File-backed video clips via the `FFmpeg` CLI.
 
+use crate::audio_file::AudioFileClip;
 use crate::error::{IoError, Result};
-use crate::ffmpeg::{FfmpegTools, decode_frame_rgb, probe_video};
-use crate::options::OpenVideoOptions;
+use crate::ffmpeg::{FfmpegTools, SequentialRgbDecoder, decode_frame_rgb, probe_video};
+use crate::options::{OpenAudioOptions, OpenVideoOptions};
 use reelforge_core::{CoreError, Duration, Frame, Size, Time, VideoClip};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 /// Video clip backed by a media file on disk.
 ///
-/// Frames are decoded on demand through `ffmpeg` (seek + single-frame extract).
-/// A one-frame cache reduces duplicate work for sequential writers.
-#[derive(Debug)]
+/// Random access uses single-frame seeks. Monotonic sequential access reuses a
+/// long-lived rawvideo pipe ([`SequentialRgbDecoder`]) — the fast path for
+/// ordered writers.
 pub struct VideoFileClip {
     path: PathBuf,
     size: Size,
     duration: Duration,
     fps: f64,
     tools: FfmpegTools,
+    /// Optional companion audio opened when `with_audio` is true.
+    audio: Option<AudioFileClip>,
     cache: Mutex<Option<(u64, Frame)>>,
+    seq: Mutex<Option<SequentialRgbDecoder>>,
+}
+
+impl std::fmt::Debug for VideoFileClip {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VideoFileClip")
+            .field("path", &self.path)
+            .field("size", &self.size)
+            .field("duration", &self.duration)
+            .field("fps", &self.fps)
+            .field("has_audio", &self.audio.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl VideoFileClip {
@@ -50,14 +66,21 @@ impl VideoFileClip {
         if !probe.duration.is_positive() {
             return Err(IoError::probe("video duration is zero"));
         }
-        let _ = options.with_audio; // reserved for multi-track open
+        let audio = if options.with_audio {
+            // Video-only containers are fine when audio open fails.
+            AudioFileClip::open_with(&OpenAudioOptions::new(options.path.clone())).ok()
+        } else {
+            None
+        };
         Ok(Self {
             path,
             size: probe.size,
             duration: probe.duration,
             fps: probe.fps,
             tools,
+            audio,
             cache: Mutex::new(None),
+            seq: Mutex::new(None),
         })
     }
 
@@ -71,6 +94,19 @@ impl VideoFileClip {
     #[must_use]
     pub fn source_fps(&self) -> f64 {
         self.fps
+    }
+
+    /// Attached audio track when open requested audio and the container has one.
+    #[must_use]
+    pub fn audio(&self) -> Option<&AudioFileClip> {
+        self.audio.as_ref()
+    }
+
+    /// Drop the sequential decoder (forces fresh stream on next sequential run).
+    pub fn reset_sequential(&self) {
+        if let Ok(mut g) = self.seq.lock() {
+            *g = None;
+        }
     }
 
     fn frame_index(&self, t: Time) -> u64 {
@@ -90,6 +126,23 @@ impl VideoFileClip {
                 idx as u64
             }
         }
+    }
+
+    fn decode_sequential(&self, index: u64) -> reelforge_core::Result<Frame> {
+        let mut guard = self
+            .seq
+            .lock()
+            .map_err(|_| CoreError::invalid_frame("sequential decoder lock poisoned"))?;
+        if guard.is_none() {
+            let dec = SequentialRgbDecoder::open(&self.tools, &self.path, self.size, self.fps)
+                .map_err(|e| CoreError::invalid_frame(format!("seq open: {e}")))?;
+            *guard = Some(dec);
+        }
+        let dec = guard
+            .as_mut()
+            .ok_or_else(|| CoreError::invalid_frame("seq decoder missing"))?;
+        dec.frame_at_index(index)
+            .map_err(|e| CoreError::invalid_frame(format!("seq decode: {e}")))
     }
 }
 
@@ -122,8 +175,14 @@ impl VideoClip for VideoFileClip {
             return Ok(frame.clone());
         }
 
-        let frame = decode_frame_rgb(&self.tools, &self.path, self.size, t)
-            .map_err(|e| CoreError::invalid_frame(format!("decode failed at {t}: {e}")))?;
+        // Prefer sequential pipe (handles restart on backward jumps); fall back to seek.
+        let frame = if let Ok(f) = self.decode_sequential(index) {
+            f
+        } else {
+            self.reset_sequential();
+            decode_frame_rgb(&self.tools, &self.path, self.size, t)
+                .map_err(|e| CoreError::invalid_frame(format!("decode failed at {t}: {e}")))?
+        };
 
         if let Ok(mut guard) = self.cache.lock() {
             *guard = Some((index, frame.clone()));
@@ -132,7 +191,7 @@ impl VideoClip for VideoFileClip {
     }
 }
 
-// Manual Clone: fresh cache per clone.
+// Manual Clone: fresh cache / decoder per clone.
 impl Clone for VideoFileClip {
     fn clone(&self) -> Self {
         Self {
@@ -141,7 +200,9 @@ impl Clone for VideoFileClip {
             duration: self.duration,
             fps: self.fps,
             tools: self.tools.clone(),
+            audio: self.audio.clone(),
             cache: Mutex::new(None),
+            seq: Mutex::new(None),
         }
     }
 }

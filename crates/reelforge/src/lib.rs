@@ -19,9 +19,11 @@ pub use reelforge_core::{
     apply_video_effects, subclip_audio, subclip_video,
 };
 pub use reelforge_fx::{
-    BlackAndWhite, Crop, CrossFadeIn, CrossFadeOut, EvenSize, FadeIn, FadeOut, Freeze, Identity,
-    InvertColors, Loop, Margin, MirrorX, MirrorY, MultiplyColor, Resize, ResizeFilter, Rotate,
-    Speed, TimeMirror, VolumeGain, resize_bilinear, validate_gain,
+    AudioFadeIn, AudioFadeOut, AudioNormalize, BlackAndWhite, Blink, Crop, CrossFadeIn,
+    CrossFadeOut, EvenSize, FadeIn, FadeOut, Freeze, GammaCorrection, Identity, InvertColors, Loop,
+    LumContrast, Margin, MaskColor, MirrorX, MirrorY, MultiplyColor, Resize, ResizeFilter, Rotate,
+    Scroll, SlideIn, SlideOut, SlideSide, Speed, TimeMirror, TimeSymmetrize, VolumeGain,
+    resize_bilinear, validate_gain,
 };
 pub use reelforge_io::{
     AudioFileClip, FilterGraph, FilterOp, ImageClip, IoError, OpenAudioOptions, OpenVideoOptions,
@@ -36,19 +38,20 @@ pub use reelforge_text::{
 /// Convenient imports for application code.
 pub mod prelude {
     pub use crate::{
-        Anchor, AudioBuffer, AudioClip, AudioEffect, AudioFileClip, AudioFormat, BITMAP_FONT,
-        BlackAndWhite, BurnInOptions, ClipId, ColorClip, ComposeError, CompositeLayer,
-        CompositeVideo, ConcatAudio, ConcatVideo, CoreError, Crop, CrossFadeIn, CrossFadeOut,
-        Duration, EvenSize, FadeIn, FadeOut, FilterGraph, FilterOp, Frame, FrameFormat, Freeze,
-        Identity, ImageClip, InvertColors, IoError, Loop, Margin, Mask, MirrorX, MirrorY,
+        Anchor, AudioBuffer, AudioClip, AudioEffect, AudioFadeIn, AudioFadeOut, AudioFileClip,
+        AudioFormat, AudioNormalize, BITMAP_FONT, BlackAndWhite, Blink, BurnInOptions, ClipId,
+        ColorClip, ComposeError, CompositeLayer, CompositeVideo, ConcatAudio, ConcatVideo,
+        CoreError, Crop, CrossFadeIn, CrossFadeOut, Duration, EvenSize, FadeIn, FadeOut,
+        FilterGraph, FilterOp, Frame, FrameFormat, Freeze, GammaCorrection, Identity, ImageClip,
+        InvertColors, IoError, Loop, LumContrast, Margin, Mask, MaskColor, MirrorX, MirrorY,
         MultiplyColor, OpenAudioOptions, OpenVideoOptions, Position, Resize, ResizeFilter, Rgb8,
-        Rgba8, Rotate, SampleLayout, SilenceClip, Size, Speed, SubtitleCue, TextClip,
-        TextClipOptions, TextError, Time, TimeMirror, TimeRange, TimedAudio, TimedVideo, VideoClip,
-        VideoEffect, VideoFileClip, VolumeGain, WriteVideoOptions, apply_audio_effects,
-        apply_video_effects, burn_in_layers, composite_video, composite_video_with_background,
-        concatenate_audio, concatenate_video, ffmpeg_available, open_audio, open_video, parse_srt,
-        resize_bilinear, run_filtergraph, subclip_audio, subclip_video, text_clip, validate_gain,
-        write_av, write_video,
+        Rgba8, Rotate, SampleLayout, Scroll, SilenceClip, Size, SlideIn, SlideOut, SlideSide,
+        Speed, SubtitleCue, TextClip, TextClipOptions, TextError, Time, TimeMirror, TimeRange,
+        TimeSymmetrize, TimedAudio, TimedVideo, VideoClip, VideoEffect, VideoFileClip, VolumeGain,
+        WriteVideoOptions, apply_audio_effects, apply_video_effects, burn_in_layers,
+        composite_video, composite_video_with_background, concatenate_audio, concatenate_video,
+        ffmpeg_available, open_audio, open_video, parse_srt, resize_bilinear, run_filtergraph,
+        subclip_audio, subclip_video, text_clip, validate_gain, write_av, write_video,
     };
 }
 

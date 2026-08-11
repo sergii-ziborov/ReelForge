@@ -7,7 +7,8 @@ Cut, concatenate, overlay, title, composite, and render media from code — a fl
 ## Features
 
 - **Clip graph** — timed video and audio sources, subclips, concat
-- **Effects** — crop, resize (bilinear default / nearest), rotate (90° steps or free angle), mirror, fades, color, loop, freeze, margin, speed, reverse
+- **Effects** — crop, resize (bilinear / nearest), rotate, mirror, fades, cross-fades, color, gamma, lum/contrast, blink, loop, freeze, margin, scroll, slide in/out, speed, reverse, time-symmetrize, chroma mask
+- **Audio FX** — volume gain, fade in/out, peak normalize
 - **Resolutions** — any size via `Size`; presets `HD_720`, `HD_1080`, `UHD_4K` (3840×2160), `UHD_8K` (7680×4320)
 - **Compositing** — layers, position anchors, opacity, masks, cross-fades
 - **Text & subtitles** — bitmap or TrueType titles; SRT parse and burn-in layers
