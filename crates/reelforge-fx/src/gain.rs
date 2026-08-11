@@ -24,14 +24,46 @@ impl AudioEffect for VolumeGain {
     fn apply(&self, clip: Arc<dyn AudioClip>) -> Result<Arc<dyn AudioClip>> {
         Ok(Arc::new(GainedAudio {
             inner: clip,
-            factor: self.factor,
+            left: self.factor,
+            right: self.factor,
+            stereo_split: false,
+        }))
+    }
+}
+
+/// Independent left/right gains for stereo (mono uses `left` only).
+#[derive(Debug, Clone, Copy)]
+pub struct MultiplyStereoVolume {
+    /// Left channel gain.
+    pub left: f32,
+    /// Right channel gain.
+    pub right: f32,
+}
+
+impl MultiplyStereoVolume {
+    /// Per-channel gains.
+    #[must_use]
+    pub const fn new(left: f32, right: f32) -> Self {
+        Self { left, right }
+    }
+}
+
+impl AudioEffect for MultiplyStereoVolume {
+    fn apply(&self, clip: Arc<dyn AudioClip>) -> Result<Arc<dyn AudioClip>> {
+        Ok(Arc::new(GainedAudio {
+            inner: clip,
+            left: self.left,
+            right: self.right,
+            stereo_split: true,
         }))
     }
 }
 
 struct GainedAudio {
     inner: Arc<dyn AudioClip>,
-    factor: f32,
+    left: f32,
+    right: f32,
+    stereo_split: bool,
 }
 
 impl AudioClip for GainedAudio {
@@ -45,7 +77,20 @@ impl AudioClip for GainedAudio {
 
     fn samples_at(&self, t: Time, frame_count: usize) -> Result<AudioBuffer> {
         let mut buf = self.inner.samples_at(t, frame_count)?;
-        buf.apply_gain(self.factor);
+        if !self.stereo_split {
+            buf.apply_gain(self.left);
+            return Ok(buf);
+        }
+        let ch = buf.format().channels() as usize;
+        let samples = buf.samples_mut();
+        if ch >= 2 {
+            for frame in samples.chunks_exact_mut(ch) {
+                frame[0] *= self.left;
+                frame[1] *= self.right;
+            }
+        } else {
+            buf.apply_gain(self.left);
+        }
         Ok(buf)
     }
 }

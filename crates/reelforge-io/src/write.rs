@@ -1,8 +1,10 @@
 //! Write video (and optional audio) clips to container files via `FFmpeg`.
 
 use crate::error::{IoError, Result};
-use crate::ffmpeg::{FfmpegTools, encode_rawvideo_h264, frame_count_for, mux_video_audio};
-use crate::options::WriteVideoOptions;
+use crate::ffmpeg::{
+    FfmpegTools, encode_rawvideo_gif, encode_rawvideo_h264, frame_count_for, mux_video_audio,
+};
+use crate::options::{WriteGifOptions, WriteVideoOptions};
 use reelforge_core::{AudioClip, Duration, Size, Time, VideoClip};
 use std::path::{Path, PathBuf};
 
@@ -32,6 +34,61 @@ pub fn write_av(
     options: &WriteVideoOptions,
 ) -> Result<()> {
     write_video_inner(video, options, Some(audio))
+}
+
+/// Encode `clip` to an animated GIF via host `ffmpeg` (palettegen/paletteuse).
+///
+/// # Errors
+///
+/// Returns tool, timing, size, or process errors.
+pub fn write_gif(clip: &dyn VideoClip, options: &WriteGifOptions) -> Result<()> {
+    if !(options.fps.is_finite() && options.fps > 0.0) {
+        return Err(IoError::message(format!("invalid fps {}", options.fps)));
+    }
+    let duration = options.duration.unwrap_or_else(|| clip.duration());
+    if !duration.is_positive() {
+        return Err(IoError::message("gif duration must be > 0"));
+    }
+    let size = options.size.unwrap_or_else(|| clip.size());
+    size.require_positive().map_err(IoError::from)?;
+    if options.size.is_none() {
+        // keep clip size
+    } else if clip.size().width < size.width || clip.size().height < size.height {
+        return Err(IoError::message(
+            "cannot expand frame size during gif write; resize the clip first",
+        ));
+    }
+
+    let tools = FfmpegTools::discover()?;
+    let path = Path::new(&options.path);
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+        && !parent.exists()
+    {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| IoError::message(format!("create output dir: {e}")))?;
+    }
+
+    let n = frame_count_for(duration, options.fps);
+    if n == 0 {
+        return Err(IoError::message("no frames to write"));
+    }
+    let fps = options.fps;
+    let frames = (0..n).map(move |i| {
+        #[allow(clippy::cast_precision_loss)]
+        let t = Time::from_secs(i as f64 / fps);
+        let t = if t.as_secs() >= duration.as_secs() {
+            Time::from_secs((duration.as_secs() - 1.0 / fps).max(0.0))
+        } else {
+            t
+        };
+        let mut frame = clip.frame_at(t)?;
+        if frame.size() != size {
+            frame = crop_top_left(&frame, size).map_err(IoError::from)?;
+        }
+        Ok(frame)
+    });
+    encode_rawvideo_gif(&tools, path, size, fps, frames)
 }
 
 fn write_video_inner(

@@ -10,6 +10,7 @@ pub use helpers::{frame_count_for, frame_to_rgb24};
 pub use path::{FfmpegTools, ffmpeg_available};
 pub use probe::{AudioProbe, VideoProbe, probe_audio, probe_video};
 pub use process::{
-    decode_frame_rgb, decode_pcm_f32le, default_pcm_format, encode_rawvideo_h264, mux_video_audio,
+    decode_frame_rgb, decode_pcm_f32le, default_pcm_format, encode_rawvideo_gif,
+    encode_rawvideo_h264, mux_video_audio,
 };
 pub use stream::SequentialRgbDecoder;

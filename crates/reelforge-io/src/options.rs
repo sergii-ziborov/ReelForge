@@ -95,6 +95,39 @@ impl OpenVideoOptions {
     }
 }
 
+/// Options for writing an animated GIF.
+#[derive(Debug, Clone)]
+pub struct WriteGifOptions {
+    /// Output path (UTF-8), typically ending in `.gif`.
+    pub path: String,
+    /// Frames per second.
+    pub fps: f64,
+    /// Optional size override (must fit source if smaller).
+    pub size: Option<Size>,
+    /// Optional max duration.
+    pub duration: Option<Duration>,
+}
+
+impl WriteGifOptions {
+    /// Write GIF to `path` at `fps`.
+    #[must_use]
+    pub fn new(path: impl Into<String>, fps: f64) -> Self {
+        Self {
+            path: path.into(),
+            fps,
+            size: None,
+            duration: None,
+        }
+    }
+
+    /// Limit duration.
+    #[must_use]
+    pub fn with_duration(mut self, duration: Duration) -> Self {
+        self.duration = Some(duration);
+        self
+    }
+}
+
 /// Options for opening an audio file.
 #[derive(Debug, Clone)]
 pub struct OpenAudioOptions {

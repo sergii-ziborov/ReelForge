@@ -215,6 +215,97 @@ pub fn encode_rawvideo_h264(
     Ok(())
 }
 
+/// Encode RGB24 frames to an animated GIF via `ffmpeg` (`gif` codec + palette).
+///
+/// # Errors
+///
+/// Returns process errors when encode fails.
+pub fn encode_rawvideo_gif(
+    tools: &FfmpegTools,
+    path: &Path,
+    size: Size,
+    fps: f64,
+    mut frames: impl Iterator<Item = Result<Frame>>,
+) -> Result<()> {
+    if !(fps.is_finite() && fps > 0.0) {
+        return Err(IoError::message(format!("invalid fps {fps}")));
+    }
+    size.require_positive().map_err(IoError::from)?;
+    let size_arg = format!("{}x{}", size.width, size.height);
+    let fps_arg = format!("{fps}");
+    let expected = usize::try_from(size.pixel_count().saturating_mul(3))
+        .map_err(|_| IoError::message("frame size exceeds usize"))?;
+
+    // Two-pass palette in one filtergraph: palettegen + paletteuse.
+    let mut cmd = Command::new(&tools.ffmpeg);
+    cmd.args([
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "rgb24",
+        "-s",
+        &size_arg,
+        "-r",
+        &fps_arg,
+        "-i",
+        "pipe:0",
+        "-an",
+        "-filter_complex",
+        "[0:v]split[a][b];[a]palettegen=stats_mode=diff[p];[b][p]paletteuse=dither=bayer",
+        "-loop",
+        "0",
+    ]);
+    cmd.arg(path);
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| IoError::process(format!("ffmpeg gif spawn failed: {e}")))?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| IoError::process("ffmpeg gif stdin missing"))?;
+
+    let write_result = (|| -> Result<()> {
+        for frame in frames.by_ref() {
+            let frame = frame?;
+            if frame.size() != size {
+                return Err(IoError::message(format!(
+                    "frame size {:?} does not match output {size:?}",
+                    frame.size()
+                )));
+            }
+            let rgb = frame_to_rgb24(&frame).map_err(IoError::from)?;
+            if rgb.len() != expected {
+                return Err(IoError::message(format!(
+                    "unexpected rgb length {}, expected {expected}",
+                    rgb.len()
+                )));
+            }
+            stdin
+                .write_all(&rgb)
+                .map_err(|e| IoError::process(format!("write to ffmpeg gif stdin failed: {e}")))?;
+        }
+        Ok(())
+    })();
+    drop(stdin);
+    let output = child
+        .wait_with_output()
+        .map_err(|e| IoError::process(format!("ffmpeg gif wait failed: {e}")))?;
+    write_result?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(IoError::process(format!("ffmpeg gif failed: {stderr}")));
+    }
+    Ok(())
+}
+
 /// Mux a video file with a raw `f32le` PCM audio file into `out_path`.
 ///
 /// # Errors

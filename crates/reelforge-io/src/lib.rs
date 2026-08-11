@@ -18,6 +18,6 @@ pub use error::{IoError, Result};
 pub use ffmpeg::{AudioProbe, FfmpegTools, VideoProbe, ffmpeg_available, frame_to_rgb24};
 pub use filtergraph::{FilterGraph, FilterOp, run_filtergraph};
 pub use image_clip::ImageClip;
-pub use options::{OpenAudioOptions, OpenVideoOptions, WriteVideoOptions};
+pub use options::{OpenAudioOptions, OpenVideoOptions, WriteGifOptions, WriteVideoOptions};
 pub use video_file::{VideoFileClip, open_video};
-pub use write::{write_av, write_duration, write_video};
+pub use write::{write_av, write_duration, write_gif, write_video};
