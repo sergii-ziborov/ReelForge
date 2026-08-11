@@ -16,6 +16,7 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/sergii-ziborov/ReelForge"
+homepage = "https://github.com/sergii-ziborov/ReelForge"
 rust-version = "1.97"
 authors = ["Sergii Ziborov"]
 description = "Programmatic video composition and editing for Rust"
