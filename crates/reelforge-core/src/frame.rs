@@ -82,6 +82,8 @@ impl Frame {
 
     /// Solid RGB fill (stored as [`FrameFormat::Rgb8`]).
     ///
+    /// Fills via a bulk buffer write (suitable for 4K/8K allocations).
+    ///
     /// # Errors
     ///
     /// Returns [`CoreError::InvalidSize`] or [`CoreError::InvalidFrame`] when
@@ -89,15 +91,18 @@ impl Frame {
     pub fn solid_rgb(size: Size, color: Rgb8) -> Result<Self> {
         size.require_positive()?;
         let pixels = pixel_len(size)?;
-        let mut data = Vec::with_capacity(
-            pixels
-                .checked_mul(3)
-                .ok_or_else(|| CoreError::invalid_frame("frame byte length overflow"))?,
-        );
-        for _ in 0..pixels {
-            data.push(color.r);
-            data.push(color.g);
-            data.push(color.b);
+        let len = pixels
+            .checked_mul(3)
+            .ok_or_else(|| CoreError::invalid_frame("frame byte length overflow"))?;
+        let mut data = vec![0_u8; len];
+        if color.r == color.g && color.g == color.b {
+            data.fill(color.r);
+        } else {
+            for px in data.chunks_exact_mut(3) {
+                px[0] = color.r;
+                px[1] = color.g;
+                px[2] = color.b;
+            }
         }
         Self::from_raw(size, FrameFormat::Rgb8, data)
     }
@@ -111,16 +116,19 @@ impl Frame {
     pub fn solid_rgba(size: Size, color: Rgba8) -> Result<Self> {
         size.require_positive()?;
         let pixels = pixel_len(size)?;
-        let mut data = Vec::with_capacity(
-            pixels
-                .checked_mul(4)
-                .ok_or_else(|| CoreError::invalid_frame("frame byte length overflow"))?,
-        );
-        for _ in 0..pixels {
-            data.push(color.r);
-            data.push(color.g);
-            data.push(color.b);
-            data.push(color.a);
+        let len = pixels
+            .checked_mul(4)
+            .ok_or_else(|| CoreError::invalid_frame("frame byte length overflow"))?;
+        let mut data = vec![0_u8; len];
+        if color.r == color.g && color.g == color.b && color.a == color.r {
+            data.fill(color.r);
+        } else {
+            for px in data.chunks_exact_mut(4) {
+                px[0] = color.r;
+                px[1] = color.g;
+                px[2] = color.b;
+                px[3] = color.a;
+            }
         }
         Self::from_raw(size, FrameFormat::Rgba8, data)
     }

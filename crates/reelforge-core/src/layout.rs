@@ -12,6 +12,19 @@ pub struct Size {
 }
 
 impl Size {
+    /// 720p HD — 1280×720.
+    pub const HD_720: Self = Self::new(1280, 720);
+    /// 1080p Full HD — 1920×1080.
+    pub const HD_1080: Self = Self::new(1920, 1080);
+    /// 1440p QHD — 2560×1440.
+    pub const QHD: Self = Self::new(2560, 1440);
+    /// 4K UHD — 3840×2160.
+    pub const UHD_4K: Self = Self::new(3840, 2160);
+    /// DCI 4K cinema — 4096×2160.
+    pub const DCI_4K: Self = Self::new(4096, 2160);
+    /// 8K UHD — 7680×4320.
+    pub const UHD_8K: Self = Self::new(7680, 4320);
+
     /// Construct a size.
     #[must_use]
     pub const fn new(width: u32, height: u32) -> Self {
@@ -22,6 +35,12 @@ impl Size {
     #[must_use]
     pub const fn is_positive(self) -> bool {
         self.width > 0 && self.height > 0
+    }
+
+    /// Approximate bytes for a packed RGB8 frame (`width * height * 3`).
+    #[must_use]
+    pub const fn rgb8_byte_len(self) -> Option<u64> {
+        self.pixel_count().checked_mul(3)
     }
 
     /// Validate that both dimensions are non-zero.
@@ -172,9 +191,19 @@ mod tests {
 
     #[test]
     fn center_resolve() {
-        let parent = Size::new(1920, 1080);
+        let parent = Size::HD_1080;
         let child = Size::new(200, 100);
         let (x, y) = Position::center().resolve(parent, child);
         assert_eq!((x, y), (860, 490));
+    }
+
+    #[test]
+    fn uhd_presets() {
+        assert_eq!(Size::UHD_4K, Size::new(3840, 2160));
+        assert_eq!(Size::UHD_8K, Size::new(7680, 4320));
+        assert!(Size::UHD_4K.is_even());
+        assert!(Size::UHD_8K.is_even());
+        assert_eq!(Size::UHD_4K.rgb8_byte_len(), Some(3840 * 2160 * 3));
+        assert_eq!(Size::UHD_8K.rgb8_byte_len(), Some(7680 * 4320 * 3));
     }
 }

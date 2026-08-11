@@ -46,10 +46,27 @@ def main() -> None:
         frame = solid.get_frame(0.0)
         return frame[0, 0, 0]
 
+    # 4K chain: crop -> 1080p -> fade
+    base4 = ColorClip(size=(3840, 2160), color=(40, 80, 160), duration=5)
+    chain4 = base4.with_effects(
+        [Crop(x1=120, y1=60, width=3200, height=1800), Resize((1920, 1080)), FadeIn(0.5)]
+    )
+
+    def chain4_frame():
+        return chain4.get_frame(0.25).shape
+
+    # 8K solid sample
+    solid8 = ColorClip(size=(7680, 4320), color=(40, 80, 160), duration=1)
+
+    def solid8_frame():
+        return solid8.get_frame(0.0)[0, 0, 0]
+
     print("MoviePy frame-graph benches")
     timed("720p_chain_frame_at", chain_frame)
     timed("composite_two_layers_frame_at", comp_frame)
     timed("1080p_color_frame", solid_frame)
+    timed("4k_chain_to_1080_frame_at", chain4_frame, loops=20)
+    timed("8k_color_frame", solid8_frame, loops=20)
 
     chain.close()
     comp.close()
@@ -57,6 +74,9 @@ def main() -> None:
     base.close()
     a.close()
     b.close()
+    chain4.close()
+    base4.close()
+    solid8.close()
 
 
 if __name__ == "__main__":

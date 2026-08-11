@@ -8,6 +8,7 @@ Cut, concatenate, overlay, title, composite, and render media from code — a fl
 
 - **Clip graph** — timed video and audio sources, subclips, concat
 - **Effects** — crop, resize, rotate (90° steps or free angle), mirror, fades, color, loop, freeze, margin, speed, reverse
+- **Resolutions** — any even-friendly size via `Size`; presets `HD_720`, `HD_1080`, `UHD_4K` (3840×2160), `UHD_8K` (7680×4320)
 - **Compositing** — layers, position anchors, opacity, masks, cross-fades
 - **Text & subtitles** — bitmap or TrueType titles; SRT parse and burn-in layers
 - **I/O** — open/write media via host **ffmpeg** / **ffprobe**; `write_video` / `write_av` (audio mux); filtergraph fast path for simple transforms
@@ -71,9 +72,13 @@ Frame-graph microbenchmarks on the same host (sample a transformed frame; not fu
 
 | Workload | ReelForge | MoviePy 2.x | Speedup |
 |----------|-----------|-------------|---------|
-| 720p crop→resize→fade→B&W `frame_at` | **~2.1–2.4 ms** | ~8.3 ms | **~3.5–4×** |
-| Two-layer composite (640×360) | **~5.7–6.3 ms** | ~30 ms | **~5×** |
-| 1080p solid color `frame_at` | **~26 ns** (shared buffer) | ~10 µs | **~380×** |
+| 720p crop→resize→fade→B&W `frame_at` | **~2–8 ms** | ~8–17 ms | typically **≥2×** |
+| Two-layer composite (640×360) | **~6–8 ms** | ~23–30 ms | **~3–5×** |
+| 1080p / 4K / 8K solid `frame_at` | **~30–60 ns** (shared buffer) | ~10–14 µs | **~200–400×** |
+| 4K crop→1080 fade chain | **~25–40 ms** | ~163 ms | **~4–6×** |
+| 8K crop→1080 fade chain | **~40–60 ms** | — | host RAM limited |
+
+UHD is first-class (`Size::UHD_4K` / `Size::UHD_8K`): RGB8 4K ≈ 25 MiB/frame, 8K ≈ 95 MiB/frame — limited by RAM and host FFmpeg, not by a hard API cap.
 
 ReelForge: `cargo bench -p reelforge-fx --bench frame_ops`. MoviePy: `python scripts/bench_moviepy_frames.py`. Numbers vary by machine; re-run locally.
 
