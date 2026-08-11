@@ -14,6 +14,7 @@ mod mirror;
 mod raster;
 mod resize;
 mod rotate;
+mod scale;
 mod speed;
 mod time_mirror;
 
@@ -30,6 +31,7 @@ pub use margin::Margin;
 pub use mirror::{MirrorX, MirrorY};
 pub use resize::Resize;
 pub use rotate::Rotate;
+pub use scale::{ResizeFilter, resize_bilinear};
 pub use speed::Speed;
 pub use time_mirror::TimeMirror;
 

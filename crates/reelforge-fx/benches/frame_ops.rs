@@ -6,7 +6,7 @@
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use reelforge_compose::{CompositeLayer, CompositeVideo};
 use reelforge_core::{ColorClip, Duration, Position, Rgb8, Size, Time, VideoClip, VideoEffect};
-use reelforge_fx::{BlackAndWhite, Crop, FadeIn, Resize};
+use reelforge_fx::{BlackAndWhite, Crop, FadeIn, Resize, ResizeFilter};
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
 
@@ -20,9 +20,10 @@ fn chain(
     base: Arc<dyn VideoClip>,
     crop: (u32, u32, u32, u32),
     target: Size,
+    filter: ResizeFilter,
 ) -> Arc<dyn VideoClip> {
     let cropped = Crop::new(crop.0, crop.1, crop.2, crop.3).apply(base).unwrap();
-    let resized = Resize::to(target).apply(cropped).unwrap();
+    let resized = Resize::to(target).with_filter(filter).apply(cropped).unwrap();
     let faded = FadeIn::new(Duration::from_secs(0.5)).apply(resized).unwrap();
     BlackAndWhite.apply(faded).unwrap()
 }
@@ -36,10 +37,24 @@ fn bench_frame_graph_hd(c: &mut Criterion) {
         sample_clip(Size::HD_720, 5.0),
         (100, 50, 960, 540),
         Size::new(640, 360),
+        ResizeFilter::Nearest,
     );
     g.bench_function("720p_chain_frame_at", |b| {
         b.iter(|| {
             let f = chain_720.frame_at(Time::from_secs(0.25)).unwrap();
+            black_box(f.data().len())
+        });
+    });
+
+    let chain_720_bi = chain(
+        sample_clip(Size::HD_720, 5.0),
+        (100, 50, 960, 540),
+        Size::new(640, 360),
+        ResizeFilter::Bilinear,
+    );
+    g.bench_function("720p_chain_bilinear_frame_at", |b| {
+        b.iter(|| {
+            let f = chain_720_bi.frame_at(Time::from_secs(0.25)).unwrap();
             black_box(f.data().len())
         });
     });
@@ -66,16 +81,32 @@ fn bench_frame_graph_uhd(c: &mut Criterion) {
     g.measurement_time(StdDuration::from_secs(4));
     g.sample_size(20);
 
-    // 4K crop → 1080p resize → fade → B&W
+    // 4K crop → 1080p resize → fade → B&W (nearest speed path)
     {
         let chain_4k = chain(
             sample_clip(Size::UHD_4K, 5.0),
             (120, 60, 3200, 1800),
             Size::HD_1080,
+            ResizeFilter::Nearest,
         );
         g.bench_function("4k_chain_to_1080_frame_at", |b| {
             b.iter(|| {
                 let f = chain_4k.frame_at(Time::from_secs(0.25)).unwrap();
+                black_box(f.data().len())
+            });
+        });
+    }
+
+    {
+        let chain_4k_bi = chain(
+            sample_clip(Size::UHD_4K, 5.0),
+            (120, 60, 3200, 1800),
+            Size::HD_1080,
+            ResizeFilter::Bilinear,
+        );
+        g.bench_function("4k_chain_to_1080_bilinear_frame_at", |b| {
+            b.iter(|| {
+                let f = chain_4k_bi.frame_at(Time::from_secs(0.25)).unwrap();
                 black_box(f.data().len())
             });
         });
@@ -87,6 +118,7 @@ fn bench_frame_graph_uhd(c: &mut Criterion) {
             sample_clip(Size::UHD_4K, 5.0),
             (40, 20, 3760, 2120),
             Size::new(3200, 1800),
+            ResizeFilter::Nearest,
         );
         g.bench_function("4k_chain_near_full_frame_at", |b| {
             b.iter(|| {
@@ -102,6 +134,7 @@ fn bench_frame_graph_uhd(c: &mut Criterion) {
             sample_clip(Size::UHD_8K, 5.0),
             (200, 100, 6400, 3600),
             Size::HD_1080,
+            ResizeFilter::Nearest,
         );
         g.bench_function("8k_chain_to_1080_frame_at", |b| {
             b.iter(|| {

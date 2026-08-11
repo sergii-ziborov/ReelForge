@@ -7,7 +7,7 @@ Cut, concatenate, overlay, title, composite, and render media from code — a fl
 ## Features
 
 - **Clip graph** — timed video and audio sources, subclips, concat
-- **Effects** — crop, resize, rotate (90° steps or free angle), mirror, fades, color, loop, freeze, margin, speed, reverse
+- **Effects** — crop, resize (**bilinear** default / nearest), rotate (90° steps or free angle), mirror, fades, color, loop, freeze, margin, speed, reverse
 - **Resolutions** — any even-friendly size via `Size`; presets `HD_720`, `HD_1080`, `UHD_4K` (3840×2160), `UHD_8K` (7680×4320)
 - **Compositing** — layers, position anchors, opacity, masks, cross-fades
 - **Text & subtitles** — bitmap or TrueType titles; SRT parse and burn-in layers
@@ -87,6 +87,10 @@ Simple file transforms can stay in FFmpeg via `run_filtergraph` / `reelforge cut
 ```rust
 // Free-angle rotate (canvas size unchanged)
 let spun = Rotate::degrees(33.0).apply(clip)?;
+
+// Resize: bilinear by default; nearest for speed
+let hq = Resize::to(Size::HD_1080).apply(clip.clone())?;
+let fast = Resize::to_nearest(Size::HD_720).apply(clip)?;
 
 // Video + audio mux
 write_av(&video, &audio, &WriteVideoOptions::new("out.mp4", 24.0))?;
