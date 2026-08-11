@@ -1,11 +1,11 @@
-//! Orthogonal rotate effects.
+//! Orthogonal and free-angle rotate effects.
 
-use crate::raster::{rotate_90_cw, rotate_180, rotate_270_cw};
+use crate::raster::{rotate_180, rotate_270_cw, rotate_90_cw, rotate_degrees};
 use reelforge_core::{Duration, Frame, Result, Size, Time, VideoClip, VideoEffect};
 use std::sync::Arc;
 
-/// Multiples of 90° clockwise.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Clockwise rotation: multiples of 90° or an arbitrary angle in degrees.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Rotate {
     /// 90° clockwise.
     Cw90,
@@ -13,6 +13,8 @@ pub enum Rotate {
     Cw180,
     /// 270° clockwise (90° counter-clockwise).
     Cw270,
+    /// Arbitrary clockwise degrees (canvas size unchanged; exterior filled black).
+    Degrees(f32),
 }
 
 impl Rotate {
@@ -32,6 +34,12 @@ impl Rotate {
     #[must_use]
     pub const fn cw270() -> Self {
         Self::Cw270
+    }
+
+    /// Free rotation by `degrees` clockwise (nearest-neighbor sample).
+    #[must_use]
+    pub const fn degrees(degrees: f32) -> Self {
+        Self::Degrees(degrees)
     }
 }
 
@@ -57,7 +65,7 @@ impl VideoClip for RotatedVideo {
     fn size(&self) -> Size {
         let s = self.inner.size();
         match self.rotate {
-            Rotate::Cw180 => s,
+            Rotate::Cw180 | Rotate::Degrees(_) => s,
             Rotate::Cw90 | Rotate::Cw270 => Size::new(s.height, s.width),
         }
     }
@@ -72,6 +80,7 @@ impl VideoClip for RotatedVideo {
             Rotate::Cw90 => rotate_90_cw(&frame),
             Rotate::Cw180 => rotate_180(&frame),
             Rotate::Cw270 => rotate_270_cw(&frame),
+            Rotate::Degrees(d) => rotate_degrees(&frame, d),
         }
     }
 }
@@ -90,5 +99,18 @@ mod tests {
         ));
         let out = Rotate::cw90().apply(clip).unwrap();
         assert_eq!(out.size(), Size::new(2, 6));
+    }
+
+    #[test]
+    fn free_rotate_keeps_size() {
+        let clip: Arc<dyn VideoClip> = Arc::new(ColorClip::new(
+            Size::new(8, 6),
+            Rgb8::BLUE,
+            Duration::from_secs(0.5),
+        ));
+        let out = Rotate::degrees(45.0).apply(clip).unwrap();
+        assert_eq!(out.size(), Size::new(8, 6));
+        let f = out.frame_at(Time::ZERO).unwrap();
+        assert_eq!(f.size(), Size::new(8, 6));
     }
 }

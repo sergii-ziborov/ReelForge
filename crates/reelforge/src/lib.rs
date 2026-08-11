@@ -26,7 +26,7 @@ pub use reelforge_fx::{
 pub use reelforge_io::{
     AudioFileClip, FilterGraph, FilterOp, ImageClip, IoError, OpenAudioOptions, OpenVideoOptions,
     VideoFileClip, WriteVideoOptions, ffmpeg_available, open_audio, open_video, run_filtergraph,
-    write_video,
+    write_av, write_video,
 };
 pub use reelforge_text::{
     BITMAP_FONT, BurnInOptions, SubtitleCue, TextClip, TextClipOptions, TextError, burn_in_layers,
@@ -47,7 +47,7 @@ pub mod prelude {
         VolumeGain, WriteVideoOptions, apply_audio_effects, apply_video_effects, burn_in_layers,
         composite_video, composite_video_with_background, concatenate_audio, concatenate_video,
         ffmpeg_available, open_audio, open_video, parse_srt, run_filtergraph, subclip_audio,
-        subclip_video, text_clip, validate_gain, write_video,
+        subclip_video, text_clip, validate_gain, write_av, write_video,
     };
 }
 

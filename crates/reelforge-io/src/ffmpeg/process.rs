@@ -215,6 +215,61 @@ pub fn encode_rawvideo_h264(
     Ok(())
 }
 
+/// Mux a video file with a raw `f32le` PCM audio file into `out_path`.
+///
+/// # Errors
+///
+/// Returns process errors when `ffmpeg` fails.
+pub fn mux_video_audio(
+    tools: &FfmpegTools,
+    video_path: &Path,
+    pcm_path: &Path,
+    out_path: &Path,
+    audio_codec: &str,
+    sample_rate: u32,
+    channels: u16,
+) -> Result<()> {
+    if sample_rate == 0 || channels == 0 {
+        return Err(IoError::message("invalid audio format for mux"));
+    }
+    let rate = sample_rate.to_string();
+    let ch = channels.to_string();
+
+    let output = Command::new(&tools.ffmpeg)
+        .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
+        .arg(video_path)
+        .args([
+            "-f",
+            "f32le",
+            "-ar",
+            &rate,
+            "-ac",
+            &ch,
+            "-i",
+        ])
+        .arg(pcm_path)
+        .args([
+            "-c:v",
+            "copy",
+            "-c:a",
+            audio_codec,
+            "-shortest",
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0",
+        ])
+        .arg(out_path)
+        .output()
+        .map_err(|e| IoError::process(format!("ffmpeg mux spawn failed: {e}")))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(IoError::process(format!("ffmpeg mux failed: {stderr}")));
+    }
+    Ok(())
+}
+
 /// Build the default PCM format for audio decode.
 #[must_use]
 pub fn default_pcm_format(sample_rate: u32, stereo: bool) -> AudioFormat {

@@ -712,6 +712,7 @@ name = "reelforge-fx"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "rayon",
  "reelforge-compose",
  "reelforge-core",
 ]

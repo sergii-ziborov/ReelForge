@@ -1,6 +1,8 @@
 //! Color-domain video effects.
 
+use crate::raster::grayscale_in_place;
 use reelforge_core::{Duration, Frame, Result, Size, Time, VideoClip, VideoEffect};
+use rayon::prelude::*;
 use std::sync::Arc;
 
 /// Desaturate to grayscale (luma).
@@ -91,29 +93,26 @@ impl VideoClip for MappedVideo {
     clippy::cast_precision_loss
 )]
 fn map_pixels(frame: &mut Frame, kind: ColorKind) {
-    let bpp = frame.format().bytes_per_pixel();
-    for px in frame.data_mut().chunks_exact_mut(bpp) {
-        match kind {
-            ColorKind::Gray => {
-                let y = (0.299 * f32::from(px[0])
-                    + 0.587 * f32::from(px[1])
-                    + 0.114 * f32::from(px[2]))
-                .round()
-                .clamp(0.0, 255.0) as u8;
-                px[0] = y;
-                px[1] = y;
-                px[2] = y;
-            }
-            ColorKind::Invert => {
+    match kind {
+        ColorKind::Gray => grayscale_in_place(frame),
+        ColorKind::Invert => {
+            let bpp = frame.format().bytes_per_pixel();
+            frame.data_mut().par_chunks_mut(bpp).for_each(|px| {
                 px[0] = 255 - px[0];
                 px[1] = 255 - px[1];
                 px[2] = 255 - px[2];
-            }
-            ColorKind::Multiply(f) => {
+            });
+        }
+        ColorKind::Multiply(f) => {
+            // Fixed-point scale: factor * 256
+            let scale = (f.clamp(0.0, 16.0) * 256.0).round() as u32;
+            let bpp = frame.format().bytes_per_pixel();
+            frame.data_mut().par_chunks_mut(bpp).for_each(|px| {
                 for c in px.iter_mut().take(3) {
-                    *c = (f32::from(*c) * f).round().clamp(0.0, 255.0) as u8;
+                    let v = (u32::from(*c) * scale) >> 8;
+                    *c = v.min(255) as u8;
                 }
-            }
+            });
         }
     }
 }

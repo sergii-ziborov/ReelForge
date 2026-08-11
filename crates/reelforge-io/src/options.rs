@@ -52,6 +52,20 @@ impl WriteVideoOptions {
         self.crf = Some(crf);
         self
     }
+
+    /// Override audio codec (used by [`crate::write_av`]).
+    #[must_use]
+    pub fn with_audio_codec(mut self, codec: impl Into<String>) -> Self {
+        self.audio_codec = Some(codec.into());
+        self
+    }
+
+    /// Limit written duration.
+    #[must_use]
+    pub fn with_duration(mut self, duration: Duration) -> Self {
+        self.duration = Some(duration);
+        self
+    }
 }
 
 /// Options for opening a video file.

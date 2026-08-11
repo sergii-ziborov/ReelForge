@@ -102,13 +102,14 @@ impl AudioClip for SilenceClip {
     }
 
     fn samples_at(&self, t: Time, frame_count: usize) -> Result<AudioBuffer> {
-        if !self.contains(t) && frame_count > 0 {
-            if t.as_secs() < 0.0 || t.as_secs() >= self.duration.as_secs() {
-                return Err(CoreError::TimeOutOfRange {
-                    time: t,
-                    range: (Time::ZERO, Time::from_secs(self.duration.as_secs())),
-                });
-            }
+        if !self.contains(t)
+            && frame_count > 0
+            && (t.as_secs() < 0.0 || t.as_secs() >= self.duration.as_secs())
+        {
+            return Err(CoreError::TimeOutOfRange {
+                time: t,
+                range: (Time::ZERO, Time::from_secs(self.duration.as_secs())),
+            });
         }
         AudioBuffer::silence(self.format, frame_count)
     }

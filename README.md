@@ -7,10 +7,10 @@ Cut, concatenate, overlay, title, composite, and render media from code — a fl
 ## Features
 
 - **Clip graph** — timed video and audio sources, subclips, concat
-- **Effects** — crop, resize, rotate, mirror, fades, color, loop, freeze, margin, speed, reverse
+- **Effects** — crop, resize, rotate (90° steps or free angle), mirror, fades, color, loop, freeze, margin, speed, reverse
 - **Compositing** — layers, position anchors, opacity, masks, cross-fades
 - **Text & subtitles** — bitmap or TrueType titles; SRT parse and burn-in layers
-- **I/O** — open/write media via host **ffmpeg** / **ffprobe**; filtergraph fast path for simple transforms
+- **I/O** — open/write media via host **ffmpeg** / **ffprobe**; `write_video` / `write_av` (audio mux); filtergraph fast path for simple transforms
 - **CLI** — `version`, `probe`, `cut`, `filter`
 
 ## Install
@@ -67,17 +67,25 @@ cargo run -p reelforge-cli -- cut --start 10 --duration 5 in.mp4 out.mp4
 
 ## Performance
 
-Frame-graph microbenchmarks on the same host (sample a transformed frame; not full encode):
+Frame-graph microbenchmarks on the same host (sample a transformed frame; not full encode). Parallel row paths + fixed-point color ops:
 
-| Workload | ReelForge | MoviePy 2.x |
-|----------|-----------|-------------|
-| 720p crop→resize→fade `frame_at` | ~12–15 ms | ~14 ms |
-| Two-layer composite (640×360) | **~9–10 ms** | ~64 ms |
-| 1080p solid color `frame_at` | **~44 ns** (shared buffer) | ~8 µs |
+| Workload | ReelForge | MoviePy 2.x | Speedup |
+|----------|-----------|-------------|---------|
+| 720p crop→resize→fade→B&W `frame_at` | **~2.1–2.4 ms** | ~8.3 ms | **~3.5–4×** |
+| Two-layer composite (640×360) | **~5.7–6.3 ms** | ~30 ms | **~5×** |
+| 1080p solid color `frame_at` | **~26 ns** (shared buffer) | ~10 µs | **~380×** |
 
 ReelForge: `cargo bench -p reelforge-fx --bench frame_ops`. MoviePy: `python scripts/bench_moviepy_frames.py`. Numbers vary by machine; re-run locally.
 
 Simple file transforms can stay in FFmpeg via `run_filtergraph` / `reelforge cut` without importing every frame into the process.
+
+```rust
+// Free-angle rotate (canvas size unchanged)
+let spun = Rotate::degrees(33.0).apply(clip)?;
+
+// Video + audio mux
+write_av(&video, &audio, &WriteVideoOptions::new("out.mp4", 24.0))?;
+```
 
 ## License
 
