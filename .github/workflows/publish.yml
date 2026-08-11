@@ -49,9 +49,24 @@ jobs:
               return 0
             fi
             # cargo publish waits until the crate is available after upload.
-            cargo publish -p "${pkg}" --locked
-            # Extra settle time for dependents' index resolution.
-            sleep 25
+            # Retry on crates.io new-crate rate limits (HTTP 429).
+            local attempt
+            for attempt in 1 2 3 4 5; do
+              if cargo publish -p "${pkg}" --locked; then
+                break
+              fi
+              echo "publish ${pkg} attempt ${attempt} failed; sleeping 180s (rate limit / index)..."
+              sleep 180
+              if crate_exists "${pkg}" "0.1.0"; then
+                echo "${pkg} appeared on crates.io after retry wait"
+                break
+              fi
+              if [[ "${attempt}" -eq 5 ]]; then
+                return 1
+              fi
+            done
+            # Extra settle for sparse index + rate limit budget.
+            sleep 90
           }
 
           publish_one reelforge-core
