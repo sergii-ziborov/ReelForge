@@ -9,7 +9,7 @@ pub struct WriteVideoOptions {
     pub path: String,
     /// Target frames per second.
     pub fps: f64,
-    /// Optional override of output frame size (must match clip unless set for future scale).
+    /// Optional override of output frame size.
     pub size: Option<Size>,
     /// Video codec name (default `libx264`).
     pub video_codec: Option<String>,

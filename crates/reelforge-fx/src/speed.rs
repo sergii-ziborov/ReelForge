@@ -115,7 +115,7 @@ impl AudioClip for SpeedAudio {
         let max_t = (self.inner.duration().as_secs() - f64::EPSILON).max(0.0);
         let src_t = Time::from_secs(src_t.as_secs().min(max_t));
         // For speed != 1, true resampling would change pitch/duration of the window.
-        // Phase 2: sample at remapped start with same frame_count (approximate).
+        // Sample at remapped start with the same frame_count (pitch-preserving stretch is approximate).
         self.inner.samples_at(src_t, frame_count)
     }
 }

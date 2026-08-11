@@ -82,7 +82,7 @@ impl AudioClip for TimeMirroredAudio {
             return AudioBuffer::silence(self.format(), 0);
         }
         let src = map_time(self.inner.duration(), t)?;
-        // Phase 2: reverse window start only (true sample-reverse of the window is later).
+        // Reverse timeline mapping: sample at mirrored start (window-level reverse).
         self.inner.samples_at(src, frame_count)
     }
 }
