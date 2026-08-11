@@ -696,7 +696,6 @@ name = "reelforge-compose"
 version = "0.1.0"
 dependencies = [
  "reelforge-core",
- "reelforge-fx",
  "thiserror",
 ]
 

@@ -242,24 +242,16 @@ mod tests {
     }
 
     #[test]
-    fn crossfade_layer_is_transparent_at_start() {
-        use reelforge_core::VideoEffect;
-        use reelforge_fx::CrossFadeIn;
-
-        let faded = CrossFadeIn::new(Duration::from_secs(1.0))
-            .apply(Arc::new(ColorClip::new(
-                Size::new(2, 2),
-                Rgb8::WHITE,
-                Duration::from_secs(2.0),
-            )))
-            .unwrap();
-        let layer = CompositeLayer::new(faded);
+    fn zero_opacity_shows_background() {
+        let layer = CompositeLayer::new(Arc::new(ColorClip::new(
+            Size::new(2, 2),
+            Rgb8::WHITE,
+            Duration::from_secs(1.0),
+        )))
+        .with_opacity(0.0);
         let comp =
             CompositeVideo::with_background(Size::new(2, 2), Rgb8::BLACK, vec![layer]).unwrap();
         let f0 = comp.frame_at(Time::ZERO).unwrap();
-        // fully transparent overlay → background black
         assert_eq!(&f0.data()[0..3], &[0, 0, 0]);
-        let f1 = comp.frame_at(Time::from_secs(1.0)).unwrap();
-        assert_eq!(&f1.data()[0..3], &[255, 255, 255]);
     }
 }
