@@ -47,7 +47,9 @@ jobs:
         run: cargo test --workspace --all-targets
 
       - name: docs
-        run: cargo doc --workspace --no-deps
+        # Exclude reelforge-cli: binary name collides with reelforge lib docs path
+        # (rustc/cargo known issue #6313) and becomes fatal under -D warnings.
+        run: cargo doc --workspace --no-deps --exclude reelforge-cli
         env:
           RUSTDOCFLAGS: -D warnings
 

@@ -11,7 +11,7 @@ use std::sync::Mutex;
 /// Video clip backed by a media file on disk.
 ///
 /// Random access uses single-frame seeks. Monotonic sequential access reuses a
-/// long-lived rawvideo pipe ([`SequentialRgbDecoder`]) — the fast path for
+/// long-lived rawvideo pipe (sequential RGB decoder) — the fast path for
 /// ordered writers.
 pub struct VideoFileClip {
     path: PathBuf,
