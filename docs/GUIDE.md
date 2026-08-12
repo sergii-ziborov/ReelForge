@@ -15,6 +15,31 @@ See also: [EFFECTS.md](EFFECTS.md) · [IO.md](IO.md) · [README](../README.md)
 | `VideoEffect` / `AudioEffect` | Pure transforms: `apply(clip) → Arc<dyn …>` |
 | `CompositeVideo` | Layered canvas: position, opacity, masks, z-order |
 | Lazy graph | Nothing is rendered until `frame_at` / write |
+| `CachedVideo` / `cache_video` | LRU frame cache for warm / realtime `frame_at` |
+| `FrameStream` / `stream_video` | Sequential stream + optional prefetch |
+
+### Cache & streams (realtime)
+
+```rust
+use reelforge::prelude::*;
+use std::sync::Arc;
+
+let clip: Arc<dyn VideoClip> = Arc::new(open_video(&OpenVideoOptions::new("in.mp4"))?);
+let fx = BlackAndWhite.apply(clip)?;
+// ~2 seconds of frames at clip fps (LRU)
+let hot = cache_video_realtime(fx, 2.0);
+
+// Warm path: second call is a cache hit (Arc frame clone)
+let _ = hot.frame_at(Time::from_secs(1.0))?;
+let _ = hot.frame_at(Time::from_secs(1.0))?;
+
+// Sequential stream with prefetch window
+let mut stream = stream_video(Arc::clone(&hot), 1.0)?;
+while let Some((idx, t, frame)) = stream.next_frame()? {
+    // realtime consumer…
+    let _ = (idx, t, frame);
+}
+```
 
 Clips are cheap to wrap in `Arc`. Effects return **new** graphs; the original is unchanged.
 

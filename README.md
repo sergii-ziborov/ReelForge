@@ -27,6 +27,7 @@ cargo install reelforge-cli    # installs the `reelforge` binary
 | | |
 |--|--|
 | **Lazy graphs** | Wrap clips in `Arc`, apply effects; nothing renders until `frame_at` / write |
+| **Frame cache + streams** | LRU `CachedVideo` for warm/realtime hits; `FrameStream` sequential + prefetch |
 | **In-process pixels** | Parallel raster paths (rayon), fixed-point color, bicubic resize |
 | **Host FFmpeg** | Decode/encode/mux via CLI — any format your ffmpeg build supports |
 | **UHD-ready** | First-class `Size` presets through 8K; memory is the only hard limit |

@@ -9,7 +9,9 @@
     clippy::cast_possible_truncation
 )]
 
-use reelforge_core::{Duration, Size, Time, VideoClip, VideoEffect, psnr_rgb, ssim_rgb};
+use reelforge_core::{
+    CachedVideo, Duration, FrameStream, Size, Time, VideoClip, VideoEffect, psnr_rgb, ssim_rgb,
+};
 use reelforge_fx::{BlackAndWhite, Crop, FadeIn, Resize, ResizeFilter};
 use reelforge_io::{
     OpenVideoOptions, WriteControl, WriteProgress, WriteStage, WriteVideoOptions, ffmpeg_available,
@@ -63,7 +65,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         probe.open_ms
     );
 
-    let graph = build_chain(&probe)?;
+    let graph = build_chain(&input, &probe)?;
     println!(
         "graph : crop {}x{}@({},{}) → {}x{} + fade + bw  build_ms={:.2}",
         graph.crop_w,
@@ -75,13 +77,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         graph.graph_ms
     );
 
-    let sample = sample_frames(graph.chain.as_ref(), &probe)?;
+    let sample = sample_frames(Arc::clone(&graph.chain), &probe)?;
     println!(
-        "sample: {} frames  total_ms={:.1}  ms/frame={:.2}  fps_eq={:.1}",
+        "sample: {} frames cold_ms/frame={:.2} warm_ms/frame={:.2} stream_ms/frame={:.2} cache_hit={:.1}%",
         sample.count,
-        sample.total_ms,
         sample.per_frame_ms,
-        1000.0 / sample.per_frame_ms.max(1e-9)
+        sample.warm_ms,
+        sample.stream_ms_per_frame,
+        sample.cache_hit_rate * 100.0
     );
     println!(
         "quality(self): psnr={:?}  ssim={:.6}",
@@ -101,6 +104,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     println!("open_ms          {:.1}", probe.open_ms);
     println!("graph_build_ms   {:.2}", graph.graph_ms);
     println!("sample_ms/frame  {:.2}", sample.per_frame_ms);
+    println!("warm_ms/frame    {:.2}", sample.warm_ms);
+    println!("stream_ms/frame  {:.2}", sample.stream_ms_per_frame);
+    println!("cache_hit_rate   {:.1}%", sample.cache_hit_rate * 100.0);
     println!("encode_ms        {:.1}", enc.enc_ms);
     println!("encode_fps       {:.2}", enc.enc_fps);
     println!("progress_frames  {}", enc.progress_frames);
@@ -143,11 +149,8 @@ fn open_and_probe(input: &str) -> Result<Probe, Box<dyn std::error::Error>> {
     })
 }
 
-fn build_chain(probe: &Probe) -> Result<GraphOut, Box<dyn std::error::Error>> {
-    let video = open_video(&OpenVideoOptions::new(
-        // re-open path not stored — caller still has input; rebuild from env
-        env::args().nth(1).ok_or("missing input for graph build")?,
-    ))?;
+fn build_chain(input: &str, probe: &Probe) -> Result<GraphOut, Box<dyn std::error::Error>> {
+    let video = open_video(&OpenVideoOptions::new(input))?;
     let clip: Arc<dyn VideoClip> = Arc::new(video);
     let size = probe.size;
     let crop_w = (size.width * 9 / 10).max(2) & !1;
@@ -177,16 +180,20 @@ fn build_chain(probe: &Probe) -> Result<GraphOut, Box<dyn std::error::Error>> {
 
 struct SampleStats {
     count: usize,
-    total_ms: f64,
     per_frame_ms: f64,
+    warm_ms: f64,
     psnr: f64,
     ssim: f64,
+    cache_hit_rate: f64,
+    stream_ms_per_frame: f64,
 }
 
 fn sample_frames(
-    chain: &dyn VideoClip,
+    chain: Arc<dyn VideoClip>,
     probe: &Probe,
 ) -> Result<SampleStats, Box<dyn std::error::Error>> {
+    let cached = Arc::new(CachedVideo::realtime(chain, 2.0));
+
     let fracs = [0.05_f64, 0.25, 0.5, 0.75];
     let sample_times: Vec<Time> = fracs
         .iter()
@@ -199,20 +206,46 @@ fn sample_frames(
 
     let t_sample = Instant::now();
     for t in &sample_times {
-        let _ = chain.frame_at(*t)?;
+        let _ = cached.frame_at(*t)?;
     }
     let total_ms = t_sample.elapsed().as_secs_f64() * 1000.0;
     let count = sample_times.len();
     let per_frame_ms = total_ms / count as f64;
 
-    let a = chain.frame_at(sample_times[1])?;
-    let b = chain.frame_at(sample_times[1])?;
+    let mid = sample_times[1];
+    let t_warm = Instant::now();
+    for _ in 0..16 {
+        let _ = cached.frame_at(mid)?;
+    }
+    let warm_ms = t_warm.elapsed().as_secs_f64() * 1000.0 / 16.0;
+
+    let a = cached.frame_at(mid)?;
+    let b = cached.frame_at(mid)?;
+    let stats = cached.stats();
+
+    let mut stream = FrameStream::new(Arc::clone(&cached) as Arc<dyn VideoClip>, Some(probe.fps))?;
+    stream.set_prefetch_capacity(8);
+    stream.fill_prefetch();
+    let t_stream = Instant::now();
+    let mut n_stream = 0_u64;
+    let stream_limit = 30_u64.min(stream.len());
+    while n_stream < stream_limit {
+        if stream.next_frame()?.is_none() {
+            break;
+        }
+        n_stream += 1;
+    }
+    let stream_ms = t_stream.elapsed().as_secs_f64() * 1000.0;
+    let stream_ms_per_frame = stream_ms / n_stream.max(1) as f64;
+
     Ok(SampleStats {
         count,
-        total_ms,
         per_frame_ms,
+        warm_ms,
         psnr: psnr_rgb(&a, &b)?,
         ssim: ssim_rgb(&a, &b)?,
+        cache_hit_rate: stats.hit_rate(),
+        stream_ms_per_frame,
     })
 }
 

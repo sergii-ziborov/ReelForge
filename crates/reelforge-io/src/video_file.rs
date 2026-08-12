@@ -21,8 +21,57 @@ pub struct VideoFileClip {
     tools: FfmpegTools,
     /// Optional companion audio opened when `with_audio` is true.
     audio: Option<AudioFileClip>,
-    cache: Mutex<Option<(u64, Frame)>>,
+    /// Multi-frame LRU (index → frame) for random / repeated access.
+    cache: Mutex<FrameLru>,
     seq: Mutex<Option<SequentialRgbDecoder>>,
+}
+
+/// Small LRU for decoded file frames (index-keyed).
+struct FrameLru {
+    map: std::collections::HashMap<u64, Frame>,
+    order: std::collections::VecDeque<u64>,
+    capacity: usize,
+}
+
+impl FrameLru {
+    fn new(capacity: usize) -> Self {
+        Self {
+            map: std::collections::HashMap::new(),
+            order: std::collections::VecDeque::new(),
+            capacity: capacity.max(1),
+        }
+    }
+
+    fn get(&mut self, index: u64) -> Option<Frame> {
+        if !self.map.contains_key(&index) {
+            return None;
+        }
+        if let Some(pos) = self.order.iter().position(|&k| k == index) {
+            self.order.remove(pos);
+            self.order.push_back(index);
+        }
+        self.map.get(&index).cloned()
+    }
+
+    fn insert(&mut self, index: u64, frame: Frame) {
+        if let std::collections::hash_map::Entry::Occupied(mut e) = self.map.entry(index) {
+            e.insert(frame);
+            if let Some(pos) = self.order.iter().position(|&k| k == index) {
+                self.order.remove(pos);
+            }
+            self.order.push_back(index);
+            return;
+        }
+        while self.map.len() >= self.capacity {
+            if let Some(old) = self.order.pop_front() {
+                self.map.remove(&old);
+            } else {
+                break;
+            }
+        }
+        self.order.push_back(index);
+        self.map.insert(index, frame);
+    }
 }
 
 impl std::fmt::Debug for VideoFileClip {
@@ -79,7 +128,8 @@ impl VideoFileClip {
             fps: probe.fps,
             tools,
             audio,
-            cache: Mutex::new(None),
+            // ~2s of 30fps by default — warm seeks without huge RAM.
+            cache: Mutex::new(FrameLru::new(64)),
             seq: Mutex::new(None),
         })
     }
@@ -168,11 +218,10 @@ impl VideoClip for VideoFileClip {
         }
 
         let index = self.frame_index(t);
-        if let Ok(guard) = self.cache.lock()
-            && let Some((cached_idx, frame)) = guard.as_ref()
-            && *cached_idx == index
+        if let Ok(mut guard) = self.cache.lock()
+            && let Some(frame) = guard.get(index)
         {
-            return Ok(frame.clone());
+            return Ok(frame);
         }
 
         // Prefer sequential pipe (handles restart on backward jumps); fall back to seek.
@@ -185,7 +234,7 @@ impl VideoClip for VideoFileClip {
         };
 
         if let Ok(mut guard) = self.cache.lock() {
-            *guard = Some((index, frame.clone()));
+            guard.insert(index, frame.clone());
         }
         Ok(frame)
     }
@@ -201,7 +250,7 @@ impl Clone for VideoFileClip {
             fps: self.fps,
             tools: self.tools.clone(),
             audio: self.audio.clone(),
-            cache: Mutex::new(None),
+            cache: Mutex::new(FrameLru::new(64)),
             seq: Mutex::new(None),
         }
     }
