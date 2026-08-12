@@ -403,6 +403,38 @@ impl OperationRegistry {
             limits: OperationLimits::default(),
         });
         r.register(OperationDescriptor {
+            id: OperationId::new("rf.audio.mix"),
+            version: SemVer::V1,
+            input: MediaContract {
+                video: true,
+                audio: true,
+                masks: false,
+                notes: Some("multi-input audio mix; video from first input".into()),
+            },
+            output: video_av.clone(),
+            backend: BackendClass::Rust,
+            deterministic: true,
+            capabilities: CapabilitySet {
+                tags: vec!["audio".into(), "mix".into()],
+            },
+            parameter_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "tracks": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "gain": { "type": "number" },
+                                "start": { "type": "number" }
+                            }
+                        }
+                    }
+                }
+            }),
+            limits: OperationLimits::default(),
+        });
+        r.register(OperationDescriptor {
             id: OperationId::new("rf.redaction.region"),
             version: SemVer::V1,
             input: MediaContract {

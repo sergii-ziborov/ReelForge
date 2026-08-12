@@ -17,7 +17,9 @@ use crate::options::{OpenVideoOptions, WriteVideoOptions};
 use crate::stage_cache::StageCache;
 use crate::video_file::open_video;
 use crate::{run_filtergraph, write_av_with, write_video_with};
-use reelforge_compose::{CompositeLayer, composite_video, composite_video_with_background};
+use reelforge_compose::{
+    CompositeLayer, MixTrack, composite_video, composite_video_with_background, mix_audio,
+};
 use reelforge_core::{
     AudioClip, AudioEffect, Duration, MediaTime, Position, Rgb8, Size, Time, VideoClip,
     VideoEffect, subclip_audio, subclip_video,
@@ -445,6 +447,12 @@ pub fn materialize_graph_bundle<S: BuildHasher, A: BuildHasher>(
                 let video = apply_compose_layers(videos, params, registry)?;
                 NodeMedia { video, audio }
             }
+            RenderNodeKind::Op { operation, params }
+                if operation.as_str() == "rf.audio.mix" =>
+            {
+                let inputs = multi_input_media(node, &produced)?;
+                apply_audio_mix(inputs, params, registry)?
+            }
             RenderNodeKind::Op { operation, params } => {
                 let input = single_input_media(node, &produced)?;
                 apply_registered_op_media(input, operation, params, registry, &mut hints)?
@@ -563,6 +571,52 @@ fn multi_input_media(
         clips.push(c);
     }
     Ok(clips)
+}
+
+fn apply_audio_mix(
+    inputs: Vec<NodeMedia>,
+    params: &serde_json::Value,
+    registry: &OperationRegistry,
+) -> Result<NodeMedia> {
+    let _ = registry
+        .get(&OperationId::new("rf.audio.mix"))
+        .map_err(|e| IoError::message(e.to_string()))?;
+    if inputs.is_empty() {
+        return Err(IoError::message("rf.audio.mix needs at least one input"));
+    }
+    let video = Arc::clone(&inputs[0].video);
+    let track_params = params.get("tracks").and_then(|v| v.as_array());
+    let mut tracks = Vec::new();
+    for (i, m) in inputs.into_iter().enumerate() {
+        let Some(audio) = m.audio else {
+            continue;
+        };
+        let mut track = MixTrack::new(audio);
+        if let Some(arr) = track_params
+            && let Some(tp) = arr.get(i)
+        {
+            if let Some(g) = tp.get("gain").and_then(serde_json::Value::as_f64) {
+                #[allow(clippy::cast_possible_truncation)]
+                {
+                    track = track.with_gain(g as f32);
+                }
+            }
+            if let Some(s) = tp.get("start").and_then(serde_json::Value::as_f64) {
+                track = track.with_start(Time::from_secs(s));
+            }
+        }
+        tracks.push(track);
+    }
+    if tracks.is_empty() {
+        return Err(IoError::message(
+            "rf.audio.mix: no input carries audio to mix",
+        ));
+    }
+    let mixed = mix_audio(tracks).map_err(|e| IoError::message(e.to_string()))?;
+    Ok(NodeMedia {
+        video,
+        audio: Some(mixed),
+    })
 }
 
 fn apply_compose_layers(
@@ -1262,6 +1316,7 @@ pub fn is_executable_op(id: &str) -> bool {
             | "rf.audio.gain"
             | "rf.audio.drop"
             | "rf.audio.preserve"
+            | "rf.audio.mix"
             | "rf.encode.h264"
     )
 }

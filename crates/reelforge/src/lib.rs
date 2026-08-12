@@ -10,8 +10,9 @@ pub use reelforge_render_graph as render_graph;
 pub use reelforge_text as text;
 
 pub use reelforge_compose::{
-    ComposeError, CompositeLayer, CompositeVideo, ConcatAudio, ConcatVideo, composite_video,
-    composite_video_with_background, concatenate_audio, concatenate_video,
+    ComposeError, CompositeLayer, CompositeVideo, ConcatAudio, ConcatVideo, MixAudio, MixTrack,
+    composite_video, composite_video_with_background, concatenate_audio, concatenate_video,
+    mix_audio, mix_audio_clips,
 };
 pub use reelforge_core::{
     Anchor, AudioBuffer, AudioClip, AudioEffect, AudioFormat, CacheConfig, CacheStats, CachedVideo,
@@ -44,8 +45,9 @@ pub use reelforge_io::{
     GraphRunOptions, ImageClip, IoError, OpenAudioOptions, OpenVideoOptions, OptimizeStats,
     OptimizedPlan, PlanBackend, PlanOp, PlanOutput, PlanSource, ProgressCallback, ProxyOptions,
     RENDER_PLAN_VERSION, RenderPlan, RgbFramePool, SampleJson, StageCache, TRACKS_JSON_VERSION,
-    TrackJson, TracksDocument, VideoFileClip, WriteControl, WriteGifOptions, WriteProgress,
-    WriteStage, WriteVideoOptions, apply_plan_ops, apply_region_redaction, explain_plan,
+    TrackJson, TracksDocument, VideoFileClip, WaveformOptions, WaveformPeak, WriteControl,
+    WriteGifOptions, WriteProgress, WriteStage, WriteVideoOptions, apply_plan_ops,
+    apply_region_redaction, compute_waveform, compute_waveform_default, explain_plan,
     explain_render_graph, explain_render_graph_with, extract_ffmpeg, extract_from_optimized,
     ffmpeg_available, is_executable_op, is_known_custom, load_track_set, mask_timeline_from_box,
     mask_timeline_to_track_set, materialize_graph, materialize_graph_bundle,
@@ -53,8 +55,9 @@ pub use reelforge_io::{
     parse_track_set, privacy_style_from_redaction, proxy_size, region_redaction_from_value,
     require_full_ffmpeg, run_execution_plan, run_execution_plan_with, run_filtergraph,
     run_render_graph, run_render_graph_with, run_render_plan, run_render_plan_with,
-    thumbnail_png_bytes, track_set_from_value, validate_remainder, write_av, write_av_with,
-    write_gif, write_gif_with, write_proxy, write_thumbnail, write_video, write_video_with,
+    thumbnail_png_bytes, track_set_from_value, validate_remainder, waveform_to_json, write_av,
+    write_av_with, write_gif, write_gif_with, write_proxy, write_thumbnail, write_video,
+    write_video_with,
 };
 pub use reelforge_text::{
     BITMAP_FONT, BurnInOptions, SubtitleCue, TextClip, TextClipOptions, TextError, burn_in_layers,

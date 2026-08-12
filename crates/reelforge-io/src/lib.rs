@@ -20,6 +20,7 @@ mod render_plan;
 mod stage_cache;
 mod tracks_json;
 mod video_file;
+mod waveform;
 mod write;
 
 pub use audio_file::{AudioFileClip, layout_for_channels, open_audio};
@@ -52,6 +53,9 @@ pub use render_plan::{
     run_render_plan, run_render_plan_with, validate_remainder,
 };
 pub use stage_cache::StageCache;
+pub use waveform::{
+    WaveformOptions, WaveformPeak, compute_waveform, compute_waveform_default, waveform_to_json,
+};
 pub use tracks_json::{
     SampleJson, TRACKS_JSON_VERSION, TrackJson, TracksDocument, load_track_set, parse_track_set,
     track_set_from_value,
