@@ -674,7 +674,7 @@ dependencies = [
 
 [[package]]
 name = "reelforge"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "reelforge-compose",
  "reelforge-core",
@@ -685,7 +685,7 @@ dependencies = [
 
 [[package]]
 name = "reelforge-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "clap",
  "reelforge",
@@ -693,7 +693,7 @@ dependencies = [
 
 [[package]]
 name = "reelforge-compose"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "reelforge-core",
  "thiserror",
@@ -701,14 +701,14 @@ dependencies = [
 
 [[package]]
 name = "reelforge-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "reelforge-fx"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "criterion",
  "rayon",
@@ -718,7 +718,7 @@ dependencies = [
 
 [[package]]
 name = "reelforge-io"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "image",
  "reelforge-core",
@@ -730,7 +730,7 @@ dependencies = [
 
 [[package]]
 name = "reelforge-text"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "fontdue",
  "reelforge-compose",

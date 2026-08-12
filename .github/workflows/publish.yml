@@ -44,8 +44,8 @@ jobs:
           publish_one() {
             local pkg="$1"
             echo "==== Publishing ${pkg} ===="
-            if crate_exists "${pkg}" "0.1.0"; then
-              echo "${pkg} 0.1.0 already on crates.io; skip"
+            if crate_exists "${pkg}" "0.1.1"; then
+              echo "${pkg} 0.1.1 already on crates.io; skip"
               return 0
             fi
             # cargo publish waits until the crate is available after upload.
@@ -57,7 +57,7 @@ jobs:
               fi
               echo "publish ${pkg} attempt ${attempt} failed; sleeping 180s (rate limit / index)..."
               sleep 180
-              if crate_exists "${pkg}" "0.1.0"; then
+              if crate_exists "${pkg}" "0.1.1"; then
                 echo "${pkg} appeared on crates.io after retry wait"
                 break
               fi
@@ -79,10 +79,10 @@ jobs:
 
           echo "All crates published."
           for c in reelforge-core reelforge-compose reelforge-fx reelforge-io reelforge-text reelforge reelforge-cli; do
-            if crate_exists "$c" "0.1.0"; then
-              echo "OK $c 0.1.0"
+            if crate_exists "$c" "0.1.1"; then
+              echo "OK $c 0.1.1"
             else
-              echo "MISSING $c 0.1.0"
+              echo "MISSING $c 0.1.1"
               exit 1
             fi
           done

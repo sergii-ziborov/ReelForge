@@ -2,6 +2,8 @@
 
 ReelForge does **not** link libav. All container work goes through the host **ffmpeg** / **ffprobe** CLI.
 
+See also: [GUIDE.md](GUIDE.md) · [EFFECTS.md](EFFECTS.md) · [README](../README.md)
+
 ## Discovery
 
 1. `REELFORGE_FFMPEG` / `REELFORGE_FFPROBE` if set  
