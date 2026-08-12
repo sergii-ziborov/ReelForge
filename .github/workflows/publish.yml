@@ -38,7 +38,7 @@ jobs:
         run: |
           set -euo pipefail
           # Full package dry-run cannot resolve unpublished path-dep versions
-          # (e.g. reelforge-io ^0.1.3 before core is uploaded). --list validates
+          # (e.g. reelforge-io ^0.1.4 before core is uploaded). --list validates
           # include/exclude without hitting crates.io for workspace siblings.
           for pkg in reelforge-core reelforge-compose reelforge-fx reelforge-io reelforge-text reelforge reelforge-cli; do
             echo "==== ${pkg} ===="
@@ -85,8 +85,8 @@ jobs:
           publish_one() {
             local pkg="$1"
             echo "==== Publishing ${pkg} ===="
-            if crate_exists "${pkg}" "0.1.3"; then
-              echo "${pkg} 0.1.3 already on crates.io; skip"
+            if crate_exists "${pkg}" "0.1.4"; then
+              echo "${pkg} 0.1.4 already on crates.io; skip"
               return 0
             fi
             # cargo publish waits until the crate is available after upload.
@@ -98,7 +98,7 @@ jobs:
               fi
               echo "publish ${pkg} attempt ${attempt} failed; sleeping 180s (rate limit / index)..."
               sleep 180
-              if crate_exists "${pkg}" "0.1.3"; then
+              if crate_exists "${pkg}" "0.1.4"; then
                 echo "${pkg} appeared on crates.io after retry wait"
                 break
               fi
@@ -120,10 +120,10 @@ jobs:
 
           echo "All crates published."
           for c in reelforge-core reelforge-compose reelforge-fx reelforge-io reelforge-text reelforge reelforge-cli; do
-            if crate_exists "$c" "0.1.3"; then
-              echo "OK $c 0.1.3"
+            if crate_exists "$c" "0.1.4"; then
+              echo "OK $c 0.1.4"
             else
-              echo "MISSING $c 0.1.3"
+              echo "MISSING $c 0.1.4"
               exit 1
             fi
           done
