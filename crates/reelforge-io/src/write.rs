@@ -263,8 +263,8 @@ fn write_av_temps(
     duration: Duration,
     control: &WriteControl,
 ) -> Result<()> {
-    let video_tmp = temp_sibling(path, "rf-vid");
-    let audio_tmp = temp_sibling(path, "rf-aud");
+    let video_tmp = temp_sibling(path, "rf-vid", "mp4");
+    let audio_tmp = temp_sibling(path, "rf-aud", "pcm");
     let video_result = encode_sampled_h264(
         tools,
         &video_tmp,
@@ -374,13 +374,14 @@ fn ensure_parent_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn temp_sibling(path: &Path, tag: &str) -> PathBuf {
+fn temp_sibling(path: &Path, tag: &str, ext: &str) -> PathBuf {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let stem = path
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("reelforge");
-    let name = format!(".{stem}.{tag}.{}.tmp", std::process::id());
+    // Extension matters: ffmpeg needs a known video container for the temp mux input.
+    let name = format!(".{stem}.{tag}.{}.{ext}", std::process::id());
     parent.join(name)
 }
 
