@@ -244,6 +244,36 @@ impl OperationRegistry {
             serde_json::json!({ "type": "object" }),
             &["edit"],
         );
+        transform(
+            "rf.transform.rotate",
+            BackendClass::Rust,
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "degrees": { "type": "number" },
+                    "mode": { "type": "string" }
+                }
+            }),
+            &["edit"],
+        );
+        transform(
+            "rf.transform.fade_in",
+            BackendClass::Rust,
+            serde_json::json!({
+                "type": "object",
+                "properties": { "duration": {} }
+            }),
+            &["edit", "fade"],
+        );
+        transform(
+            "rf.transform.fade_out",
+            BackendClass::Rust,
+            serde_json::json!({
+                "type": "object",
+                "properties": { "duration": {} }
+            }),
+            &["edit", "fade"],
+        );
 
         r.register(OperationDescriptor {
             id: OperationId::new("rf.color.black_and_white"),
@@ -262,13 +292,62 @@ impl OperationRegistry {
             id: OperationId::new("rf.color.invert"),
             version: SemVer::V1,
             input: video_only.clone(),
-            output: video_only,
+            output: video_only.clone(),
             backend: BackendClass::Rust,
             deterministic: true,
             capabilities: CapabilitySet {
                 tags: vec!["color".into()],
             },
             parameter_schema: serde_json::json!({ "type": "object" }),
+            limits: OperationLimits::default(),
+        });
+        r.register(OperationDescriptor {
+            id: OperationId::new("rf.color.painting"),
+            version: SemVer::V1,
+            input: video_only.clone(),
+            output: video_only,
+            backend: BackendClass::Rust,
+            deterministic: true,
+            capabilities: CapabilitySet {
+                tags: vec!["color".into(), "stylize".into()],
+            },
+            parameter_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "saturation": { "type": "number" },
+                    "black": { "type": "number" }
+                }
+            }),
+            limits: OperationLimits::default(),
+        });
+        r.register(OperationDescriptor {
+            id: OperationId::new("rf.compose.layers"),
+            version: SemVer::V1,
+            input: MediaContract {
+                video: true,
+                audio: false,
+                masks: false,
+                notes: Some("multi-input composite".into()),
+            },
+            output: MediaContract {
+                video: true,
+                audio: false,
+                masks: false,
+                notes: None,
+            },
+            backend: BackendClass::Rust,
+            deterministic: true,
+            capabilities: CapabilitySet {
+                tags: vec!["compose".into()],
+            },
+            parameter_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "w": { "type": "integer" },
+                    "h": { "type": "integer" },
+                    "layers": { "type": "array" }
+                }
+            }),
             limits: OperationLimits::default(),
         });
         r.register(OperationDescriptor {

@@ -16,6 +16,7 @@ mod options;
 mod pipeline;
 mod pool;
 mod render_plan;
+mod stage_cache;
 mod tracks_json;
 mod video_file;
 mod write;
@@ -45,6 +46,7 @@ pub use render_plan::{
     extract_from_optimized, is_known_custom, optimize, optimize_plan, require_full_ffmpeg,
     run_render_plan, run_render_plan_with, validate_remainder,
 };
+pub use stage_cache::StageCache;
 pub use tracks_json::{
     SampleJson, TRACKS_JSON_VERSION, TrackJson, TracksDocument, load_track_set, parse_track_set,
     track_set_from_value,

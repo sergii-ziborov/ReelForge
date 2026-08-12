@@ -725,6 +725,7 @@ version = "0.1.4"
 dependencies = [
  "criterion",
  "image",
+ "reelforge-compose",
  "reelforge-core",
  "reelforge-fx",
  "reelforge-render-graph",

@@ -13,6 +13,7 @@ categories.workspace = true
 
 [dependencies]
 image = { workspace = true }
+reelforge-compose = { workspace = true }
 reelforge-core = { workspace = true }
 reelforge-fx = { workspace = true }
 reelforge-render-graph = { workspace = true }

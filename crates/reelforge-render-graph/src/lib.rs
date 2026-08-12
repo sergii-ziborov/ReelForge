@@ -11,6 +11,7 @@
 
 mod animated;
 mod error;
+mod fingerprint;
 mod graph;
 mod mask;
 mod op;
@@ -20,6 +21,9 @@ mod stage;
 
 pub use animated::{Animated, Easing, Keyframe};
 pub use error::{GraphError, Result};
+pub use fingerprint::{
+    fingerprint_execution_plan, fingerprint_graph_run, fingerprint_render_graph, fingerprint_stage,
+};
 pub use graph::{
     GraphOutput, MediaAsset, MediaAssetId, NodeId, RenderGraph, RenderNode, RenderNodeKind,
 };

@@ -4,21 +4,26 @@
 //! RenderGraph ──schedule──► ExecutionPlan ──run──► outputs on disk
 //! ```
 //!
-//! Linear single-input DAGs are supported. Adapter / GPU stages fail clearly
-//! until host adapters land. `FFmpeg` stages that only carry encode/output
-//! markers finalize via Rust pixel encode (`write_video`); trim-only `FFmpeg`
-//! prefixes use host filtergraph when a later stage needs Rust pixels.
+//! Linear DAGs and multi-input `rf.compose.layers` are supported. Adapter /
+//! GPU stages fail clearly until host adapters land. `FFmpeg` stages that only
+//! carry encode/output markers finalize via Rust pixel encode (`write_video`);
+//! geometry/`trim` prefixes use host filtergraph when a later stage needs Rust.
 
 use crate::control::{WriteControl, WriteProgress, WriteStage};
 use crate::error::{IoError, Result};
 use crate::filtergraph::{FilterGraph, FilterOp};
 use crate::mask_bridge::{apply_region_redaction, region_redaction_from_value};
 use crate::options::{OpenVideoOptions, WriteVideoOptions};
+use crate::stage_cache::StageCache;
 use crate::video_file::open_video;
 use crate::{run_filtergraph, write_video_with};
-use reelforge_core::{Duration, MediaTime, Size, Time, VideoClip, VideoEffect, subclip_video};
+use reelforge_compose::{CompositeLayer, composite_video, composite_video_with_background};
+use reelforge_core::{
+    Duration, MediaTime, Position, Rgb8, Size, Time, VideoClip, VideoEffect, subclip_video,
+};
 use reelforge_fx::{
-    BlackAndWhite, Crop, EvenSize, InvertColors, MirrorX, MirrorY, Resize,
+    BlackAndWhite, Crop, EvenSize, FadeIn, FadeOut, InvertColors, MirrorX, MirrorY, Painting,
+    Resize, Rotate,
 };
 use reelforge_render_graph::{
     BackendClass, ExecutionPlan, ExecutionStage, MediaAssetId, NodeId, OperationId,
@@ -54,6 +59,8 @@ pub struct GraphRunOptions {
     pub video_codec: Option<String>,
     /// Override CRF.
     pub crf: Option<u8>,
+    /// Optional full-run stage cache (fingerprint → artifact).
+    pub cache: Option<StageCache>,
 }
 
 impl Default for GraphRunOptions {
@@ -63,6 +70,7 @@ impl Default for GraphRunOptions {
             fps: None,
             video_codec: None,
             crf: None,
+            cache: None,
         }
     }
 }
@@ -78,6 +86,13 @@ impl GraphRunOptions {
     #[must_use]
     pub fn with_registry(mut self, registry: OperationRegistry) -> Self {
         self.registry = registry;
+        self
+    }
+
+    /// Enable directory stage cache.
+    #[must_use]
+    pub fn with_cache(mut self, cache: StageCache) -> Self {
+        self.cache = Some(cache);
         self
     }
 }
@@ -239,17 +254,66 @@ pub fn run_execution_plan_with(
         }
     }
 
+    let run_fp = options
+        .cache
+        .as_ref()
+        .map(|_| StageCache::run_fingerprint(graph, plan))
+        .transpose()?;
+
+    if let (Some(cache), Some(fp)) = (&options.cache, &run_fp)
+        && let Some(cached) = cache.hit(fp, "mp4")
+    {
+        restore_cached_outputs(graph, &cached)?;
+        control.report(WriteProgress::new(WriteStage::Done, 1, 1));
+        return Ok(());
+    }
+
     // Hybrid optimization: FFmpeg trim prefix → temp → Rust remainder → encode.
     if can_use_ffmpeg_prefix(graph, plan)
         && let Some(()) = try_hybrid_ffmpeg_prefix(graph, plan, control, options)?
     {
+        if let (Some(cache), Some(fp)) = (&options.cache, &run_fp)
+            && let Some(out) = resolve_output_path(graph)
+        {
+            let _ = cache.store_copy(fp, "mp4", out);
+        }
         return Ok(());
     }
 
     let seeds = HashMap::new();
     let (clip, mut hints) = materialize_graph_with_seeds(graph, &options.registry, &seeds)?;
     merge_option_hints(&mut hints, options);
-    write_graph_outputs(graph, clip.as_ref(), &hints, control)
+    write_graph_outputs(graph, clip.as_ref(), &hints, control)?;
+    if let (Some(cache), Some(fp)) = (&options.cache, &run_fp)
+        && let Some(out) = resolve_output_path(graph).or(hints.output_path.clone())
+    {
+        let _ = cache.store_copy(fp, "mp4", out);
+    }
+    Ok(())
+}
+
+fn restore_cached_outputs(graph: &RenderGraph, cached: &Path) -> Result<()> {
+    let paths: Vec<String> = graph
+        .outputs
+        .iter()
+        .filter_map(|o| o.uri.clone())
+        .collect();
+    if paths.is_empty() {
+        return Err(IoError::message(
+            "cache hit but graph has no GraphOutput.uri to restore",
+        ));
+    }
+    for path in paths {
+        if let Some(parent) = Path::new(&path).parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| IoError::message(format!("cache restore mkdir: {e}")))?;
+        }
+        std::fs::copy(cached, &path)
+            .map_err(|e| IoError::message(format!("cache restore copy: {e}")))?;
+    }
+    Ok(())
 }
 
 /// Materialize the primary output clip in-process (no encode).
@@ -302,6 +366,12 @@ pub fn materialize_graph_with_seeds<S: BuildHasher>(
             .ok_or_else(|| IoError::message(format!("missing node {}", id.0)))?;
         let clip = match &node.body {
             RenderNodeKind::Source { asset } => resolve_source(asset, &asset_map, seeds)?,
+            RenderNodeKind::Op { operation, params }
+                if operation.as_str() == "rf.compose.layers" =>
+            {
+                let inputs = multi_input_clips(node, &produced)?;
+                apply_compose_layers(inputs, params, registry)?
+            }
             RenderNodeKind::Op { operation, params } => {
                 let input = single_input_clip(node, &produced)?;
                 apply_registered_op(input, operation, params, registry, &mut hints)?
@@ -375,6 +445,102 @@ fn single_input_clip(
         .ok_or_else(|| IoError::message(format!("upstream {} not produced yet", up.0)))
 }
 
+fn multi_input_clips(
+    node: &RenderNode,
+    produced: &HashMap<String, Arc<dyn VideoClip>>,
+) -> Result<Vec<Arc<dyn VideoClip>>> {
+    if node.inputs.is_empty() {
+        return Err(IoError::message(format!(
+            "node {} requires at least one input",
+            node.id.0
+        )));
+    }
+    let mut clips = Vec::with_capacity(node.inputs.len());
+    for up in &node.inputs {
+        let c = produced.get(&up.0).cloned().ok_or_else(|| {
+            IoError::message(format!("upstream {} not produced yet", up.0))
+        })?;
+        clips.push(c);
+    }
+    Ok(clips)
+}
+
+fn apply_compose_layers(
+    inputs: Vec<Arc<dyn VideoClip>>,
+    params: &serde_json::Value,
+    registry: &OperationRegistry,
+) -> Result<Arc<dyn VideoClip>> {
+    let _ = registry
+        .get(&OperationId::new("rf.compose.layers"))
+        .map_err(|e| IoError::message(e.to_string()))?;
+    if inputs.is_empty() {
+        return Err(IoError::message("rf.compose.layers needs inputs"));
+    }
+
+    let size = if let (Some(w), Some(h)) = (
+        params.get("w").and_then(serde_json::Value::as_u64),
+        params.get("h").and_then(serde_json::Value::as_u64),
+    ) {
+        #[allow(clippy::cast_possible_truncation)]
+        Size::new(w as u32, h as u32)
+    } else {
+        inputs[0].size()
+    };
+
+    let layer_params = params.get("layers").and_then(|v| v.as_array());
+    let mut layers = Vec::with_capacity(inputs.len());
+    for (i, clip) in inputs.into_iter().enumerate() {
+        let mut layer = CompositeLayer::new(clip).with_layer_index(
+            i32::try_from(i).unwrap_or(i32::MAX),
+        );
+        if let Some(arr) = layer_params
+            && let Some(lp) = arr.get(i)
+        {
+            let x = lp
+                .get("x")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(0);
+            let y = lp
+                .get("y")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(0);
+            #[allow(clippy::cast_possible_truncation)]
+            {
+                layer = layer.with_position(Position::absolute(x as i32, y as i32));
+            }
+            if let Some(op) = lp.get("opacity").and_then(serde_json::Value::as_f64) {
+                #[allow(clippy::cast_possible_truncation)]
+                {
+                    layer = layer.with_opacity(op as f32);
+                }
+            }
+            if let Some(start) = lp.get("start").and_then(serde_json::Value::as_f64) {
+                layer = layer.with_start(Time::from_secs(start));
+            }
+            if let Some(idx) = lp.get("layer_index").and_then(serde_json::Value::as_i64) {
+                #[allow(clippy::cast_possible_truncation)]
+                {
+                    layer = layer.with_layer_index(idx as i32);
+                }
+            }
+        }
+        layers.push(layer);
+    }
+
+    if let Some(bg) = params.get("background") {
+        let r = bg.get("r").and_then(serde_json::Value::as_u64).unwrap_or(0);
+        let g = bg.get("g").and_then(serde_json::Value::as_u64).unwrap_or(0);
+        let b = bg.get("b").and_then(serde_json::Value::as_u64).unwrap_or(0);
+        #[allow(clippy::cast_possible_truncation)]
+        let color = Rgb8::new(r as u8, g as u8, b as u8);
+        composite_video_with_background(size, color, layers)
+            .map_err(|e| IoError::message(e.to_string()))
+    } else {
+        composite_video(size, layers).map_err(|e| IoError::message(e.to_string()))
+    }
+}
+
+#[allow(clippy::too_many_lines, clippy::cast_possible_truncation)]
 fn apply_registered_op(
     clip: Arc<dyn VideoClip>,
     operation: &OperationId,
@@ -428,8 +594,45 @@ fn apply_registered_op(
                 .apply(clip)
                 .map_err(IoError::from)
         }
+        "rf.transform.rotate" => apply_rotate(clip, params),
+        "rf.transform.fade_in" => {
+            let d = param_seconds(params, "duration")?.unwrap_or(0.5);
+            FadeIn::new(Duration::from_secs(d))
+                .apply(clip)
+                .map_err(IoError::from)
+        }
+        "rf.transform.fade_out" => {
+            let d = param_seconds(params, "duration")?.unwrap_or(0.5);
+            FadeOut::new(Duration::from_secs(d))
+                .apply(clip)
+                .map_err(IoError::from)
+        }
         "rf.color.black_and_white" => BlackAndWhite.apply(clip).map_err(IoError::from),
         "rf.color.invert" => InvertColors.apply(clip).map_err(IoError::from),
+        "rf.color.painting" => {
+            let sat = params
+                .get("saturation")
+                .and_then(serde_json::Value::as_f64)
+                .map(|v| v as f32);
+            let black = params
+                .get("black")
+                .and_then(serde_json::Value::as_f64)
+                .map(|v| v as f32);
+            #[allow(clippy::cast_possible_truncation)]
+            let paint = match (sat, black) {
+                (Some(s), Some(b)) => Painting::with(s, b),
+                (Some(s), None) => Painting {
+                    saturation: s,
+                    ..Painting::new()
+                },
+                (None, Some(b)) => Painting {
+                    black: b,
+                    ..Painting::new()
+                },
+                (None, None) => Painting::new(),
+            };
+            paint.apply(clip).map_err(IoError::from)
+        }
         "rf.redaction.region" => {
             let empty = params.is_null()
                 || params
@@ -443,6 +646,9 @@ fn apply_registered_op(
             let redaction = region_redaction_from_value(params)?;
             apply_region_redaction(clip, &redaction)
         }
+        "rf.compose.layers" => Err(IoError::message(
+            "rf.compose.layers must be applied with multi-input materialize path",
+        )),
         "rf.encode.h264" => {
             if let Some(path) = params.get("path").and_then(|v| v.as_str()) {
                 hints.output_path = Some(path.to_string());
@@ -464,9 +670,35 @@ fn apply_registered_op(
             Ok(clip)
         }
         other => Err(IoError::message(format!(
-            "operation '{other}' is registered but has no M3 executor yet"
+            "operation '{other}' is registered but has no executor yet"
         ))),
     }
+}
+
+fn apply_rotate(clip: Arc<dyn VideoClip>, params: &serde_json::Value) -> Result<Arc<dyn VideoClip>> {
+    let mode = params
+        .get("mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("cw90");
+    let rot = match mode {
+        "cw90" | "90" => Rotate::cw90(),
+        "cw180" | "180" => Rotate::half(),
+        "cw270" | "270" | "ccw90" => Rotate::cw270(),
+        "degrees" => {
+            let d = params
+                .get("degrees")
+                .and_then(serde_json::Value::as_f64)
+                .ok_or_else(|| IoError::message("rotate mode=degrees needs degrees"))?;
+            #[allow(clippy::cast_possible_truncation)]
+            Rotate::degrees(d as f32)
+        }
+        other => {
+            return Err(IoError::message(format!(
+                "unknown rotate mode '{other}' (cw90|cw180|cw270|degrees)"
+            )));
+        }
+    };
+    rot.apply(clip).map_err(IoError::from)
 }
 
 fn apply_trim(clip: Arc<dyn VideoClip>, params: &serde_json::Value) -> Result<Arc<dyn VideoClip>> {
@@ -802,8 +1034,13 @@ pub fn is_executable_op(id: &str) -> bool {
             | "rf.transform.scale"
             | "rf.transform.crop"
             | "rf.transform.even_dims"
+            | "rf.transform.rotate"
+            | "rf.transform.fade_in"
+            | "rf.transform.fade_out"
             | "rf.color.black_and_white"
             | "rf.color.invert"
+            | "rf.color.painting"
+            | "rf.compose.layers"
             | "rf.redaction.region"
             | "rf.encode.h264"
     )
@@ -952,6 +1189,97 @@ mod tests {
     fn is_executable_builtins() {
         assert!(is_executable_op("rf.transform.trim"));
         assert!(is_executable_op("rf.redaction.region"));
+        assert!(is_executable_op("rf.compose.layers"));
+        assert!(is_executable_op("rf.transform.fade_in"));
         assert!(!is_executable_op("rf.not.real"));
+    }
+
+    #[test]
+    fn materialize_fade_and_compose() {
+        let registry = OperationRegistry::with_builtins();
+        let base: Arc<dyn VideoClip> = Arc::new(ColorClip::new(
+            Size::new(16, 16),
+            Rgb8::WHITE,
+            Duration::from_secs(1.0),
+        ));
+        let overlay: Arc<dyn VideoClip> = Arc::new(ColorClip::new(
+            Size::new(8, 8),
+            Rgb8::RED,
+            Duration::from_secs(1.0),
+        ));
+        let g = RenderGraph {
+            version: RENDER_GRAPH_VERSION,
+            assets: vec![
+                MediaAsset {
+                    id: MediaAssetId("a".into()),
+                    uri: "seed://a".into(),
+                    duration: None,
+                    role: None,
+                },
+                MediaAsset {
+                    id: MediaAssetId("b".into()),
+                    uri: "seed://b".into(),
+                    duration: None,
+                    role: None,
+                },
+            ],
+            nodes: vec![
+                RenderNode {
+                    id: NodeId("src_a".into()),
+                    body: RenderNodeKind::Source {
+                        asset: MediaAssetId("a".into()),
+                    },
+                    inputs: vec![],
+                },
+                RenderNode {
+                    id: NodeId("src_b".into()),
+                    body: RenderNodeKind::Source {
+                        asset: MediaAssetId("b".into()),
+                    },
+                    inputs: vec![],
+                },
+                RenderNode {
+                    id: NodeId("fade".into()),
+                    body: RenderNodeKind::Op {
+                        operation: OperationId::new("rf.transform.fade_in"),
+                        params: serde_json::json!({ "duration": 0.2 }),
+                    },
+                    inputs: vec![NodeId("src_a".into())],
+                },
+                RenderNode {
+                    id: NodeId("comp".into()),
+                    body: RenderNodeKind::Op {
+                        operation: OperationId::new("rf.compose.layers"),
+                        params: serde_json::json!({
+                            "w": 16,
+                            "h": 16,
+                            "layers": [
+                                { "x": 0, "y": 0 },
+                                { "x": 4, "y": 4, "opacity": 1.0 }
+                            ]
+                        }),
+                    },
+                    inputs: vec![NodeId("fade".into()), NodeId("src_b".into())],
+                },
+                RenderNode {
+                    id: NodeId("out".into()),
+                    body: RenderNodeKind::Output {
+                        name: "main".into(),
+                    },
+                    inputs: vec![NodeId("comp".into())],
+                },
+            ],
+            outputs: vec![GraphOutput {
+                name: "main".into(),
+                node: NodeId("out".into()),
+                uri: Some("out.mp4".into()),
+            }],
+        };
+        let mut seeds = HashMap::new();
+        seeds.insert(MediaAssetId("a".into()), base);
+        seeds.insert(MediaAssetId("b".into()), overlay);
+        let (clip, _) = materialize_graph_with_seeds(&g, &registry, &seeds).unwrap();
+        assert_eq!(clip.size(), Size::new(16, 16));
+        let _ = clip.frame_at(Time::ZERO).unwrap();
     }
 }
