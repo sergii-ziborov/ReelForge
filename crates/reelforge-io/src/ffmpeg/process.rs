@@ -117,6 +117,7 @@ pub fn encode_rawvideo_h264(
     video_codec: &str,
     crf: Option<u8>,
     pixel_format: &str,
+    extra_args: &[String],
     mut frames: impl Iterator<Item = Result<Frame>>,
 ) -> Result<()> {
     if !(fps.is_finite() && fps > 0.0) {
@@ -160,6 +161,9 @@ pub fn encode_rawvideo_h264(
     ]);
     if let Some(crf) = crf {
         cmd.args(["-crf", &crf.to_string()]);
+    }
+    if !extra_args.is_empty() {
+        cmd.args(extra_args);
     }
     cmd.arg(path);
     cmd.stdin(Stdio::piped())

@@ -72,12 +72,23 @@ Default intensity ≈ `2 * radius / 3` (same control surface as MoviePy-style he
 | AudioNormalize | `AudioNormalize::peak()` | Peak to target |
 | AudioDelay | `AudioDelay::new(dur)` | Leading silence |
 
+## Subtitles
+
+| API | Format |
+|-----|--------|
+| `parse_srt` | SubRip |
+| `parse_vtt` | WebVTT |
+| `parse_ass` | ASS/SSA dialogue |
+| `parse_subtitles` | auto-detect from string |
+| `parse_subtitles_path` | by extension `.srt` / `.vtt` / `.ass` / `.ssa` |
+| `burn_in_layers` | cues → `CompositeLayer`s |
+
 ## Composition helpers
 
 - `composite_video(size, layers)`
 - `CompositeLayer::new(clip).with_position(…).with_opacity(…).with_layer_index(…)`
 - `concatenate_video` / `concatenate_audio`
-- Text: `TextClip` / `TextClipOptions`, `parse_srt`, `burn_in_layers`
+- Text: `TextClip` / `TextClipOptions`
 
 ## Quality tips
 

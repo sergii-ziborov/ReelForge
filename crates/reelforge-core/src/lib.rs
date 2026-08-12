@@ -7,6 +7,7 @@ mod effect;
 mod error;
 mod frame;
 mod layout;
+mod quality;
 mod solid;
 mod time;
 
@@ -19,6 +20,7 @@ pub use effect::{AudioEffect, VideoEffect, apply_audio_effects, apply_video_effe
 pub use error::{CoreError, Result};
 pub use frame::{Frame, FrameFormat, Mask};
 pub use layout::{Anchor, Position, Size};
+pub use quality::{psnr_rgb, ssim_rgb};
 pub use solid::{ColorClip, SilenceClip};
 pub use time::{Duration, Time, TimeRange};
 

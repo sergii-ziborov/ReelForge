@@ -11,8 +11,9 @@ Cut, concatenate, overlay, title, composite, and render media from code — a fl
 - **Audio FX** — gain, stereo L/R, fades, normalize, delay
 - **Resolutions** — `Size` presets through **8K** (`UHD_4K`, `UHD_8K`, …)
 - **Compositing** — layers, anchors, opacity, masks, cross-fades
-- **Text & subtitles** — bitmap or TrueType; SRT parse and burn-in
-- **I/O** — host **ffmpeg** / **ffprobe** (no libav link); `write_video` / `write_av` / `write_gif`; sequential file decode; filtergraph fast path
+- **Text & subtitles** — bitmap or TrueType; **SRT / WebVTT / ASS** parse and burn-in
+- **I/O** — host **ffmpeg** / **ffprobe** (no libav link); `write_video` / `write_av` / `write_gif`; **NVENC / QSV / AMF** helpers + extra ffmpeg args; sequential file decode; filtergraph
+- **Quality metrics** — `psnr_rgb` / `ssim_rgb` for frame regression checks
 - **CLI** — `version`, `probe`, `cut`, `filter`
 
 ## Install

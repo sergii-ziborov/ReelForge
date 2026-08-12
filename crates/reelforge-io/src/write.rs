@@ -163,6 +163,7 @@ fn write_video_inner(
             video_codec,
             options.crf,
             pixel_format,
+            &options.extra_ffmpeg_args,
             frames,
         );
         let audio_result = render_audio_pcm(audio, duration, &audio_tmp);
@@ -190,6 +191,7 @@ fn write_video_inner(
             video_codec,
             options.crf,
             pixel_format,
+            &options.extra_ffmpeg_args,
             frames,
         )
     }

@@ -16,7 +16,7 @@ pub use reelforge_core::{
     Anchor, AudioBuffer, AudioClip, AudioEffect, AudioFormat, ClipId, ColorClip, CoreError,
     Duration, Frame, FrameFormat, Mask, Position, Rgb8, Rgba8, SampleLayout, SilenceClip, Size,
     Time, TimeRange, TimedAudio, TimedVideo, VideoClip, VideoEffect, apply_audio_effects,
-    apply_video_effects, subclip_audio, subclip_video,
+    apply_video_effects, psnr_rgb, ssim_rgb, subclip_audio, subclip_video,
 };
 pub use reelforge_fx::{
     AccelDecel, AudioDelay, AudioFadeIn, AudioFadeOut, AudioNormalize, BlackAndWhite, Blink, Crop,
@@ -33,7 +33,7 @@ pub use reelforge_io::{
 };
 pub use reelforge_text::{
     BITMAP_FONT, BurnInOptions, SubtitleCue, TextClip, TextClipOptions, TextError, burn_in_layers,
-    parse_srt, text_clip,
+    parse_ass, parse_srt, parse_subtitles, parse_subtitles_path, parse_vtt, text_clip,
 };
 
 /// Convenient imports for application code.
@@ -53,7 +53,8 @@ pub mod prelude {
         VideoEffect, VideoFileClip, VolumeGain, WriteGifOptions, WriteVideoOptions,
         apply_audio_effects, apply_video_effects, burn_in_layers, composite_video,
         composite_video_with_background, concatenate_audio, concatenate_video, ffmpeg_available,
-        open_audio, open_video, parse_srt, resize_bicubic, resize_bilinear, run_filtergraph,
+        open_audio, open_video, parse_ass, parse_srt, parse_subtitles, parse_subtitles_path,
+        parse_vtt, psnr_rgb, resize_bicubic, resize_bilinear, run_filtergraph, ssim_rgb,
         subclip_audio,
         subclip_video, text_clip, validate_gain, write_av, write_gif, write_video,
     };

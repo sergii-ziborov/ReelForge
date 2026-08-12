@@ -40,6 +40,17 @@ WriteVideoOptions::new("out.mp4", 24.0)
     .with_video_codec("libx264")
     .with_duration(Duration::from_secs(10.0));
 
+// Hardware encode passthrough (requires matching ffmpeg + GPU)
+WriteVideoOptions::new("out.mp4", 24.0).with_nvenc(23);
+WriteVideoOptions::new("out.mp4", 24.0).with_nvenc_hevc(23);
+WriteVideoOptions::new("out.mp4", 24.0).with_qsv(23);
+WriteVideoOptions::new("out.mp4", 24.0).with_amf(23);
+// Or raw args:
+WriteVideoOptions::new("out.mp4", 24.0)
+    .with_video_codec("h264_nvenc")
+    .without_crf()
+    .with_extra_args(["-preset", "p5", "-cq", "20", "-b:v", "0"]);
+
 WriteGifOptions::new("loop.gif", 15.0)
     .with_duration(Duration::from_secs(2.0));
 ```

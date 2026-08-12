@@ -73,6 +73,9 @@ let titled = {
 // H.264 video
 write_video(&*titled, &WriteVideoOptions::new("out.mp4", 24.0).with_crf(20))?;
 
+// Hardware encode (ffmpeg + GPU)
+write_video(&*titled, &WriteVideoOptions::new("out_nv.mp4", 24.0).with_nvenc(23))?;
+
 // Video + audio mux (AAC by default)
 if let Some(a) = audio {
     write_av(&*titled, a, &WriteVideoOptions::new("out_av.mp4", 24.0))?;
@@ -81,6 +84,22 @@ if let Some(a) = audio {
 // Animated GIF (palettegen / paletteuse)
 write_gif(&*titled, &WriteGifOptions::new("out.gif", 12.0)
     .with_duration(Duration::from_secs(3.0)))?;
+```
+
+## Subtitles (SRT / WebVTT / ASS)
+
+```rust
+let cues = parse_subtitles_path("talk.vtt")?; // or .srt / .ass
+let layers = burn_in_layers(&cues, &BurnInOptions::default())?;
+// composite layers over your base video…
+```
+
+## Quality metrics
+
+```rust
+use reelforge::{psnr_rgb, ssim_rgb};
+let p = psnr_rgb(&frame_a, &frame_b)?; // dB, ∞ if identical
+let s = ssim_rgb(&frame_a, &frame_b)?; // ~0..=1
 ```
 
 For simple file-only transforms (trim/crop/scale/flip) without pulling frames into process memory, use the **filtergraph** path:

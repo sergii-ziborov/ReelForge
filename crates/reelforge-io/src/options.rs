@@ -17,10 +17,14 @@ pub struct WriteVideoOptions {
     pub audio_codec: Option<String>,
     /// Optional maximum duration to write (defaults to clip duration).
     pub duration: Option<Duration>,
-    /// CRF quality for libx264-style encoders (`18`–`28` typical). `None` uses encoder default.
+    /// CRF quality for libx264-style encoders (`18`–`28` typical). `None` skips `-crf`.
     pub crf: Option<u8>,
-    /// Pixel format for the encoder input path after conversion (default `yuv420p`).
+    /// Pixel format for the encoder (default `yuv420p`).
     pub pixel_format: Option<String>,
+    /// Extra `ffmpeg` arguments after `-c:v` / `-pix_fmt` (hardware encode, presets, bitrates).
+    ///
+    /// Example: `["-preset", "p4", "-cq", "23", "-b:v", "0"]` for NVIDIA encode.
+    pub extra_ffmpeg_args: Vec<String>,
 }
 
 impl WriteVideoOptions {
@@ -36,20 +40,28 @@ impl WriteVideoOptions {
             duration: None,
             crf: Some(23),
             pixel_format: None,
+            extra_ffmpeg_args: Vec::new(),
         }
     }
 
-    /// Override video codec.
+    /// Override video codec (e.g. `libx264`, `h264_nvenc`, `h264_qsv`, `hevc_amf`).
     #[must_use]
     pub fn with_video_codec(mut self, codec: impl Into<String>) -> Self {
         self.video_codec = Some(codec.into());
         self
     }
 
-    /// Override CRF.
+    /// Override CRF (software x264/x265). Cleared by [`Self::with_nvenc`] helpers.
     #[must_use]
     pub fn with_crf(mut self, crf: u8) -> Self {
         self.crf = Some(crf);
+        self
+    }
+
+    /// Disable `-crf` (useful for hardware encoders that use `-cq` / `-qp` instead).
+    #[must_use]
+    pub fn without_crf(mut self) -> Self {
+        self.crf = None;
         self
     }
 
@@ -65,6 +77,82 @@ impl WriteVideoOptions {
     pub fn with_duration(mut self, duration: Duration) -> Self {
         self.duration = Some(duration);
         self
+    }
+
+    /// Append raw ffmpeg CLI args (after `-c:v` / `-pix_fmt` / optional `-crf`).
+    #[must_use]
+    pub fn with_extra_args(mut self, args: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.extra_ffmpeg_args
+            .extend(args.into_iter().map(Into::into));
+        self
+    }
+
+    /// NVIDIA NVENC H.264 (`h264_nvenc`) with constant quality `cq` (typical 19–28).
+    ///
+    /// Requires an ffmpeg build with NVENC and a supported GPU.
+    #[must_use]
+    pub fn with_nvenc(self, cq: u8) -> Self {
+        self.with_video_codec("h264_nvenc")
+            .without_crf()
+            .with_extra_args([
+                "-preset".into(),
+                "p4".into(),
+                "-tune".into(),
+                "hq".into(),
+                "-rc".into(),
+                "vbr".into(),
+                "-cq".into(),
+                cq.to_string(),
+                "-b:v".into(),
+                "0".into(),
+            ])
+    }
+
+    /// NVIDIA NVENC HEVC (`hevc_nvenc`).
+    #[must_use]
+    pub fn with_nvenc_hevc(self, cq: u8) -> Self {
+        self.with_video_codec("hevc_nvenc")
+            .without_crf()
+            .with_extra_args([
+                "-preset".into(),
+                "p4".into(),
+                "-rc".into(),
+                "vbr".into(),
+                "-cq".into(),
+                cq.to_string(),
+                "-b:v".into(),
+                "0".into(),
+            ])
+    }
+
+    /// Intel Quick Sync H.264 (`h264_qsv`) with global quality.
+    #[must_use]
+    pub fn with_qsv(self, global_quality: u8) -> Self {
+        self.with_video_codec("h264_qsv")
+            .without_crf()
+            .with_extra_args([
+                "-global_quality".into(),
+                global_quality.to_string(),
+                "-look_ahead".into(),
+                "1".into(),
+            ])
+    }
+
+    /// AMD AMF H.264 (`h264_amf`) with quality mode.
+    #[must_use]
+    pub fn with_amf(self, quality: u8) -> Self {
+        self.with_video_codec("h264_amf")
+            .without_crf()
+            .with_extra_args([
+                "-quality".into(),
+                "quality".into(),
+                "-rc".into(),
+                "cqp".into(),
+                "-qp_i".into(),
+                quality.to_string(),
+                "-qp_p".into(),
+                quality.to_string(),
+            ])
     }
 }
 
