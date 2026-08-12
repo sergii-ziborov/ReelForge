@@ -16,6 +16,7 @@ mod options;
 mod pipeline;
 mod pool;
 mod preview;
+mod realtime;
 mod render_plan;
 mod stage_cache;
 mod tracks_json;
@@ -44,6 +45,10 @@ pub use mask_bridge::{
 pub use options::{OpenAudioOptions, OpenVideoOptions, WriteGifOptions, WriteVideoOptions};
 pub use pool::RgbFramePool;
 pub use preview::{ProxyOptions, proxy_size, thumbnail_png_bytes, write_proxy, write_thumbnail};
+pub use realtime::{
+    HwEncoderSupport, RealtimeExport, detect_hw_encoders, nvenc_available, realtime_write_options,
+    run_filtergraph_encode,
+};
 pub use render_plan::{
     ExtractedPlan, OptimizeStats, OptimizedPlan, PlanBackend, PlanOp, PlanOutput, PlanSource,
     RENDER_PLAN_VERSION, RenderPlan, apply_plan_ops, explain_plan, extract_ffmpeg,

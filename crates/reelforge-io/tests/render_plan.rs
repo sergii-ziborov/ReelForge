@@ -197,11 +197,15 @@ fn run_hybrid_ffmpeg_prefix_then_rust_custom() {
         });
 
     let extracted = extract_ffmpeg(&plan);
-    assert!(!extracted.fully_ffmpeg);
+    // grayscale is now a first-class FFmpeg filter — full pure path.
+    assert!(extracted.fully_ffmpeg);
     assert!(extracted.has_ffmpeg_segment());
-    assert!(extracted.remainder_op_count >= 2);
+    assert_eq!(extracted.remainder_op_count, 0);
+    let vf = extracted.ffmpeg_vf.as_deref().unwrap_or("");
+    assert!(vf.contains("hflip"));
+    assert!(vf.contains("hue=s=0"));
 
-    run_render_plan(&plan).expect("hybrid run_render_plan");
+    run_render_plan(&plan).expect("pure ffmpeg run_render_plan");
     assert!(output.is_file());
     assert!(std::fs::metadata(&output).unwrap().len() > 0);
 }

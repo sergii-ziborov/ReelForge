@@ -51,6 +51,8 @@ pub enum FilterOp {
         /// Total media duration for start offset.
         total: f64,
     },
+    /// Desaturate to grayscale (`hue=s=0`).
+    BlackAndWhite,
 }
 
 /// Ordered filter chain for a single input → single output.
@@ -111,6 +113,7 @@ impl FilterOp {
                 let st = (*total - *duration).max(0.0);
                 format!("fade=t=out:st={st}:d={duration}")
             }
+            Self::BlackAndWhite => "hue=s=0".into(),
         }
     }
 }

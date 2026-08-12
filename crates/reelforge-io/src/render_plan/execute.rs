@@ -173,13 +173,27 @@ mod tests {
         let plan = RenderPlan::from_file("in.mp4")
             .then(PlanOp::HFlip)
             .then(PlanOp::Custom {
-                name: "black_and_white".into(),
-                params: None,
+                name: "head_blur".into(),
+                params: Some(serde_json::json!({"radius": 12})),
             })
             .with_output(PlanOutput::new("out.mp4"));
         let text = explain_plan(&plan);
         assert!(text.contains("mode: hybrid"));
         assert!(text.contains("fully_ffmpeg: false"));
+    }
+
+    #[test]
+    fn explain_bw_is_pure_ffmpeg() {
+        let plan = RenderPlan::from_file("in.mp4")
+            .then(PlanOp::HFlip)
+            .then(PlanOp::Custom {
+                name: "black_and_white".into(),
+                params: None,
+            })
+            .with_output(PlanOutput::new("out.mp4"));
+        let text = explain_plan(&plan);
+        assert!(text.contains("mode: ffmpeg"));
+        assert!(text.contains("fully_ffmpeg: true"));
     }
 
     #[test]

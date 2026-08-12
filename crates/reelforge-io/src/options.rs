@@ -131,6 +131,30 @@ impl WriteVideoOptions {
             ])
     }
 
+    /// NVIDIA NVENC H.264 **low-latency** realtime preset (`p1` + `ll`).
+    ///
+    /// Prefer this for live preview / interactive export. Quality is lower than
+    /// [`Self::with_nvenc`] but latency and wall-clock are much better.
+    #[must_use]
+    pub fn with_nvenc_realtime(self, cq: u8) -> Self {
+        self.with_video_codec("h264_nvenc")
+            .without_crf()
+            .with_extra_args([
+                "-preset".into(),
+                "p1".into(),
+                "-tune".into(),
+                "ll".into(),
+                "-rc".into(),
+                "vbr".into(),
+                "-cq".into(),
+                cq.to_string(),
+                "-b:v".into(),
+                "0".into(),
+                "-rc-lookahead".into(),
+                "0".into(),
+            ])
+    }
+
     /// NVIDIA NVENC HEVC (`hevc_nvenc`).
     #[must_use]
     pub fn with_nvenc_hevc(self, cq: u8) -> Self {

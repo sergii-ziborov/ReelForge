@@ -114,6 +114,7 @@ impl PlanOp {
     #[must_use]
     pub fn backend(&self) -> PlanBackend {
         match self {
+            Self::Custom { name, .. } if is_ffmpeg_custom_name(name) => PlanBackend::Ffmpeg,
             Self::Custom { .. } => PlanBackend::Rust,
             Self::Identity
             | Self::Trim { .. }
@@ -164,8 +165,23 @@ impl PlanOp {
                 duration: *duration,
                 total: *total,
             },
+            Self::Custom { name, .. } if is_ffmpeg_custom_name(name) => custom_to_filter_op(name)?,
             Self::Identity | Self::Custom { .. } => return None,
         })
+    }
+}
+
+fn is_ffmpeg_custom_name(name: &str) -> bool {
+    matches!(
+        name.trim().to_ascii_lowercase().as_str(),
+        "black_and_white" | "bw" | "grayscale" | "grey"
+    )
+}
+
+fn custom_to_filter_op(name: &str) -> Option<FilterOp> {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "black_and_white" | "bw" | "grayscale" | "grey" => Some(FilterOp::BlackAndWhite),
+        _ => None,
     }
 }
 
