@@ -2,6 +2,7 @@
 //!
 //! UHD graphs allocate large RGB buffers; they run in a separate group so
 //! 720p timings are not inflated by memory pressure.
+#![allow(missing_docs)]
 
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use reelforge_compose::{CompositeLayer, CompositeVideo};

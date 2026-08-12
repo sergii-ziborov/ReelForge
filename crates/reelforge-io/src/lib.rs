@@ -14,6 +14,7 @@ mod options;
 mod pipeline;
 mod pool;
 mod render_plan;
+mod tracks_json;
 mod video_file;
 mod write;
 
@@ -34,6 +35,10 @@ pub use render_plan::{
     run_render_plan, run_render_plan_with, validate_remainder,
 };
 pub use video_file::{VideoFileClip, open_video};
+pub use tracks_json::{
+    TRACKS_JSON_VERSION, SampleJson, TrackJson, TracksDocument, load_track_set, parse_track_set,
+    track_set_from_value,
+};
 pub use write::{
     write_av, write_av_with, write_duration, write_gif, write_gif_with, write_video,
     write_video_with,

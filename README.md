@@ -45,7 +45,7 @@ cargo install reelforge-cli    # installs the `reelforge` binary
 - **Geometry:** crop, resize (**nearest / bilinear / bicubic**), rotate (90° / free angle), mirror, margin, even size, scroll, slide in/out
 - **Time:** speed, accel/decel, reverse, time-symmetrize, loop, freeze, freeze-region, super-sample, blink
 - **Color / look:** fades, B&W, invert, multiply, gamma, lum/contrast, **painting** (edge-enhance + ink), chroma mask, mask and/or
-- **Blur:** **HeadBlur** — separable Gaussian + soft feather (tracking path supported)
+- **Blur:** **HeadBlur** + **TrackedBlur** (multi-region tracks JSON / SightLoom-compatible samples)
 - **Audio:** gain, stereo L/R, fade in/out, peak normalize, delay
 
 ### Text & captions

@@ -135,9 +135,44 @@ input ──► [FFmpeg prefix ops] ──► temp.mp4 ──► open ──► 
                 (optional)                         custom + crop/scale/…
 ```
 
-Known `custom` names on the Rust path: `black_and_white` / `bw`, `invert`, `painting`, `multiply_color` (`params.factor`), `identity`.
+Known `custom` names on the Rust path:
 
-Unknown customs (e.g. `head_blur` until SightLoom adapter) fail with a clear error before encode.
+| name | params |
+|------|--------|
+| `black_and_white` / `bw` | — |
+| `invert` | — |
+| `painting` | — |
+| `multiply_color` | `factor` |
+| `head_blur` / `tracked_blur` / `privacy_blur` | `tracks` or `tracks_path`, optional `radius`, `radius_scale`, `feather`, `intensity` |
+| `identity` | — |
+
+### Tracks JSON (SightLoom adapter boundary)
+
+ReelForge does **not** link SightLoom. Vision exports this intermediate:
+
+```json
+{
+  "version": 1,
+  "tracks": [{
+    "id": "face_12",
+    "kind": "face",
+    "samples": [
+      {"t": 0.0, "cx": 320, "cy": 180, "radius": 40, "conf": 0.94},
+      {"t": 1.0, "x": 300, "y": 160, "w": 80, "h": 90, "conf": 0.91}
+    ]
+  }]
+}
+```
+
+Samples accept **center+radius**, **x/y/w/h**, or **left/top/right/bottom** (SightLoom `Rect`-style).
+
+```rust
+use reelforge::prelude::*;
+
+let tracks = load_track_set("faces.json")?;
+let clip = TrackedBlur::new(tracks).apply(Arc::new(open_video(&opts)?))?;
+// or via plan: custom head_blur + params.tracks_path
+```
 
 CLI:
 

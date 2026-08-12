@@ -33,6 +33,8 @@ mod speed;
 mod super_sample;
 mod time_mirror;
 mod time_sym;
+mod tracked_blur;
+mod tracks;
 
 pub use accel_decel::AccelDecel;
 pub use audio_delay::AudioDelay;
@@ -66,6 +68,8 @@ pub use speed::Speed;
 pub use super_sample::SuperSample;
 pub use time_mirror::TimeMirror;
 pub use time_sym::TimeSymmetrize;
+pub use tracked_blur::TrackedBlur;
+pub use tracks::{RegionSample, RegionTrack, TrackSet};
 
 use reelforge_core::{AudioEffect, VideoEffect};
 use std::sync::Arc;

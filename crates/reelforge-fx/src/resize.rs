@@ -155,7 +155,7 @@ mod tests {
 
     #[test]
     fn bilinear_blends_edges() {
-        let mut data = vec![0_u8; 2 * 1 * 3];
+        let mut data = vec![0_u8; 6];
         data[0..3].copy_from_slice(&[0, 0, 0]);
         data[3..6].copy_from_slice(&[255, 255, 255]);
         let frame = Frame::from_raw(Size::new(2, 1), FrameFormat::Rgb8, data).unwrap();

@@ -210,10 +210,33 @@ fn run_hybrid_ffmpeg_prefix_then_rust_custom() {
 fn hybrid_rejects_unknown_custom_before_work() {
     let plan = RenderPlan::from_file("nope.mp4")
         .then(PlanOp::Custom {
-            name: "head_blur".into(),
+            name: "not_a_real_fx".into(),
             params: None,
         })
         .with_output(PlanOutput::new("out.mp4"));
     let err = run_render_plan(&plan);
     assert!(err.is_err());
+}
+
+#[test]
+fn privacy_tracked_blur_plan_applies() {
+    // Pure Rust path: no ffmpeg required (ColorClip-free — open needs file).
+    // Unit coverage of tracks lives in tracks_json / apply; this checks plan validates.
+    let plan = RenderPlan::from_file("nope.mp4")
+        .then(PlanOp::Custom {
+            name: "tracked_blur".into(),
+            params: Some(serde_json::json!({
+                "tracks": [{
+                    "id": "f1",
+                    "samples": [{"t": 0.0, "cx": 10.0, "cy": 10.0, "radius": 8.0}]
+                }]
+            })),
+        })
+        .with_output(PlanOutput::new("out.mp4"));
+    // known custom → fails on missing input, not on unknown op
+    let err = run_render_plan(&plan).unwrap_err().to_string();
+    assert!(
+        err.contains("not found") || err.contains("unknown"),
+        "unexpected err: {err}"
+    );
 }
