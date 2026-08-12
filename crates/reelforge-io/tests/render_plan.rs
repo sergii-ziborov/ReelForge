@@ -1,4 +1,4 @@
-//! `RenderPlan` JSON, optimize, extract, and (optional) `FFmpeg` execution.
+//! `RenderPlan` JSON, optimize, extract, hybrid, and (optional) `FFmpeg` execution.
 
 use reelforge_io::{
     PlanOp, PlanOutput, RenderPlan, extract_ffmpeg, ffmpeg_available, optimize_plan,
@@ -138,4 +138,82 @@ fn run_fully_ffmpeg_plan_end_to_end() {
     assert!(output.is_file());
     let meta = std::fs::metadata(&output).expect("meta");
     assert!(meta.len() > 0);
+}
+
+#[test]
+fn run_hybrid_ffmpeg_prefix_then_rust_custom() {
+    if skip_without_ffmpeg() {
+        return;
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let input: PathBuf = dir.path().join("src.mp4");
+    let output: PathBuf = dir.path().join("hybrid.mp4");
+
+    let status = Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=red:s=160x120:d=0.4",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:v",
+            "libx264",
+            "-crf",
+            "28",
+        ])
+        .arg(&input)
+        .status();
+    match status {
+        Ok(s) if s.success() => {}
+        Ok(s) => {
+            eprintln!("skipping: ffmpeg lavfi failed with {s}");
+            return;
+        }
+        Err(e) => {
+            eprintln!("skipping: ffmpeg spawn failed: {e}");
+            return;
+        }
+    }
+
+    let plan = RenderPlan::from_file(input.to_string_lossy())
+        .then(PlanOp::HFlip)
+        .then(PlanOp::Custom {
+            name: "black_and_white".into(),
+            params: None,
+        })
+        .then(PlanOp::Scale { w: 80, h: 60 })
+        .then(PlanOp::EvenDims)
+        .with_output(PlanOutput {
+            path: output.to_string_lossy().into_owned(),
+            fps: Some(10.0),
+            video_codec: Some("libx264".into()),
+            crf: Some(28),
+        });
+
+    let extracted = extract_ffmpeg(&plan);
+    assert!(!extracted.fully_ffmpeg);
+    assert!(extracted.has_ffmpeg_segment());
+    assert!(extracted.remainder_op_count >= 2);
+
+    run_render_plan(&plan).expect("hybrid run_render_plan");
+    assert!(output.is_file());
+    assert!(std::fs::metadata(&output).unwrap().len() > 0);
+}
+
+#[test]
+fn hybrid_rejects_unknown_custom_before_work() {
+    let plan = RenderPlan::from_file("nope.mp4")
+        .then(PlanOp::Custom {
+            name: "head_blur".into(),
+            params: None,
+        })
+        .with_output(PlanOutput::new("out.mp4"));
+    let err = run_render_plan(&plan);
+    assert!(err.is_err());
 }

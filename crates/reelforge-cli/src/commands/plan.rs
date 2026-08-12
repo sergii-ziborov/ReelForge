@@ -12,7 +12,7 @@ pub enum PlanMode {
     Optimize,
     /// Write extraction JSON (ffmpeg prefix + remainder).
     Extract,
-    /// Execute fully FFmpeg-extractable plan.
+    /// Execute plan (pure `FFmpeg` or hybrid FFmpeg+Rust).
     Run,
 }
 

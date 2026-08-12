@@ -724,6 +724,7 @@ dependencies = [
  "criterion",
  "image",
  "reelforge-core",
+ "reelforge-fx",
  "serde",
  "serde_json",
  "tempfile",

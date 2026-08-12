@@ -60,7 +60,7 @@ cargo install reelforge-cli    # installs the `reelforge` binary
 - Bounded frame pipeline (`WriteControl::max_in_flight`) + RGB buffer pool
 - Hardware encode helpers: **NVENC / QSV / AMF** + free-form `extra_ffmpeg_args`
 - Filtergraph fast path for pure file transforms (trim/crop/scale/flip)
-- **RenderPlan** JSON: optimize (fuse/DCE) + automatic FFmpeg subgraph extraction
+- **RenderPlan** JSON: optimize (fuse/DCE) + FFmpeg prefix extract + **hybrid** run (prefix → Rust remainder → encode)
 
 ### Quality & tooling
 - `psnr_rgb` / `ssim_rgb` frame metrics

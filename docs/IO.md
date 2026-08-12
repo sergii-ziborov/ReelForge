@@ -124,10 +124,20 @@ Typed deterministic plan for agents, CLI, and batch jobs:
 | `RenderPlan::load` / `save` / `from_json` | JSON document |
 | `optimize_plan` | Drop identity, cancel double flips, merge crops/scales |
 | `extract_ffmpeg` | Longest pure-FFmpeg **prefix** + Rust/custom remainder |
-| `run_render_plan` | Execute when **fully** FFmpeg-extractable |
-| `explain_plan` | Human-readable split summary |
+| `run_render_plan` / `run_render_plan_with` | Pure FFmpeg **or hybrid** (prefix → Rust remainder → encode) |
+| `explain_plan` | Human-readable split + `mode: ffmpeg|hybrid|rust` |
+| `apply_plan_ops` | Apply remainder ops on a clip graph |
 
-`Custom` ops (e.g. `{ "op": "custom", "name": "head_blur" }`) break the FFmpeg prefix; everything after stays on the remainder path.
+### Hybrid runner
+
+```text
+input ──► [FFmpeg prefix ops] ──► temp.mp4 ──► open ──► Rust remainder ──► write
+                (optional)                         custom + crop/scale/…
+```
+
+Known `custom` names on the Rust path: `black_and_white` / `bw`, `invert`, `painting`, `multiply_color` (`params.factor`), `identity`.
+
+Unknown customs (e.g. `head_blur` until SightLoom adapter) fail with a clear error before encode.
 
 CLI:
 

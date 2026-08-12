@@ -31,8 +31,9 @@ pub use reelforge_io::{
     OpenAudioOptions, OpenVideoOptions, OptimizeStats, OptimizedPlan, PlanBackend, PlanOp,
     PlanOutput, PlanSource, ProgressCallback, RENDER_PLAN_VERSION, RenderPlan, RgbFramePool,
     VideoFileClip, WriteControl, WriteGifOptions, WriteProgress, WriteStage, WriteVideoOptions,
-    explain_plan, extract_ffmpeg, extract_from_optimized, ffmpeg_available, open_audio, open_video,
-    optimize, optimize_plan, require_full_ffmpeg, run_filtergraph, run_render_plan, write_av,
+    apply_plan_ops, explain_plan, extract_ffmpeg, extract_from_optimized, ffmpeg_available,
+    is_known_custom, open_audio, open_video, optimize, optimize_plan, require_full_ffmpeg,
+    run_filtergraph, run_render_plan, run_render_plan_with, validate_remainder, write_av,
     write_av_with, write_gif, write_gif_with, write_video, write_video_with,
 };
 pub use reelforge_text::{
@@ -59,12 +60,12 @@ pub mod prelude {
         VideoFileClip, VolumeGain, WriteControl, WriteGifOptions, WriteProgress, WriteStage,
         WriteVideoOptions, apply_audio_effects, apply_video_effects, burn_in_layers,
         composite_video, composite_video_with_background, concatenate_audio, concatenate_video,
-        explain_plan, extract_ffmpeg, extract_from_optimized, ffmpeg_available, open_audio,
-        open_video, optimize, optimize_plan, parse_ass, parse_srt, parse_subtitles,
-        parse_subtitles_path, parse_vtt, psnr_rgb, require_full_ffmpeg, resize_bicubic,
-        resize_bilinear, run_filtergraph, run_render_plan, ssim_rgb, subclip_audio, subclip_video,
-        text_clip, validate_gain, write_av, write_av_with, write_gif, write_gif_with, write_video,
-        write_video_with,
+        apply_plan_ops, explain_plan, extract_ffmpeg, extract_from_optimized, ffmpeg_available,
+        is_known_custom, open_audio, open_video, optimize, optimize_plan, parse_ass, parse_srt,
+        parse_subtitles, parse_subtitles_path, parse_vtt, psnr_rgb, require_full_ffmpeg,
+        resize_bicubic, resize_bilinear, run_filtergraph, run_render_plan, run_render_plan_with,
+        ssim_rgb, subclip_audio, subclip_video, text_clip, validate_gain, validate_remainder,
+        write_av, write_av_with, write_gif, write_gif_with, write_video, write_video_with,
     };
 }
 

@@ -29,8 +29,9 @@ pub use options::{OpenAudioOptions, OpenVideoOptions, WriteGifOptions, WriteVide
 pub use pool::RgbFramePool;
 pub use render_plan::{
     ExtractedPlan, OptimizeStats, OptimizedPlan, PlanBackend, PlanOp, PlanOutput, PlanSource,
-    RENDER_PLAN_VERSION, RenderPlan, explain_plan, extract_ffmpeg, extract_from_optimized,
-    optimize, optimize_plan, require_full_ffmpeg, run_render_plan,
+    RENDER_PLAN_VERSION, RenderPlan, apply_plan_ops, explain_plan, extract_ffmpeg,
+    extract_from_optimized, is_known_custom, optimize, optimize_plan, require_full_ffmpeg,
+    run_render_plan, run_render_plan_with, validate_remainder,
 };
 pub use video_file::{VideoFileClip, open_video};
 pub use write::{
