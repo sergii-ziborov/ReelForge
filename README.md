@@ -64,8 +64,10 @@ cargo install reelforge-cli    # installs the `reelforge` binary
 
 ### Quality & tooling
 - `psnr_rgb` / `ssim_rgb` frame metrics
+- **Correctness gate** (synthetic + MP4 decode/transform/encode, CI-failing floors) — see [docs/CORRECTNESS.md](docs/CORRECTNESS.md)
 - CLI: `version`, `probe`, `cut`, `filter`, `plan`
 - Criterion benches: `cargo bench -p reelforge-fx`, `cargo bench -p reelforge-io --bench render_plan`
+- CI: fmt / clippy / test / docs / package dry-run / bench compile (Linux, Windows, macOS) + FFmpeg job
 
 ---
 
@@ -75,7 +77,8 @@ cargo install reelforge-cli    # installs the `reelforge` binary
 |-----|----------|
 | **[docs/GUIDE.md](docs/GUIDE.md)** | Concepts, install, open/write, compose, subtitles, metrics |
 | **[docs/EFFECTS.md](docs/EFFECTS.md)** | Full effect catalog + quality tips |
-| **[docs/IO.md](docs/IO.md)** | FFmpeg discovery, sequential decode, HW encode, GIF |
+| **[docs/IO.md](docs/IO.md)** | FFmpeg discovery, sequential decode, HW encode, GIF, RenderPlan |
+| **[docs/CORRECTNESS.md](docs/CORRECTNESS.md)** | Public PSNR/SSIM pipeline gates + CI |
 | [docs.rs/reelforge](https://docs.rs/reelforge) | Generated API docs |
 | [crates.io/reelforge](https://crates.io/crates/reelforge) | Package registry |
 

@@ -1,0 +1,96 @@
+# Continuous quality gates for ReelForge (must stay green on main).
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  quality:
+    name: fmt / clippy / test / docs (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97"
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: reelforge-ci
+
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: test (no host ffmpeg required for pure suites)
+        run: cargo test --workspace --all-targets
+
+      - name: docs
+        run: cargo doc --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+      - name: package dry-run (dependency order)
+        shell: bash
+        run: |
+          set -euo pipefail
+          for pkg in reelforge-core reelforge-compose reelforge-fx reelforge-io reelforge-text reelforge reelforge-cli; do
+            echo "==== cargo package -p ${pkg} --list ===="
+            cargo package -p "${pkg}" --list --allow-dirty >/dev/null
+            cargo package -p "${pkg}" --no-verify --allow-dirty
+          done
+
+      - name: benches compile
+        run: cargo bench --workspace --no-run
+
+  ffmpeg-correctness:
+    name: FFmpeg roundtrip + correctness gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.97"
+          components: clippy
+
+      - name: Install FFmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          ffmpeg -version | head -n 1
+          ffprobe -version | head -n 1
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: reelforge-ci-ffmpeg
+
+      - name: Integration + correctness gate (requires ffmpeg)
+        run: cargo test -p reelforge-io --test correctness_gate --test ffmpeg_roundtrip --test render_plan --test write_control -- --nocapture
+
+      - name: Full workspace test with ffmpeg on PATH
+        run: cargo test --workspace --all-targets
