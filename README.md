@@ -55,7 +55,9 @@ cargo install reelforge-cli    # installs the `reelforge` binary
 ### I/O
 - `open_video` / `open_audio` / `ImageClip`
 - Sequential rawvideo pipe for ordered file access (fast encode path)
-- `write_video` (H.264 default), `write_av` (audio mux), `write_gif` (palette)
+- `write_video` / `write_av` / `write_gif` (+ `_with` for progress / cancel / pipeline)
+- Streaming PCM for `write_av` (chunked, no full-timeline buffer)
+- Bounded frame pipeline (`WriteControl::max_in_flight`) + RGB buffer pool
 - Hardware encode helpers: **NVENC / QSV / AMF** + free-form `extra_ffmpeg_args`
 - Filtergraph fast path for pure file transforms (trim/crop/scale/flip)
 - **RenderPlan** JSON: optimize (fuse/DCE) + automatic FFmpeg subgraph extraction

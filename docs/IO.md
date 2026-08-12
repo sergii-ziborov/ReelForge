@@ -33,8 +33,41 @@ assert!(ffmpeg_available());
 | API | Output |
 |-----|--------|
 | `write_video(clip, &WriteVideoOptions)` | Default libx264 + yuv420p (even sizes) |
-| `write_av(video, audio, &opts)` | Temp video + PCM → mux AAC (or `with_audio_codec`) |
-| `write_gif(clip, &WriteGifOptions)` | palettegen + paletteuse, loop forever |
+| `write_video_with(..., &WriteControl)` | Same + progress / cancel / pipeline depth |
+| `write_av(video, audio, &opts)` | Temp video + **streamed** PCM → mux AAC |
+| `write_av_with(..., &WriteControl)` | Same with controls |
+| `write_gif` / `write_gif_with` | palettegen + paletteuse, loop forever |
+
+### Progress, cancel, bounded pipeline
+
+```rust
+use reelforge::prelude::*;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+
+let cancel = CancelToken::new();
+let frames = Arc::new(AtomicU64::new(0));
+let frames2 = Arc::clone(&frames);
+let control = WriteControl::new()
+    .with_cancel(cancel.clone())
+    .with_max_in_flight(4) // bounded sample workers + ordered join
+    .with_progress(move |p| {
+        if p.stage == WriteStage::Video {
+            frames2.store(p.index, Ordering::Relaxed);
+        }
+    });
+
+write_video_with(&clip, &WriteVideoOptions::new("out.mp4", 24.0), &control)?;
+// cancel.cancel(); // cooperative stop → IoError::Cancelled
+```
+
+| Control | Meaning |
+|---------|---------|
+| `CancelToken` | Cooperative cancel mid-encode / audio stream |
+| `WriteProgress` | `stage` (Video / Audio / Mux / Done), index, total, fraction |
+| `max_in_flight` | `1` sequential; `>1` worker pool with ordered join (cap 32) |
+
+Audio PCM for `write_av` is written in ~1 s chunks (no full-timeline buffer).
 
 ```rust
 WriteVideoOptions::new("out.mp4", 24.0)

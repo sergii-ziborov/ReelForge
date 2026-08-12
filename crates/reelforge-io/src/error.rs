@@ -28,6 +28,10 @@ pub enum IoError {
     /// Image crate failure.
     #[error("image: {0}")]
     Image(String),
+
+    /// Cooperative cancel was requested during write.
+    #[error("write cancelled")]
+    Cancelled,
 }
 
 /// Result alias for I/O operations.

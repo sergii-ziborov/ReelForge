@@ -8,8 +8,23 @@ use reelforge_core::{Duration, Frame, FrameFormat, Result as CoreResult};
 ///
 /// Returns an error when the RGBA buffer length is invalid.
 pub fn frame_to_rgb24(frame: &Frame) -> CoreResult<Vec<u8>> {
+    let mut out = Vec::new();
+    frame_to_rgb24_into(frame, &mut out)?;
+    Ok(out)
+}
+
+/// Convert a frame into packed RGB24, reusing `out`'s allocation when possible.
+///
+/// # Errors
+///
+/// Returns an error when the RGBA buffer length is invalid.
+pub fn frame_to_rgb24_into(frame: &Frame, out: &mut Vec<u8>) -> CoreResult<()> {
+    out.clear();
     match frame.format() {
-        FrameFormat::Rgb8 => Ok(frame.data().to_vec()),
+        FrameFormat::Rgb8 => {
+            out.extend_from_slice(frame.data());
+            Ok(())
+        }
         FrameFormat::Rgba8 => {
             let data = frame.data();
             if !data.len().is_multiple_of(4) {
@@ -17,13 +32,13 @@ pub fn frame_to_rgb24(frame: &Frame) -> CoreResult<Vec<u8>> {
                     "rgba buffer length invalid",
                 ));
             }
-            let mut rgb = Vec::with_capacity(data.len() / 4 * 3);
+            out.reserve(data.len() / 4 * 3);
             for chunk in data.chunks_exact(4) {
-                rgb.push(chunk[0]);
-                rgb.push(chunk[1]);
-                rgb.push(chunk[2]);
+                out.push(chunk[0]);
+                out.push(chunk[1]);
+                out.push(chunk[2]);
             }
-            Ok(rgb)
+            Ok(())
         }
     }
 }

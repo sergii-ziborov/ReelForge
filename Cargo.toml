@@ -12,7 +12,7 @@ resolver = "3"
 default-members = ["crates/reelforge", "crates/reelforge-cli"]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/sergii-ziborov/ReelForge"
@@ -24,13 +24,13 @@ keywords = ["video", "audio", "editing", "composition", "ffmpeg"]
 categories = ["multimedia", "multimedia::video", "multimedia::audio"]
 
 [workspace.dependencies]
-reelforge = { path = "crates/reelforge", version = "0.1.1" }
-reelforge-cli = { path = "crates/reelforge-cli", version = "0.1.1" }
-reelforge-compose = { path = "crates/reelforge-compose", version = "0.1.1" }
-reelforge-core = { path = "crates/reelforge-core", version = "0.1.1" }
-reelforge-fx = { path = "crates/reelforge-fx", version = "0.1.1" }
-reelforge-io = { path = "crates/reelforge-io", version = "0.1.1" }
-reelforge-text = { path = "crates/reelforge-text", version = "0.1.1" }
+reelforge = { path = "crates/reelforge", version = "0.1.2" }
+reelforge-cli = { path = "crates/reelforge-cli", version = "0.1.2" }
+reelforge-compose = { path = "crates/reelforge-compose", version = "0.1.2" }
+reelforge-core = { path = "crates/reelforge-core", version = "0.1.2" }
+reelforge-fx = { path = "crates/reelforge-fx", version = "0.1.2" }
+reelforge-io = { path = "crates/reelforge-io", version = "0.1.2" }
+reelforge-text = { path = "crates/reelforge-text", version = "0.1.2" }
 clap = { version = "4", features = ["derive"] }
 fontdue = "0.9"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp"] }

@@ -6,7 +6,7 @@ mod probe;
 mod process;
 mod stream;
 
-pub use helpers::{frame_count_for, frame_to_rgb24};
+pub use helpers::{frame_count_for, frame_to_rgb24, frame_to_rgb24_into};
 pub use path::{FfmpegTools, ffmpeg_available};
 pub use probe::{AudioProbe, VideoProbe, probe_audio, probe_video};
 pub use process::{
