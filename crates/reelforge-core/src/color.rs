@@ -2,6 +2,7 @@
 
 /// 8-bit RGB color.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Rgb8 {
     /// Red channel.
     pub r: u8,
@@ -43,6 +44,7 @@ impl Rgb8 {
 
 /// 8-bit RGBA color.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Rgba8 {
     /// Red channel.
     pub r: u8,

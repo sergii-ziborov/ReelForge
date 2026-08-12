@@ -8,12 +8,14 @@ mod effect;
 mod error;
 mod frame;
 mod layout;
+mod media_time;
 mod quality;
 mod solid;
 mod stream;
 mod time;
 
 pub use audio::{AudioBuffer, AudioFormat, SampleLayout};
+pub use media_time::MediaTime;
 pub use cache::{
     CacheConfig, CacheStats, CachedVideo, cache_video, cache_video_realtime, cache_video_with,
 };

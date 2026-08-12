@@ -6,6 +6,7 @@ members = [
     "crates/reelforge-core",
     "crates/reelforge-fx",
     "crates/reelforge-io",
+    "crates/reelforge-render-graph",
     "crates/reelforge-text",
 ]
 resolver = "3"
@@ -30,6 +31,7 @@ reelforge-compose = { path = "crates/reelforge-compose", version = "0.1.4" }
 reelforge-core = { path = "crates/reelforge-core", version = "0.1.4" }
 reelforge-fx = { path = "crates/reelforge-fx", version = "0.1.4" }
 reelforge-io = { path = "crates/reelforge-io", version = "0.1.4" }
+reelforge-render-graph = { path = "crates/reelforge-render-graph", version = "0.1.4" }
 reelforge-text = { path = "crates/reelforge-text", version = "0.1.4" }
 clap = { version = "4", features = ["derive"] }
 fontdue = "0.9"

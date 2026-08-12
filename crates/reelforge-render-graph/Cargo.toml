@@ -1,25 +1,21 @@
 [package]
-name = "reelforge"
+name = "reelforge-render-graph"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-documentation = "https://docs.rs/reelforge"
 rust-version.workspace = true
 authors.workspace = true
-description.workspace = true
+description = "RenderGraph, MaskTimeline, keyframes, and typed operations for ReelForge"
 keywords.workspace = true
 categories.workspace = true
-readme = "../../README.md"
 
 [dependencies]
-reelforge-compose = { workspace = true }
 reelforge-core = { workspace = true }
-reelforge-fx = { workspace = true }
-reelforge-io = { workspace = true }
-reelforge-render-graph = { workspace = true }
-reelforge-text = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
 
 [lints]
 workspace = true

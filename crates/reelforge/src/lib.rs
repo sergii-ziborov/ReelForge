@@ -6,6 +6,7 @@ pub use reelforge_compose as compose;
 pub use reelforge_core as core;
 pub use reelforge_fx as fx;
 pub use reelforge_io as io;
+pub use reelforge_render_graph as render_graph;
 pub use reelforge_text as text;
 
 pub use reelforge_compose::{
@@ -14,11 +15,18 @@ pub use reelforge_compose::{
 };
 pub use reelforge_core::{
     Anchor, AudioBuffer, AudioClip, AudioEffect, AudioFormat, CacheConfig, CacheStats, CachedVideo,
-    ClipId, ColorClip, CoreError, Duration, Frame, FrameFormat, FrameStream, Mask, Position, Rgb8,
-    Rgba8, SampleLayout, SilenceClip, Size, Time, TimeRange, TimedAudio, TimedVideo, VideoClip,
-    VideoEffect, apply_audio_effects, apply_video_effects, cache_video, cache_video_realtime,
-    cache_video_with, psnr_rgb, ssim_rgb, stream_video, stream_video_raw, subclip_audio,
-    subclip_video,
+    ClipId, ColorClip, CoreError, Duration, Frame, FrameFormat, FrameStream, Mask, MediaTime,
+    Position, Rgb8, Rgba8, SampleLayout, SilenceClip, Size, Time, TimeRange, TimedAudio,
+    TimedVideo, VideoClip, VideoEffect, apply_audio_effects, apply_video_effects, cache_video,
+    cache_video_realtime, cache_video_with, psnr_rgb, ssim_rgb, stream_video, stream_video_raw,
+    subclip_audio, subclip_video,
+};
+pub use reelforge_render_graph::{
+    Animated, BackendClass, CapabilitySet, Easing, ExecutionPlan, ExecutionStage, FfmpegStage,
+    GraphOutput, GpuStage, Keyframe, MaskInterpolation, MaskSample, MaskTimeline, MediaAsset,
+    MediaAssetId, MediaContract, MissingMaskPolicy, NodeId, OperationDescriptor, OperationId,
+    OperationLimits, OperationRegistry, RENDER_GRAPH_VERSION, RedactionStyle, RegionRedaction,
+    RenderGraph, RenderNode, RenderNodeKind, RustStage, SemVer,
 };
 pub use reelforge_fx::{
     AccelDecel, AudioDelay, AudioFadeIn, AudioFadeOut, AudioNormalize, BlackAndWhite, Blink, Crop,
@@ -34,12 +42,12 @@ pub use reelforge_io::{
     OpenAudioOptions, OpenVideoOptions, OptimizeStats, OptimizedPlan, PlanBackend, PlanOp,
     PlanOutput, PlanSource, ProgressCallback, RENDER_PLAN_VERSION, RenderPlan, RgbFramePool,
     SampleJson, TRACKS_JSON_VERSION, TrackJson, TracksDocument, VideoFileClip, WriteControl,
-    WriteGifOptions, WriteProgress, WriteStage, WriteVideoOptions, apply_plan_ops, explain_plan,
-    extract_ffmpeg, extract_from_optimized, ffmpeg_available, is_known_custom, load_track_set,
-    open_audio, open_video, optimize, optimize_plan, parse_track_set, require_full_ffmpeg,
-    run_filtergraph, run_render_plan, run_render_plan_with, track_set_from_value,
-    validate_remainder, write_av, write_av_with, write_gif, write_gif_with, write_video,
-    write_video_with,
+    WriteGifOptions, WriteProgress, WriteStage, WriteVideoOptions, apply_plan_ops,
+    apply_region_redaction, explain_plan, extract_ffmpeg, extract_from_optimized, ffmpeg_available,
+    is_known_custom, load_track_set, mask_timeline_from_box, mask_timeline_to_track_set, open_audio,
+    open_video, optimize, optimize_plan, parse_track_set, require_full_ffmpeg, run_filtergraph,
+    run_render_plan, run_render_plan_with, track_set_from_value, validate_remainder, write_av,
+    write_av_with, write_gif, write_gif_with, write_video, write_video_with,
 };
 pub use reelforge_text::{
     BITMAP_FONT, BurnInOptions, SubtitleCue, TextClip, TextClipOptions, TextError, burn_in_layers,

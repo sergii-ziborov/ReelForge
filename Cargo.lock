@@ -680,6 +680,7 @@ dependencies = [
  "reelforge-core",
  "reelforge-fx",
  "reelforge-io",
+ "reelforge-render-graph",
  "reelforge-text",
 ]
 
@@ -704,6 +705,7 @@ dependencies = [
 name = "reelforge-core"
 version = "0.1.4"
 dependencies = [
+ "serde",
  "thiserror",
 ]
 
@@ -725,9 +727,20 @@ dependencies = [
  "image",
  "reelforge-core",
  "reelforge-fx",
+ "reelforge-render-graph",
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "reelforge-render-graph"
+version = "0.1.4"
+dependencies = [
+ "reelforge-core",
+ "serde",
+ "serde_json",
  "thiserror",
 ]
 

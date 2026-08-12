@@ -1,0 +1,85 @@
+//! Execution plan stages (scheduled hybrid backends).
+
+use crate::graph::NodeId;
+use crate::op::OperationId;
+use serde::{Deserialize, Serialize};
+
+/// `FFmpeg` filter / encode stage.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FfmpegStage {
+    /// Nodes covered.
+    pub nodes: Vec<NodeId>,
+    /// Optional compiled `-vf` fragment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vf: Option<String>,
+    /// Optional encode codec.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_codec: Option<String>,
+}
+
+/// In-process Rust stage.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RustStage {
+    /// Nodes covered.
+    pub nodes: Vec<NodeId>,
+    /// Operations applied in order.
+    #[serde(default)]
+    pub operations: Vec<OperationId>,
+}
+
+/// Adapter stage (e.g. `SightLoom` mask materialization).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AdapterStage {
+    /// Adapter name (`sightloom`, …).
+    pub adapter: String,
+    /// Nodes covered.
+    pub nodes: Vec<NodeId>,
+}
+
+/// Future GPU stage placeholder.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GpuStage {
+    /// Nodes covered.
+    pub nodes: Vec<NodeId>,
+    /// Backend hint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
+}
+
+/// One scheduled execution stage.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "stage", rename_all = "snake_case")]
+pub enum ExecutionStage {
+    /// `FFmpeg`.
+    Ffmpeg(FfmpegStage),
+    /// Rust.
+    Rust(RustStage),
+    /// External adapter.
+    Adapter(AdapterStage),
+    /// GPU.
+    Gpu(GpuStage),
+}
+
+/// Ordered hybrid execution plan derived from a [`crate::RenderGraph`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ExecutionPlan {
+    /// Stages in order.
+    #[serde(default)]
+    pub stages: Vec<ExecutionStage>,
+    /// Fingerprint / notes for cache keys.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+}
+
+impl ExecutionPlan {
+    /// Empty plan.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Append a stage.
+    pub fn push(&mut self, stage: ExecutionStage) {
+        self.stages.push(stage);
+    }
+}

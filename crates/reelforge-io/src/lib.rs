@@ -10,6 +10,7 @@ mod error;
 mod ffmpeg;
 mod filtergraph;
 mod image_clip;
+mod mask_bridge;
 mod options;
 mod pipeline;
 mod pool;
@@ -26,6 +27,9 @@ pub use ffmpeg::{
 };
 pub use filtergraph::{FilterGraph, FilterOp, run_filtergraph};
 pub use image_clip::ImageClip;
+pub use mask_bridge::{
+    apply_region_redaction, mask_timeline_from_box, mask_timeline_to_track_set,
+};
 pub use options::{OpenAudioOptions, OpenVideoOptions, WriteGifOptions, WriteVideoOptions};
 pub use pool::RgbFramePool;
 pub use render_plan::{

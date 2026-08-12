@@ -13,6 +13,11 @@ categories.workspace = true
 
 [dependencies]
 thiserror = { workspace = true }
+serde = { workspace = true, optional = true }
+
+[features]
+default = ["serde"]
+serde = ["dep:serde"]
 
 [lints]
 workspace = true
