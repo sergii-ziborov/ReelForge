@@ -95,11 +95,34 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         std::fs::create_dir_all(parent)?;
     }
 
-    let enc = encode_chain(graph.chain.as_ref(), &probe, &output)?;
-    println!(
-        "encode: duration={:.2}s @ {:.2} fps  max_in_flight=4  crf=23",
-        enc.write_secs, enc.write_fps
-    );
+    let stem = output
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("bench");
+    let enc_base = encode_chain(
+        graph.chain.as_ref(),
+        &probe,
+        &output,
+        4,
+        EncodeMode::Default,
+    )?;
+    let out_fast = output.with_file_name(format!("{stem}_fast.mp4"));
+    let enc_fast = encode_chain(
+        graph.chain.as_ref(),
+        &probe,
+        &out_fast,
+        8,
+        EncodeMode::VeryFast,
+    )?;
+    let out_uf = output.with_file_name(format!("{stem}_ultra.mp4"));
+    let enc_uf = encode_chain(
+        graph.chain.as_ref(),
+        &probe,
+        &out_uf,
+        1,
+        EncodeMode::UltraFast,
+    )?;
+
     println!("--- results ---");
     println!("open_ms          {:.1}", probe.open_ms);
     println!("graph_build_ms   {:.2}", graph.graph_ms);
@@ -107,14 +130,36 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     println!("warm_ms/frame    {:.2}", sample.warm_ms);
     println!("stream_ms/frame  {:.2}", sample.stream_ms_per_frame);
     println!("cache_hit_rate   {:.1}%", sample.cache_hit_rate * 100.0);
-    println!("encode_ms        {:.1}", enc.enc_ms);
-    println!("encode_fps       {:.2}", enc.enc_fps);
-    println!("progress_frames  {}", enc.progress_frames);
-    println!("output_bytes     {}", enc.out_bytes);
-    println!("output_path      {}", output.display());
+    println!(
+        "encode_base      {:.1} ms  {:.2} fps  (in_flight=4, default)",
+        enc_base.enc_ms, enc_base.enc_fps
+    );
+    println!(
+        "encode_fast      {:.1} ms  {:.2} fps  (in_flight=8, veryfast)",
+        enc_fast.enc_ms, enc_fast.enc_fps
+    );
+    println!(
+        "encode_ultra     {:.1} ms  {:.2} fps  (in_flight=1, ultrafast)",
+        enc_uf.enc_ms, enc_uf.enc_fps
+    );
+    println!(
+        "speedup_vs_base  fast={:.2}x  ultra={:.2}x",
+        enc_base.enc_ms / enc_fast.enc_ms.max(1e-9),
+        enc_base.enc_ms / enc_uf.enc_ms.max(1e-9)
+    );
+    println!("progress_frames  {}", enc_uf.progress_frames);
+    println!("output_bytes     {}", enc_uf.out_bytes);
+    println!("output_path      {}", out_uf.display());
     println!("self_psnr        {:?}", sample.psnr);
     println!("self_ssim        {:.6}", sample.ssim);
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum EncodeMode {
+    Default,
+    VeryFast,
+    UltraFast,
 }
 
 fn parse_args() -> Result<(String, PathBuf), Box<dyn std::error::Error>> {
@@ -250,8 +295,6 @@ fn sample_frames(
 }
 
 struct EncodeStats {
-    write_secs: f64,
-    write_fps: f64,
     enc_ms: f64,
     enc_fps: f64,
     progress_frames: u64,
@@ -262,33 +305,38 @@ fn encode_chain(
     chain: &dyn VideoClip,
     probe: &Probe,
     output: &PathBuf,
+    in_flight: usize,
+    mode: EncodeMode,
 ) -> Result<EncodeStats, Box<dyn std::error::Error>> {
     let frames_done = Arc::new(AtomicU64::new(0));
     let frames_done2 = Arc::clone(&frames_done);
-    let control =
-        WriteControl::new()
-            .with_max_in_flight(4)
-            .with_progress(move |p: WriteProgress| {
-                if p.stage == WriteStage::Video {
-                    frames_done2.store(p.index, Ordering::Relaxed);
-                }
-            });
+    let control = WriteControl::new()
+        .with_max_in_flight(in_flight)
+        .with_progress(move |p: WriteProgress| {
+            if p.stage == WriteStage::Video {
+                frames_done2.store(p.index, Ordering::Relaxed);
+            }
+        });
 
     let write_fps = probe.fps.clamp(12.0, 30.0);
     let write_secs = probe.dur.as_secs().clamp(0.5, 8.0);
     let write_dur = Duration::from_secs(write_secs);
-    let opts = WriteVideoOptions::new(output.to_string_lossy(), write_fps)
+    let mut opts = WriteVideoOptions::new(output.to_string_lossy(), write_fps)
         .with_crf(23)
         .with_duration(write_dur);
+    opts = match mode {
+        EncodeMode::Default => opts,
+        EncodeMode::VeryFast => opts.with_fast_encode(),
+        EncodeMode::UltraFast => opts.with_ultrafast_encode(),
+    };
 
     let t_enc = Instant::now();
     write_video_with(chain, &opts, &control)?;
     let enc_ms = t_enc.elapsed().as_secs_f64() * 1000.0;
     let n_frames = (write_secs * write_fps).round().max(1.0);
     let enc_fps = n_frames / (enc_ms / 1000.0).max(1e-9);
+    let _ = (write_secs, write_fps);
     Ok(EncodeStats {
-        write_secs,
-        write_fps,
         enc_ms,
         enc_fps,
         progress_frames: frames_done.load(Ordering::Relaxed),

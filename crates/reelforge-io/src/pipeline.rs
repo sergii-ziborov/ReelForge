@@ -2,15 +2,13 @@
 
 use crate::control::{WriteControl, WriteProgress, WriteStage};
 use crate::error::{IoError, Result};
-use crate::ffmpeg::{FfmpegTools, frame_to_rgb24, frame_to_rgb24_into};
+use crate::ffmpeg::{FfmpegTools, frame_to_rgb24_into};
 use crate::pool::RgbFramePool;
 use reelforge_core::{Frame, Size};
-use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc;
+use std::thread;
 
 /// Encode RGB24 frames produced by `sample(index)` into an H.264 (or other) file.
 ///
@@ -167,77 +165,66 @@ fn pump_parallel(
     control: &WriteControl,
     depth: usize,
 ) -> Result<()> {
-    // Sync channel provides backpressure: at most `depth` completed RGB frames
-    // wait for ordered join / encode.
-    let (tx, rx) = mpsc::sync_channel::<(u64, Result<Vec<u8>>)>(depth);
-    let next = AtomicU64::new(0);
-    let workers = depth;
-
-    std::thread::scope(|scope| {
-        for _ in 0..workers {
-            let tx = tx.clone();
-            let next = &next;
-            scope.spawn(move || {
-                loop {
-                    if control.check_cancel().is_err() {
-                        let i = next.fetch_add(1, Ordering::Relaxed);
-                        if i < frame_count {
-                            let _ = tx.send((i, Err(IoError::Cancelled)));
-                        }
-                        break;
-                    }
-                    let i = next.fetch_add(1, Ordering::Relaxed);
-                    if i >= frame_count {
-                        break;
-                    }
-                    let result = (|| {
-                        let frame = sample(i)?;
-                        if frame.size() != size {
-                            return Err(IoError::message(format!(
-                                "frame size {:?} does not match output {size:?}",
-                                frame.size()
-                            )));
-                        }
-                        let rgb = frame_to_rgb24(&frame).map_err(IoError::from)?;
-                        if rgb.len() != expected {
-                            return Err(IoError::message(format!(
-                                "unexpected rgb length {}, expected {expected}",
-                                rgb.len()
-                            )));
-                        }
-                        Ok(rgb)
-                    })();
-                    if tx.send((i, result)).is_err() {
-                        break;
-                    }
-                }
-            });
-        }
-        drop(tx);
-
-        let mut pending: BTreeMap<u64, Result<Vec<u8>>> = BTreeMap::new();
-        let mut expect = 0_u64;
-        while expect < frame_count {
+    // Sequential sample (file decoders stay monotonic) in chunks, then convert
+    // RGB in parallel threads and write in order. Overlaps convert with next
+    // chunk's sample less than a free-for-all sample pool, but avoids thrashing.
+    let chunk = depth.clamp(2, 16) as u64;
+    let pool = RgbFramePool::new(expected, (depth * 2).clamp(4, 32));
+    let mut i = 0_u64;
+    while i < frame_count {
+        control.check_cancel()?;
+        let end = (i + chunk).min(frame_count);
+        let mut frames: Vec<Frame> = Vec::with_capacity(usize::try_from(end - i).unwrap_or(16));
+        for j in i..end {
             control.check_cancel()?;
-            let (i, res) = rx
-                .recv()
-                .map_err(|_| IoError::process("encode pipeline worker channel closed early"))?;
-            pending.insert(i, res);
-            while let Some(res) = pending.remove(&expect) {
-                let rgb = res?;
-                stdin
-                    .write_all(&rgb)
-                    .map_err(|e| IoError::process(format!("write to ffmpeg stdin failed: {e}")))?;
-                control.report(WriteProgress::new(
-                    WriteStage::Video,
-                    expect + 1,
-                    frame_count,
-                ));
-                expect += 1;
+            let frame = sample(j)?;
+            if frame.size() != size {
+                return Err(IoError::message(format!(
+                    "frame size {:?} does not match output {size:?}",
+                    frame.size()
+                )));
             }
+            frames.push(frame);
         }
-        Ok(())
-    })
+
+        // Parallel RGB conversion for the chunk.
+        let mut rgbs: Vec<Option<Result<Vec<u8>>>> = (0..frames.len()).map(|_| None).collect();
+        thread::scope(|scope| {
+            for (slot, frame) in rgbs.iter_mut().zip(frames.iter()) {
+                let pool = &pool;
+                scope.spawn(move || {
+                    let mut rgb = pool.take();
+                    let res = match frame_to_rgb24_into(frame, &mut rgb).map_err(IoError::from) {
+                        Ok(()) if rgb.len() == expected => Ok(std::mem::take(&mut rgb)),
+                        Ok(()) => {
+                            let len = rgb.len();
+                            pool.give(rgb);
+                            Err(IoError::message(format!(
+                                "unexpected rgb length {len}, expected {expected}"
+                            )))
+                        }
+                        Err(e) => {
+                            pool.give(rgb);
+                            Err(e)
+                        }
+                    };
+                    *slot = Some(res);
+                });
+            }
+        });
+
+        for (offset, slot) in rgbs.into_iter().enumerate() {
+            let rgb = slot.expect("worker filled slot")?;
+            stdin
+                .write_all(&rgb)
+                .map_err(|e| IoError::process(format!("write to ffmpeg stdin failed: {e}")))?;
+            pool.give(rgb);
+            let idx = i + offset as u64;
+            control.report(WriteProgress::new(WriteStage::Video, idx + 1, frame_count));
+        }
+        i = end;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

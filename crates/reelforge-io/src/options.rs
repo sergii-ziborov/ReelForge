@@ -87,6 +87,29 @@ impl WriteVideoOptions {
         self
     }
 
+    /// x264/x265 encode preset (`ultrafast` … `veryslow`). Large impact on wall time.
+    ///
+    /// Prefer `veryfast` / `superfast` for preview/export throughput; keep `medium`
+    /// (ffmpeg default) for archival quality.
+    #[must_use]
+    pub fn with_x264_preset(self, preset: impl Into<String>) -> Self {
+        self.with_extra_args(["-preset".into(), preset.into()])
+    }
+
+    /// Throughput-oriented defaults: `libx264` + `veryfast` (keeps CRF if set).
+    #[must_use]
+    pub fn with_fast_encode(self) -> Self {
+        self.with_video_codec("libx264")
+            .with_x264_preset("veryfast")
+    }
+
+    /// Maximum throughput: `libx264` + `ultrafast` (lower quality, much faster).
+    #[must_use]
+    pub fn with_ultrafast_encode(self) -> Self {
+        self.with_video_codec("libx264")
+            .with_x264_preset("ultrafast")
+    }
+
     /// NVIDIA NVENC H.264 (`h264_nvenc`) with constant quality `cq` (typical 19–28).
     ///
     /// Requires an ffmpeg build with NVENC and a supported GPU.
