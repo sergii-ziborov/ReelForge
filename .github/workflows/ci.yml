@@ -51,14 +51,15 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
-      - name: package dry-run (dependency order)
+      - name: package list (manifest packaging check)
         shell: bash
         run: |
           set -euo pipefail
+          # Use --list only: full package/publish dry-run requires all path-dep
+          # versions to already exist on crates.io (breaks new version bumps).
           for pkg in reelforge-core reelforge-compose reelforge-fx reelforge-io reelforge-text reelforge reelforge-cli; do
             echo "==== cargo package -p ${pkg} --list ===="
-            cargo package -p "${pkg}" --list --allow-dirty >/dev/null
-            cargo package -p "${pkg}" --no-verify --allow-dirty
+            cargo package -p "${pkg}" --list --allow-dirty | head -n 5
           done
 
       - name: benches compile
