@@ -1,0 +1,843 @@
+//! Execute [`RenderGraph`] / [`ExecutionPlan`] (M3 hybrid runner).
+//!
+//! ```text
+//! RenderGraph ──schedule──► ExecutionPlan ──run──► outputs on disk
+//! ```
+//!
+//! Linear single-input DAGs are supported. Adapter / GPU stages fail clearly
+//! until host adapters land. `FFmpeg` stages that only carry encode/output
+//! markers finalize via Rust pixel encode (`write_video`); trim-only `FFmpeg`
+//! prefixes use host filtergraph when a later stage needs Rust pixels.
+
+use crate::control::{WriteControl, WriteProgress, WriteStage};
+use crate::error::{IoError, Result};
+use crate::filtergraph::{FilterGraph, FilterOp};
+use crate::mask_bridge::{apply_region_redaction, region_redaction_from_value};
+use crate::options::{OpenVideoOptions, WriteVideoOptions};
+use crate::video_file::open_video;
+use crate::{run_filtergraph, write_video_with};
+use reelforge_core::{Duration, MediaTime, Time, VideoClip, subclip_video};
+use reelforge_render_graph::{
+    BackendClass, ExecutionPlan, ExecutionStage, MediaAssetId, NodeId, OperationId,
+    OperationRegistry, RENDER_GRAPH_VERSION, RenderGraph, RenderNode, RenderNodeKind,
+    schedule_graph,
+};
+use std::collections::{HashMap, HashSet};
+use std::hash::BuildHasher;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+/// Encode / output hints collected while walking the graph.
+#[derive(Debug, Clone, Default)]
+pub struct GraphEncodeHints {
+    /// Output FPS override.
+    pub fps: Option<f64>,
+    /// Video codec (e.g. `libx264`).
+    pub video_codec: Option<String>,
+    /// CRF when using x264-style encodes.
+    pub crf: Option<u8>,
+    /// Primary output path (from first `GraphOutput.uri` or encode params).
+    pub output_path: Option<String>,
+}
+
+/// Options for [`run_render_graph_with`].
+#[derive(Debug, Clone)]
+pub struct GraphRunOptions {
+    /// Operation registry (builtins by default).
+    pub registry: OperationRegistry,
+    /// Override encode FPS.
+    pub fps: Option<f64>,
+    /// Override video codec.
+    pub video_codec: Option<String>,
+    /// Override CRF.
+    pub crf: Option<u8>,
+}
+
+impl Default for GraphRunOptions {
+    fn default() -> Self {
+        Self {
+            registry: OperationRegistry::with_builtins(),
+            fps: None,
+            video_codec: None,
+            crf: None,
+        }
+    }
+}
+
+impl GraphRunOptions {
+    /// Default builtins registry.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Replace registry.
+    #[must_use]
+    pub fn with_registry(mut self, registry: OperationRegistry) -> Self {
+        self.registry = registry;
+        self
+    }
+}
+
+/// Schedule + human-readable routing without writing files.
+///
+/// # Errors
+///
+/// Invalid graph or unknown operations.
+pub fn explain_render_graph(graph: &RenderGraph) -> Result<String> {
+    explain_render_graph_with(graph, &OperationRegistry::with_builtins())
+}
+
+/// Like [`explain_render_graph`] with a custom registry.
+///
+/// # Errors
+///
+/// Invalid graph or unknown operations.
+pub fn explain_render_graph_with(
+    graph: &RenderGraph,
+    registry: &OperationRegistry,
+) -> Result<String> {
+    graph
+        .validate()
+        .map_err(|e| IoError::message(e.to_string()))?;
+    let plan = schedule_graph(graph, registry).map_err(|e| IoError::message(e.to_string()))?;
+    let mut lines = Vec::new();
+    lines.push(format!(
+        "render_graph version={} assets={} nodes={} outputs={}",
+        graph.version,
+        graph.assets.len(),
+        graph.nodes.len(),
+        graph.outputs.len()
+    ));
+    lines.push(format!("execution_stages: {}", plan.stages.len()));
+    if let Some(notes) = &plan.notes {
+        lines.push(format!("notes: {notes}"));
+    }
+    for (i, stage) in plan.stages.iter().enumerate() {
+        lines.push(format!("  [{i}] {}", stage_summary(stage)));
+    }
+    for o in &graph.outputs {
+        lines.push(format!(
+            "output: name={} node={} uri={}",
+            o.name,
+            o.node.0,
+            o.uri.as_deref().unwrap_or("<unset>")
+        ));
+    }
+    Ok(lines.join("\n"))
+}
+
+fn stage_summary(stage: &ExecutionStage) -> String {
+    match stage {
+        ExecutionStage::Ffmpeg(s) => format!(
+            "ffmpeg nodes=[{}]",
+            s.nodes
+                .iter()
+                .map(|n| n.0.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        ExecutionStage::Rust(s) => format!(
+            "rust nodes=[{}] ops=[{}]",
+            s.nodes
+                .iter()
+                .map(|n| n.0.as_str())
+                .collect::<Vec<_>>()
+                .join(","),
+            s.operations
+                .iter()
+                .map(OperationId::as_str)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        ExecutionStage::Adapter(s) => format!("adapter={} nodes={}", s.adapter, s.nodes.len()),
+        ExecutionStage::Gpu(s) => format!("gpu nodes={}", s.nodes.len()),
+    }
+}
+
+/// Run a graph: schedule → hybrid materialize → write outputs.
+///
+/// # Errors
+///
+/// Validation, missing sources/outputs, unsupported stages, I/O, encode.
+pub fn run_render_graph(graph: &RenderGraph) -> Result<()> {
+    run_render_graph_with(graph, &WriteControl::default(), &GraphRunOptions::default())
+}
+
+/// Run a graph with control + options.
+///
+/// # Errors
+///
+/// Same as [`run_render_graph`], plus cancel.
+pub fn run_render_graph_with(
+    graph: &RenderGraph,
+    control: &WriteControl,
+    options: &GraphRunOptions,
+) -> Result<()> {
+    graph
+        .validate()
+        .map_err(|e| IoError::message(e.to_string()))?;
+    if graph.version == 0 || graph.version > RENDER_GRAPH_VERSION {
+        return Err(IoError::message(format!(
+            "unsupported RenderGraph version {}",
+            graph.version
+        )));
+    }
+    if graph.outputs.is_empty() {
+        return Err(IoError::message("RenderGraph has no outputs"));
+    }
+    let plan =
+        schedule_graph(graph, &options.registry).map_err(|e| IoError::message(e.to_string()))?;
+    run_execution_plan_with(graph, &plan, control, options)
+}
+
+/// Execute a pre-built [`ExecutionPlan`] against its source graph.
+///
+/// # Errors
+///
+/// Unsupported stages, missing assets, decode/encode failures.
+pub fn run_execution_plan(
+    graph: &RenderGraph,
+    plan: &ExecutionPlan,
+    control: &WriteControl,
+) -> Result<()> {
+    run_execution_plan_with(graph, plan, control, &GraphRunOptions::default())
+}
+
+/// Execute plan with options.
+///
+/// # Errors
+///
+/// Same as [`run_execution_plan`].
+pub fn run_execution_plan_with(
+    graph: &RenderGraph,
+    plan: &ExecutionPlan,
+    control: &WriteControl,
+    options: &GraphRunOptions,
+) -> Result<()> {
+    graph
+        .validate()
+        .map_err(|e| IoError::message(e.to_string()))?;
+    control.check_cancel()?;
+
+    // Reject adapter / GPU until host support lands.
+    for stage in &plan.stages {
+        match stage {
+            ExecutionStage::Adapter(s) => {
+                return Err(IoError::message(format!(
+                    "adapter stage '{}' not implemented in M3 runner",
+                    s.adapter
+                )));
+            }
+            ExecutionStage::Gpu(_) => {
+                return Err(IoError::message("GPU stages not implemented in M3 runner"));
+            }
+            ExecutionStage::Ffmpeg(_) | ExecutionStage::Rust(_) => {}
+        }
+    }
+
+    // Hybrid optimization: FFmpeg trim prefix → temp → Rust remainder → encode.
+    if can_use_ffmpeg_prefix(graph, plan)
+        && let Some(()) = try_hybrid_ffmpeg_prefix(graph, plan, control, options)?
+    {
+        return Ok(());
+    }
+
+    let seeds = HashMap::new();
+    let (clip, mut hints) = materialize_graph_with_seeds(graph, &options.registry, &seeds)?;
+    merge_option_hints(&mut hints, options);
+    write_graph_outputs(graph, clip.as_ref(), &hints, control)
+}
+
+/// Materialize the primary output clip in-process (no encode).
+///
+/// Resolves file sources via [`open_video`]. For tests, prefer
+/// [`materialize_graph_with_seeds`].
+///
+/// # Errors
+///
+/// Graph structure, unknown ops, open/decode failures.
+pub fn materialize_graph(graph: &RenderGraph) -> Result<Arc<dyn VideoClip>> {
+    let registry = OperationRegistry::with_builtins();
+    let seeds = HashMap::new();
+    Ok(materialize_graph_with_seeds(graph, &registry, &seeds)?.0)
+}
+
+/// Materialize with optional in-memory asset seeds (tests / preview hosts).
+///
+/// Seeds are keyed by [`MediaAssetId`] and bypass file open when present.
+///
+/// # Errors
+///
+/// Graph structure, unknown ops, open/decode failures.
+pub fn materialize_graph_with_seeds<S: BuildHasher>(
+    graph: &RenderGraph,
+    registry: &OperationRegistry,
+    seeds: &HashMap<MediaAssetId, Arc<dyn VideoClip>, S>,
+) -> Result<(Arc<dyn VideoClip>, GraphEncodeHints)> {
+    graph
+        .validate()
+        .map_err(|e| IoError::message(e.to_string()))?;
+    let order = graph
+        .topo_order()
+        .map_err(|e| IoError::message(e.to_string()))?;
+    let node_map: HashMap<&str, &RenderNode> =
+        graph.nodes.iter().map(|n| (n.id.0.as_str(), n)).collect();
+    let asset_map: HashMap<&str, &reelforge_render_graph::MediaAsset> = graph
+        .assets
+        .iter()
+        .map(|a| (a.id.0.as_str(), a))
+        .collect();
+
+    let mut produced: HashMap<String, Arc<dyn VideoClip>> = HashMap::new();
+    let mut hints = GraphEncodeHints::default();
+    let mut primary_out: Option<Arc<dyn VideoClip>> = None;
+
+    for id in order {
+        let node = node_map
+            .get(id.0.as_str())
+            .ok_or_else(|| IoError::message(format!("missing node {}", id.0)))?;
+        let clip = match &node.body {
+            RenderNodeKind::Source { asset } => resolve_source(asset, &asset_map, seeds)?,
+            RenderNodeKind::Op { operation, params } => {
+                let input = single_input_clip(node, &produced)?;
+                apply_registered_op(input, operation, params, registry, &mut hints)?
+            }
+            RenderNodeKind::Redaction { redaction } => {
+                let input = single_input_clip(node, &produced)?;
+                apply_region_redaction(input, redaction)?
+            }
+            RenderNodeKind::Output { .. } => {
+                let input = single_input_clip(node, &produced)?;
+                primary_out = Some(Arc::clone(&input));
+                input
+            }
+        };
+        produced.insert(id.0.clone(), clip);
+    }
+
+    if let Some(out) = graph.outputs.first() {
+        if let Some(uri) = &out.uri {
+            hints.output_path.get_or_insert_with(|| uri.clone());
+        }
+        if let Some(c) = produced.get(&out.node.0) {
+            return Ok((Arc::clone(c), hints));
+        }
+    }
+    if let Some(c) = primary_out {
+        return Ok((c, hints));
+    }
+    Err(IoError::message(
+        "RenderGraph produced no output clip (missing Output node?)",
+    ))
+}
+
+fn resolve_source<S: BuildHasher>(
+    asset: &MediaAssetId,
+    asset_map: &HashMap<&str, &reelforge_render_graph::MediaAsset>,
+    seeds: &HashMap<MediaAssetId, Arc<dyn VideoClip>, S>,
+) -> Result<Arc<dyn VideoClip>> {
+    if let Some(clip) = seeds.get(asset) {
+        return Ok(Arc::clone(clip));
+    }
+    let meta = asset_map
+        .get(asset.0.as_str())
+        .ok_or_else(|| IoError::message(format!("unknown asset {}", asset.0)))?;
+    let path = Path::new(&meta.uri);
+    if !path.is_file() {
+        return Err(IoError::message(format!(
+            "source asset {} not found: {}",
+            asset.0, meta.uri
+        )));
+    }
+    let opened = open_video(&OpenVideoOptions::new(&meta.uri).video_only())?;
+    Ok(Arc::new(opened))
+}
+
+fn single_input_clip(
+    node: &RenderNode,
+    produced: &HashMap<String, Arc<dyn VideoClip>>,
+) -> Result<Arc<dyn VideoClip>> {
+    if node.inputs.len() != 1 {
+        return Err(IoError::message(format!(
+            "node {} requires exactly one input (got {})",
+            node.id.0,
+            node.inputs.len()
+        )));
+    }
+    let up = &node.inputs[0];
+    produced
+        .get(&up.0)
+        .cloned()
+        .ok_or_else(|| IoError::message(format!("upstream {} not produced yet", up.0)))
+}
+
+fn apply_registered_op(
+    clip: Arc<dyn VideoClip>,
+    operation: &OperationId,
+    params: &serde_json::Value,
+    registry: &OperationRegistry,
+    hints: &mut GraphEncodeHints,
+) -> Result<Arc<dyn VideoClip>> {
+    // Typed registry: unknown ids are rejected (not open Custom).
+    let _desc = registry
+        .get(operation)
+        .map_err(|e| IoError::message(e.to_string()))?;
+
+    match operation.as_str() {
+        "rf.transform.trim" => apply_trim(clip, params),
+        "rf.redaction.region" => {
+            let empty = params.is_null()
+                || params
+                    .as_object()
+                    .is_some_and(serde_json::Map::is_empty);
+            if empty {
+                return Err(IoError::message(
+                    "rf.redaction.region requires masks params (or use Redaction node)",
+                ));
+            }
+            let redaction = region_redaction_from_value(params)?;
+            apply_region_redaction(clip, &redaction)
+        }
+        "rf.encode.h264" => {
+            if let Some(path) = params.get("path").and_then(|v| v.as_str()) {
+                hints.output_path = Some(path.to_string());
+            }
+            if let Some(crf) = params.get("crf").and_then(serde_json::Value::as_u64) {
+                #[allow(clippy::cast_possible_truncation)]
+                {
+                    hints.crf = Some(crf.min(51) as u8);
+                }
+            }
+            if let Some(codec) = params.get("codec").and_then(|v| v.as_str()) {
+                hints.video_codec = Some(codec.to_string());
+            } else {
+                hints.video_codec.get_or_insert_with(|| "libx264".into());
+            }
+            if let Some(fps) = params.get("fps").and_then(serde_json::Value::as_f64) {
+                hints.fps = Some(fps);
+            }
+            Ok(clip)
+        }
+        other => Err(IoError::message(format!(
+            "operation '{other}' is registered but has no M3 executor yet"
+        ))),
+    }
+}
+
+fn apply_trim(clip: Arc<dyn VideoClip>, params: &serde_json::Value) -> Result<Arc<dyn VideoClip>> {
+    let start = param_seconds(params, "start")?.unwrap_or(0.0);
+    let duration = param_seconds(params, "duration")?.ok_or_else(|| {
+        IoError::message("rf.transform.trim requires duration (seconds or MediaTime)")
+    })?;
+    subclip_video(
+        clip,
+        Time::from_secs(start),
+        Duration::from_secs(duration),
+    )
+    .map_err(IoError::from)
+}
+
+fn param_seconds(params: &serde_json::Value, key: &str) -> Result<Option<f64>> {
+    let Some(v) = params.get(key) else {
+        return Ok(None);
+    };
+    if let Some(n) = v.as_f64() {
+        return Ok(Some(n));
+    }
+    if let Some(n) = v.as_i64() {
+        #[allow(clippy::cast_precision_loss)]
+        return Ok(Some(n as f64));
+    }
+    if let (Some(ticks), Some(ts)) = (
+        v.get("ticks").and_then(serde_json::Value::as_i64),
+        v.get("timescale").and_then(serde_json::Value::as_u64),
+    ) {
+        #[allow(clippy::cast_possible_truncation)]
+        let mt = MediaTime::new(ticks, ts as u32).map_err(IoError::from)?;
+        return Ok(Some(mt.as_secs()));
+    }
+    Err(IoError::message(format!(
+        "param '{key}' must be number or MediaTime object"
+    )))
+}
+
+fn merge_option_hints(hints: &mut GraphEncodeHints, options: &GraphRunOptions) {
+    if options.fps.is_some() {
+        hints.fps = options.fps;
+    }
+    if options.video_codec.is_some() {
+        hints.video_codec.clone_from(&options.video_codec);
+    }
+    if options.crf.is_some() {
+        hints.crf = options.crf;
+    }
+}
+
+fn write_graph_outputs(
+    graph: &RenderGraph,
+    clip: &dyn VideoClip,
+    hints: &GraphEncodeHints,
+    control: &WriteControl,
+) -> Result<()> {
+    let mut paths: Vec<String> = graph
+        .outputs
+        .iter()
+        .filter_map(|o| o.uri.clone())
+        .collect();
+    if paths.is_empty()
+        && let Some(p) = &hints.output_path
+    {
+        paths.push(p.clone());
+    }
+    if paths.is_empty() {
+        return Err(IoError::message(
+            "no output path: set GraphOutput.uri or rf.encode.h264 path",
+        ));
+    }
+
+    let fps = resolve_fps(hints, clip)?;
+    for path in paths {
+        control.check_cancel()?;
+        let mut opts = WriteVideoOptions::new(&path, fps);
+        if let Some(codec) = &hints.video_codec {
+            opts = opts.with_video_codec(codec.clone());
+        }
+        if let Some(crf) = hints.crf {
+            opts = opts.with_crf(crf);
+        } else if hints.video_codec.is_none() {
+            opts = opts.with_crf(23);
+        }
+        write_video_with(clip, &opts, control)?;
+    }
+    control.report(WriteProgress::new(WriteStage::Done, 1, 1));
+    Ok(())
+}
+
+fn resolve_fps(hints: &GraphEncodeHints, clip: &dyn VideoClip) -> Result<f64> {
+    if let Some(fps) = hints.fps {
+        if fps.is_finite() && fps > 0.0 {
+            return Ok(fps);
+        }
+        return Err(IoError::message(format!("invalid encode fps {fps}")));
+    }
+    if let Some(fps) = clip.fps()
+        && fps.is_finite()
+        && fps > 0.0
+    {
+        return Ok(fps);
+    }
+    Ok(24.0)
+}
+
+fn can_use_ffmpeg_prefix(graph: &RenderGraph, plan: &ExecutionPlan) -> bool {
+    let has_rust = plan
+        .stages
+        .iter()
+        .any(|s| matches!(s, ExecutionStage::Rust(_)));
+    let first_ffmpeg = plan
+        .stages
+        .first()
+        .is_some_and(|s| matches!(s, ExecutionStage::Ffmpeg(_)));
+    has_rust && first_ffmpeg && graph.assets.len() == 1
+}
+
+/// Returns `Ok(Some(()))` when hybrid path fully finished, `Ok(None)` to fall back.
+fn try_hybrid_ffmpeg_prefix(
+    graph: &RenderGraph,
+    plan: &ExecutionPlan,
+    control: &WriteControl,
+    options: &GraphRunOptions,
+) -> Result<Option<()>> {
+    let Some(ExecutionStage::Ffmpeg(first)) = plan.stages.first() else {
+        return Ok(None);
+    };
+
+    let mut filter = FilterGraph::new();
+    let mut saw_trim = false;
+    let mut strip_ids: HashSet<String> = HashSet::new();
+
+    for nid in &first.nodes {
+        let node = graph
+            .nodes
+            .iter()
+            .find(|n| n.id == *nid)
+            .ok_or_else(|| IoError::message(format!("missing node {}", nid.0)))?;
+        match &node.body {
+            RenderNodeKind::Source { .. } | RenderNodeKind::Output { .. } => {}
+            RenderNodeKind::Op { operation, params }
+                if operation.as_str() == "rf.transform.trim" =>
+            {
+                let start = param_seconds(params, "start")?.unwrap_or(0.0);
+                let duration = param_seconds(params, "duration")?.ok_or_else(|| {
+                    IoError::message("trim duration required for FFmpeg prefix")
+                })?;
+                filter = filter.then(FilterOp::Trim { start, duration });
+                saw_trim = true;
+                strip_ids.insert(nid.0.clone());
+            }
+            RenderNodeKind::Op { operation, .. } if operation.as_str() == "rf.encode.h264" => {
+                return Ok(None);
+            }
+            _ => return Ok(None),
+        }
+    }
+    if !saw_trim {
+        return Ok(None);
+    }
+
+    let source_uri = graph
+        .assets
+        .first()
+        .map(|a| a.uri.as_str())
+        .ok_or_else(|| IoError::message("hybrid prefix needs an asset"))?;
+    if !Path::new(source_uri).is_file() {
+        return Ok(None);
+    }
+
+    let out_path = resolve_output_path(graph).ok_or_else(|| {
+        IoError::message("hybrid run needs GraphOutput.uri or encode path")
+    })?;
+
+    control.check_cancel()?;
+    let mid = temp_graph_path(Path::new(&out_path), "rf-g-pfx");
+    if let Err(e) = run_filtergraph(source_uri, &mid, &filter) {
+        let _ = std::fs::remove_file(&mid);
+        return Err(e);
+    }
+    control.report(WriteProgress::new(WriteStage::Video, 0, 1));
+
+    let mut reduced = strip_and_rewire(graph, &strip_ids);
+    if let Some(asset) = reduced.assets.first_mut() {
+        asset.uri = mid.to_string_lossy().into_owned();
+    }
+
+    let result = (|| {
+        let seeds = HashMap::new();
+        let (clip, mut hints) =
+            materialize_graph_with_seeds(&reduced, &options.registry, &seeds)?;
+        hints.output_path = Some(out_path);
+        merge_option_hints(&mut hints, options);
+        write_graph_outputs(graph, clip.as_ref(), &hints, control)
+    })();
+
+    let _ = std::fs::remove_file(&mid);
+    result.map(Some)
+}
+
+fn resolve_output_path(graph: &RenderGraph) -> Option<String> {
+    if let Some(uri) = graph.outputs.iter().find_map(|o| o.uri.clone()) {
+        return Some(uri);
+    }
+    graph.nodes.iter().find_map(|n| match &n.body {
+        RenderNodeKind::Op { operation, params } if operation.as_str() == "rf.encode.h264" => {
+            params
+                .get("path")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        }
+        _ => None,
+    })
+}
+
+/// Remove applied nodes and rewire consumers to each removed node's single input.
+fn strip_and_rewire(graph: &RenderGraph, strip: &HashSet<String>) -> RenderGraph {
+    let mut g = graph.clone();
+    // Map stripped id → its upstream (single input).
+    let mut replace: HashMap<String, String> = HashMap::new();
+    for n in &graph.nodes {
+        if strip.contains(&n.id.0)
+            && let Some(up) = n.inputs.first()
+        {
+            replace.insert(n.id.0.clone(), up.0.clone());
+        }
+    }
+    // Flatten replace chains.
+    let resolve = |mut id: String| -> String {
+        let mut guard = 0;
+        while let Some(next) = replace.get(&id) {
+            id = next.clone();
+            guard += 1;
+            if guard > 64 {
+                break;
+            }
+        }
+        id
+    };
+
+    g.nodes.retain(|n| !strip.contains(&n.id.0));
+    for n in &mut g.nodes {
+        for inp in &mut n.inputs {
+            inp.0 = resolve(inp.0.clone());
+        }
+    }
+    for o in &mut g.outputs {
+        o.node = NodeId(resolve(o.node.0.clone()));
+    }
+    g
+}
+
+fn temp_graph_path(output: &Path, tag: &str) -> PathBuf {
+    let parent = output.parent().unwrap_or_else(|| Path::new("."));
+    let stem = output
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("reelforge");
+    parent.join(format!(".{stem}.{tag}.{}.mp4", std::process::id()))
+}
+
+/// Whether the registry backend for `id` is known to the M3 runner.
+#[must_use]
+pub fn is_executable_op(id: &str) -> bool {
+    matches!(
+        id,
+        "rf.transform.trim" | "rf.redaction.region" | "rf.encode.h264"
+    )
+}
+
+/// Backend class for a graph node (for hosts / debug).
+#[must_use]
+pub fn node_backend(node: &RenderNode, registry: &OperationRegistry) -> Option<BackendClass> {
+    match &node.body {
+        RenderNodeKind::Source { .. } | RenderNodeKind::Output { .. } => {
+            Some(BackendClass::Ffmpeg)
+        }
+        RenderNodeKind::Redaction { .. } => Some(BackendClass::Rust),
+        RenderNodeKind::Op { operation, .. } => registry.get(operation).ok().map(|d| d.backend),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reelforge_core::{ColorClip, Rgb8, Size};
+    use reelforge_render_graph::{
+        GraphOutput, MaskSample, MaskTimeline, MediaAsset, MediaAssetId, RegionRedaction,
+        RenderNode, RENDER_GRAPH_VERSION,
+    };
+
+    fn linear_redaction_graph() -> RenderGraph {
+        let mut masks = MaskTimeline::new();
+        masks.push(MaskSample::ellipse(
+            MediaTime::new(0, 30).unwrap(),
+            16.0,
+            16.0,
+            8.0,
+        ));
+        RenderGraph {
+            version: RENDER_GRAPH_VERSION,
+            assets: vec![MediaAsset {
+                id: MediaAssetId("a".into()),
+                uri: "seed://color".into(),
+                duration: None,
+                role: Some("video".into()),
+            }],
+            nodes: vec![
+                RenderNode {
+                    id: NodeId("src".into()),
+                    body: RenderNodeKind::Source {
+                        asset: MediaAssetId("a".into()),
+                    },
+                    inputs: vec![],
+                },
+                RenderNode {
+                    id: NodeId("trim".into()),
+                    body: RenderNodeKind::Op {
+                        operation: OperationId::new("rf.transform.trim"),
+                        params: serde_json::json!({ "start": 0.0, "duration": 0.5 }),
+                    },
+                    inputs: vec![NodeId("src".into())],
+                },
+                RenderNode {
+                    id: NodeId("blur".into()),
+                    body: RenderNodeKind::Redaction {
+                        redaction: RegionRedaction::gaussian(masks, 10.0),
+                    },
+                    inputs: vec![NodeId("trim".into())],
+                },
+                RenderNode {
+                    id: NodeId("enc".into()),
+                    body: RenderNodeKind::Op {
+                        operation: OperationId::new("rf.encode.h264"),
+                        params: serde_json::json!({ "crf": 28, "path": "out.mp4" }),
+                    },
+                    inputs: vec![NodeId("blur".into())],
+                },
+                RenderNode {
+                    id: NodeId("out".into()),
+                    body: RenderNodeKind::Output {
+                        name: "main".into(),
+                    },
+                    inputs: vec![NodeId("enc".into())],
+                },
+            ],
+            outputs: vec![GraphOutput {
+                name: "main".into(),
+                node: NodeId("out".into()),
+                uri: Some("out.mp4".into()),
+            }],
+        }
+    }
+
+    #[test]
+    fn explain_lists_hybrid_stages() {
+        let g = linear_redaction_graph();
+        let text = explain_render_graph(&g).unwrap();
+        assert!(text.contains("execution_stages"));
+        assert!(text.contains("rust") || text.contains("ffmpeg"));
+    }
+
+    #[test]
+    fn materialize_with_seed_applies_trim_and_redaction() {
+        let g = linear_redaction_graph();
+        let seed: Arc<dyn VideoClip> = Arc::new(ColorClip::new(
+            Size::new(32, 32),
+            Rgb8::WHITE,
+            Duration::from_secs(2.0),
+        ));
+        let mut seeds = HashMap::new();
+        seeds.insert(MediaAssetId("a".into()), seed);
+        let registry = OperationRegistry::with_builtins();
+        let (clip, hints) = materialize_graph_with_seeds(&g, &registry, &seeds).unwrap();
+        assert!((clip.duration().as_secs() - 0.5).abs() < 1e-9);
+        assert_eq!(hints.crf, Some(28));
+        assert_eq!(hints.output_path.as_deref(), Some("out.mp4"));
+        let _ = clip.frame_at(Time::ZERO).unwrap();
+    }
+
+    #[test]
+    fn rejects_unknown_op_even_if_forced_on_graph() {
+        let mut g = linear_redaction_graph();
+        g.nodes[1].body = RenderNodeKind::Op {
+            operation: OperationId::new("rf.not.real"),
+            params: serde_json::json!({}),
+        };
+        let seed: Arc<dyn VideoClip> = Arc::new(ColorClip::new(
+            Size::new(8, 8),
+            Rgb8::RED,
+            Duration::from_secs(1.0),
+        ));
+        let mut seeds = HashMap::new();
+        seeds.insert(MediaAssetId("a".into()), seed);
+        let err = materialize_graph_with_seeds(&g, &OperationRegistry::with_builtins(), &seeds);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn strip_rewires_consumers() {
+        let g = linear_redaction_graph();
+        let mut strip = HashSet::new();
+        strip.insert("trim".into());
+        let reduced = strip_and_rewire(&g, &strip);
+        assert!(!reduced.nodes.iter().any(|n| n.id.0 == "trim"));
+        let blur = reduced.nodes.iter().find(|n| n.id.0 == "blur").unwrap();
+        assert_eq!(blur.inputs[0].0, "src");
+    }
+
+    #[test]
+    fn is_executable_builtins() {
+        assert!(is_executable_op("rf.transform.trim"));
+        assert!(is_executable_op("rf.redaction.region"));
+        assert!(!is_executable_op("rf.not.real"));
+    }
+}
