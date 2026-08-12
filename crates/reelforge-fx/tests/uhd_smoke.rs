@@ -6,8 +6,12 @@ use std::sync::Arc;
 
 fn sample(size: Size) -> Arc<dyn VideoClip> {
     Arc::new(
-        ColorClip::new(size, reelforge_core::Rgb8::new(40, 80, 160), Duration::from_secs(1.0))
-            .with_fps(24.0),
+        ColorClip::new(
+            size,
+            reelforge_core::Rgb8::new(40, 80, 160),
+            Duration::from_secs(1.0),
+        )
+        .with_fps(24.0),
     )
 }
 
@@ -17,7 +21,9 @@ fn uhd_4k_chain_frame_at() {
     assert_eq!(base.size(), Size::new(3840, 2160));
     let cropped = Crop::new(100, 50, 3200, 1800).apply(base).unwrap();
     let resized = Resize::to(Size::HD_1080).apply(cropped).unwrap();
-    let faded = FadeIn::new(Duration::from_secs(0.25)).apply(resized).unwrap();
+    let faded = FadeIn::new(Duration::from_secs(0.25))
+        .apply(resized)
+        .unwrap();
     let gray = BlackAndWhite.apply(faded).unwrap();
     let f = gray.frame_at(Time::from_secs(0.1)).unwrap();
     assert_eq!(f.size(), Size::HD_1080);

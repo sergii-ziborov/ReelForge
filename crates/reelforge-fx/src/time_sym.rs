@@ -43,7 +43,8 @@ impl VideoClip for SymVideo {
             let back = tt - d;
             (d - back - f64::EPSILON).max(0.0)
         };
-        self.inner.frame_at(Time::from_secs(src.min(d - f64::EPSILON).max(0.0)))
+        self.inner
+            .frame_at(Time::from_secs(src.min(d - f64::EPSILON).max(0.0)))
     }
 }
 

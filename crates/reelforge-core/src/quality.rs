@@ -118,11 +118,7 @@ fn ssim_channel(a: &[u8], b: &[u8], bpp: usize, channel: usize) -> f64 {
 
     let num = (2.0 * mu_a * mu_b + c1) * (2.0 * cov + c2);
     let den = (mu_a * mu_a + mu_b * mu_b + c1) * (var_a + var_b + c2);
-    if den == 0.0 {
-        1.0
-    } else {
-        num / den
-    }
+    if den == 0.0 { 1.0 } else { num / den }
 }
 
 #[cfg(test)]

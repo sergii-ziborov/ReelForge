@@ -1,9 +1,7 @@
 //! Quality metrics smoke: PSNR/SSIM on effect chains stay high for identity-ish ops.
 #![allow(clippy::many_single_char_names)]
 
-use reelforge_core::{
-    ColorClip, Duration, Size, Time, VideoClip, VideoEffect, psnr_rgb, ssim_rgb,
-};
+use reelforge_core::{ColorClip, Duration, Size, Time, VideoClip, VideoEffect, psnr_rgb, ssim_rgb};
 use reelforge_fx::{GammaCorrection, Resize, ResizeFilter};
 use std::sync::Arc;
 

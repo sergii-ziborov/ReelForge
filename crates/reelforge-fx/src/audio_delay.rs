@@ -95,7 +95,9 @@ mod tests {
             },
             Duration::from_secs(0.5),
         ));
-        let out = AudioDelay::new(Duration::from_secs(0.25)).apply(clip).unwrap();
+        let out = AudioDelay::new(Duration::from_secs(0.25))
+            .apply(clip)
+            .unwrap();
         assert!((out.duration().as_secs() - 0.75).abs() < 1e-6);
     }
 }

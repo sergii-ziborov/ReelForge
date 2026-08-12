@@ -30,7 +30,10 @@ impl RgbFramePool {
     /// Take a buffer (allocates when the free list is empty).
     #[must_use]
     pub fn take(&self) -> Vec<u8> {
-        let mut free = self.free.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut free = self
+            .free
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         free.pop().map_or_else(
             || Vec::with_capacity(self.frame_len),
             |mut v| {
@@ -46,7 +49,10 @@ impl RgbFramePool {
     /// Return a buffer to the pool (drops when over capacity).
     pub fn give(&self, mut buf: Vec<u8>) {
         buf.clear();
-        let mut free = self.free.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut free = self
+            .free
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if free.len() < self.max_buffers {
             free.push(buf);
         }

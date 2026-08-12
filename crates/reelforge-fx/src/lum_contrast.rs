@@ -1,7 +1,7 @@
 //! Luminosity / contrast correction.
 
-use reelforge_core::{Duration, Frame, Result, Size, Time, VideoClip, VideoEffect};
 use rayon::prelude::*;
+use reelforge_core::{Duration, Frame, Result, Size, Time, VideoClip, VideoEffect};
 use std::sync::Arc;
 
 /// Adjust luminosity and contrast: `out = (in - 128) * contrast + 128 + lum`.

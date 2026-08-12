@@ -1,7 +1,7 @@
 //! Packed-pixel helpers used by video effects (parallel row paths where useful).
 
-use reelforge_core::{CoreError, Frame, FrameFormat, Result, Rgb8, Size};
 use rayon::prelude::*;
+use reelforge_core::{CoreError, Frame, FrameFormat, Result, Rgb8, Size};
 
 /// Crop a rectangular region (`x`, `y`, `width`, `height`) from `frame`.
 ///
@@ -170,13 +170,11 @@ pub fn mirror_y(frame: &Frame) -> Result<Frame> {
     let data = frame.data();
     let mut out = vec![0_u8; data.len()];
     let row = w * bpp;
-    out.par_chunks_mut(row)
-        .enumerate()
-        .for_each(|(y, dst)| {
-            let sy = h - 1 - y;
-            let src = sy * row;
-            dst.copy_from_slice(&data[src..src + row]);
-        });
+    out.par_chunks_mut(row).enumerate().for_each(|(y, dst)| {
+        let sy = h - 1 - y;
+        let src = sy * row;
+        dst.copy_from_slice(&data[src..src + row]);
+    });
     Frame::from_raw(size, frame.format(), out)
 }
 
@@ -225,12 +223,10 @@ pub fn rotate_180(frame: &Frame) -> Result<Frame> {
     let data = frame.data();
     let n = data.len() / bpp;
     let mut out = vec![0_u8; data.len()];
-    out.par_chunks_mut(bpp)
-        .enumerate()
-        .for_each(|(i, dst)| {
-            let src_i = (n - 1 - i) * bpp;
-            dst.copy_from_slice(&data[src_i..src_i + bpp]);
-        });
+    out.par_chunks_mut(bpp).enumerate().for_each(|(i, dst)| {
+        let src_i = (n - 1 - i) * bpp;
+        dst.copy_from_slice(&data[src_i..src_i + bpp]);
+    });
     Frame::from_raw(size, frame.format(), out)
 }
 
@@ -282,25 +278,27 @@ pub fn rotate_degrees(frame: &Frame, degrees: f32) -> Result<Frame> {
     let cy = (h as f32 - 1.0) * 0.5;
     let row = w * bpp;
 
-    out.par_chunks_mut(row).enumerate().for_each(|(y, dst_row)| {
-        let dy = y as f32 - cy;
-        for x in 0..w {
-            let dx = x as f32 - cx;
-            let sx = cos_t * dx - sin_t * dy + cx;
-            let sy = sin_t * dx + cos_t * dy + cy;
-            if sx < 0.0 || sy < 0.0 {
-                continue;
+    out.par_chunks_mut(row)
+        .enumerate()
+        .for_each(|(y, dst_row)| {
+            let dy = y as f32 - cy;
+            for x in 0..w {
+                let dx = x as f32 - cx;
+                let sx = cos_t * dx - sin_t * dy + cx;
+                let sy = sin_t * dx + cos_t * dy + cy;
+                if sx < 0.0 || sy < 0.0 {
+                    continue;
+                }
+                let sx = sx.round() as isize;
+                let sy = sy.round() as isize;
+                if sx < 0 || sy < 0 || sx as usize >= w || sy as usize >= h {
+                    continue;
+                }
+                let src_i = sy as usize * row + sx as usize * bpp;
+                let dst_i = x * bpp;
+                dst_row[dst_i..dst_i + bpp].copy_from_slice(&data[src_i..src_i + bpp]);
             }
-            let sx = sx.round() as isize;
-            let sy = sy.round() as isize;
-            if sx < 0 || sy < 0 || sx as usize >= w || sy as usize >= h {
-                continue;
-            }
-            let src_i = sy as usize * row + sx as usize * bpp;
-            let dst_i = x * bpp;
-            dst_row[dst_i..dst_i + bpp].copy_from_slice(&data[src_i..src_i + bpp]);
-        }
-    });
+        });
 
     Frame::from_raw(size, frame.format(), out)
 }

@@ -1,7 +1,7 @@
 //! Frame scaling kernels (nearest / bilinear).
 
-use reelforge_core::{CoreError, Frame, Result, Size};
 use rayon::prelude::*;
+use reelforge_core::{CoreError, Frame, Result, Size};
 
 /// Sampling kernel used when resizing frames.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -141,39 +141,41 @@ pub fn resize_bicubic(frame: &Frame, new_size: Size) -> Result<Frame> {
         })
         .collect();
 
-    out.par_chunks_mut(row_dst).enumerate().for_each(|(dy, row)| {
-        let sy = if dh == 1 {
-            0.0
-        } else {
-            (dy as f32 + 0.5) * sh as f32 / dh as f32 - 0.5
-        };
-        let sy = sy.clamp(0.0, max_y as f32);
-        let iy = sy.floor() as i32;
-        let fy = sy - iy as f32;
-        let wy = cubic_weights(fy);
-        let ys = [
-            (iy - 1).clamp(0, max_y as i32) as usize,
-            iy.clamp(0, max_y as i32) as usize,
-            (iy + 1).clamp(0, max_y as i32) as usize,
-            (iy + 2).clamp(0, max_y as i32) as usize,
-        ];
-        for (dx, (_sx, wx, xs)) in x_samples.iter().enumerate() {
-            let dst_i = dx * bpp;
-            for c in 0..bpp {
-                let mut col = [0.0_f32; 4];
-                for (j, &yy) in ys.iter().enumerate() {
-                    let mut row_v = 0.0_f32;
-                    for (i, &xx) in xs.iter().enumerate() {
-                        let si = (yy * sw + xx) * bpp + c;
-                        row_v += f32::from(data[si]) * wx[i];
+    out.par_chunks_mut(row_dst)
+        .enumerate()
+        .for_each(|(dy, row)| {
+            let sy = if dh == 1 {
+                0.0
+            } else {
+                (dy as f32 + 0.5) * sh as f32 / dh as f32 - 0.5
+            };
+            let sy = sy.clamp(0.0, max_y as f32);
+            let iy = sy.floor() as i32;
+            let fy = sy - iy as f32;
+            let wy = cubic_weights(fy);
+            let ys = [
+                (iy - 1).clamp(0, max_y as i32) as usize,
+                iy.clamp(0, max_y as i32) as usize,
+                (iy + 1).clamp(0, max_y as i32) as usize,
+                (iy + 2).clamp(0, max_y as i32) as usize,
+            ];
+            for (dx, (_sx, wx, xs)) in x_samples.iter().enumerate() {
+                let dst_i = dx * bpp;
+                for c in 0..bpp {
+                    let mut col = [0.0_f32; 4];
+                    for (j, &yy) in ys.iter().enumerate() {
+                        let mut row_v = 0.0_f32;
+                        for (i, &xx) in xs.iter().enumerate() {
+                            let si = (yy * sw + xx) * bpp + c;
+                            row_v += f32::from(data[si]) * wx[i];
+                        }
+                        col[j] = row_v;
                     }
-                    col[j] = row_v;
+                    let v = col[0] * wy[0] + col[1] * wy[1] + col[2] * wy[2] + col[3] * wy[3];
+                    row[dst_i + c] = v.round().clamp(0.0, 255.0) as u8;
                 }
-                let v = col[0] * wy[0] + col[1] * wy[1] + col[2] * wy[2] + col[3] * wy[3];
-                row[dst_i + c] = v.round().clamp(0.0, 255.0) as u8;
             }
-        }
-    });
+        });
 
     Frame::from_raw(new_size, frame.format(), out)
 }

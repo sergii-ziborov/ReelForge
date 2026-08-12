@@ -166,7 +166,9 @@ mod tests {
             Rgb8::WHITE,
             Duration::from_secs(0.5),
         ));
-        let near = Resize::to_nearest(Size::new(2, 2)).apply(clip.clone()).unwrap();
+        let near = Resize::to_nearest(Size::new(2, 2))
+            .apply(clip.clone())
+            .unwrap();
         let bi = Resize::to(Size::new(2, 2)).apply(clip).unwrap();
         assert_eq!(near.size(), bi.size());
         let _ = frame;

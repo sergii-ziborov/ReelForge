@@ -22,14 +22,8 @@ fn sample_plan(n_pairs: usize) -> RenderPlan {
                 w: 1920 - (i_u % 8) * 2,
                 h: 1080 - (i_u % 4) * 2,
             })
-            .then(PlanOp::Scale {
-                w: 1280,
-                h: 720,
-            })
-            .then(PlanOp::Scale {
-                w: 640,
-                h: 360,
-            })
+            .then(PlanOp::Scale { w: 1280, h: 720 })
+            .then(PlanOp::Scale { w: 640, h: 360 })
             .then(PlanOp::HFlip)
             .then(PlanOp::HFlip)
             .then(PlanOp::VFlip);

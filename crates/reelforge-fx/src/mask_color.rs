@@ -1,8 +1,6 @@
 //! Build an alpha mask from a chroma color key.
 
-use reelforge_core::{
-    Duration, Frame, Mask, Result, Rgb8, Size, Time, VideoClip, VideoEffect,
-};
+use reelforge_core::{Duration, Frame, Mask, Result, Rgb8, Size, Time, VideoClip, VideoEffect};
 use std::sync::Arc;
 
 /// Marks pixels near `color` as transparent in the clip mask.

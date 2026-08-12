@@ -1,7 +1,7 @@
 //! Scroll / Ken-Burns-style crop window over a larger clip.
 
-use reelforge_core::{Duration, Frame, Result, Size, Time, VideoClip, VideoEffect};
 use crate::raster::crop_frame;
+use reelforge_core::{Duration, Frame, Result, Size, Time, VideoClip, VideoEffect};
 use std::sync::Arc;
 
 /// Scroll a fixed-size viewport across the clip.

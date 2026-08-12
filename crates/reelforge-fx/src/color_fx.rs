@@ -1,8 +1,8 @@
 //! Color-domain video effects.
 
 use crate::raster::grayscale_in_place;
-use reelforge_core::{Duration, Frame, Result, Size, Time, VideoClip, VideoEffect};
 use rayon::prelude::*;
+use reelforge_core::{Duration, Frame, Result, Size, Time, VideoClip, VideoEffect};
 use std::sync::Arc;
 
 /// Desaturate to grayscale (luma).

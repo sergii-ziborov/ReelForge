@@ -2,8 +2,8 @@
 
 use crate::error::{IoError, Result};
 use std::fmt;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Stage of a multi-step write (`write_av` video → audio → mux).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

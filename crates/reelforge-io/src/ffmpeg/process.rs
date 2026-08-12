@@ -333,15 +333,7 @@ pub fn mux_video_audio(
     let output = Command::new(&tools.ffmpeg)
         .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
         .arg(video_path)
-        .args([
-            "-f",
-            "f32le",
-            "-ar",
-            &rate,
-            "-ac",
-            &ch,
-            "-i",
-        ])
+        .args(["-f", "f32le", "-ar", &rate, "-ac", &ch, "-i"])
         .arg(pcm_path)
         .args([
             "-c:v",

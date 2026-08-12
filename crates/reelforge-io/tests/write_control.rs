@@ -1,8 +1,6 @@
 //! `WriteControl`: progress, cancel, streaming audio, optional `FFmpeg` encode.
 
-use reelforge_core::{
-    AudioFormat, ColorClip, Duration, Rgb8, SampleLayout, SilenceClip, Size,
-};
+use reelforge_core::{AudioFormat, ColorClip, Duration, Rgb8, SampleLayout, SilenceClip, Size};
 use reelforge_io::{
     CancelToken, IoError, WriteControl, WriteProgress, WriteStage, WriteVideoOptions,
     ffmpeg_available, write_av_with, write_video_with,
@@ -32,14 +30,15 @@ fn write_video_reports_progress_and_done() {
     let last_frame = Arc::new(AtomicU64::new(0));
     let last2 = Arc::clone(&last_frame);
 
-    let control = WriteControl::new()
-        .with_max_in_flight(2)
-        .with_progress(move |p: WriteProgress| {
-            stages2.lock().unwrap().push(p.stage);
-            if p.stage == WriteStage::Video {
-                last2.store(p.index, Ordering::SeqCst);
-            }
-        });
+    let control =
+        WriteControl::new()
+            .with_max_in_flight(2)
+            .with_progress(move |p: WriteProgress| {
+                stages2.lock().unwrap().push(p.stage);
+                if p.stage == WriteStage::Video {
+                    last2.store(p.index, Ordering::SeqCst);
+                }
+            });
 
     let clip =
         ColorClip::new(Size::new(64, 48), Rgb8::GREEN, Duration::from_secs(0.25)).with_fps(12.0);

@@ -1,8 +1,6 @@
 //! Peak-normalize audio to a target amplitude.
 
-use reelforge_core::{
-    AudioBuffer, AudioClip, AudioEffect, AudioFormat, Duration, Result, Time,
-};
+use reelforge_core::{AudioBuffer, AudioClip, AudioEffect, AudioFormat, Duration, Result, Time};
 use std::sync::Arc;
 
 /// Scale samples so peak absolute amplitude reaches `target` (default 1.0).
@@ -47,11 +45,7 @@ impl AudioEffect for AudioNormalize {
             }
             pos += n;
         }
-        let gain = if peak > 1e-9 {
-            self.target / peak
-        } else {
-            1.0
-        };
+        let gain = if peak > 1e-9 { self.target / peak } else { 1.0 };
         Ok(Arc::new(NormAudio { inner: clip, gain }))
     }
 }

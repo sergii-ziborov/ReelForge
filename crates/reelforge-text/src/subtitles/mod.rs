@@ -20,9 +20,8 @@ use std::path::Path;
 /// Returns I/O or parse errors.
 pub fn parse_subtitles_path(path: impl AsRef<Path>) -> Result<Vec<SubtitleCue>> {
     let path = path.as_ref();
-    let text = std::fs::read_to_string(path).map_err(|e| {
-        TextError::message(format!("read subtitles {}: {e}", path.display()))
-    })?;
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| TextError::message(format!("read subtitles {}: {e}", path.display())))?;
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
@@ -47,14 +46,20 @@ pub fn parse_subtitles_path(path: impl AsRef<Path>) -> Result<Vec<SubtitleCue>> 
 /// Returns parse errors from the chosen parser.
 pub fn parse_subtitles(input: &str) -> Result<Vec<SubtitleCue>> {
     let trimmed = input.trim_start_matches('\u{feff}').trim_start();
-    let head = trimmed.chars().take(64).collect::<String>().to_ascii_uppercase();
+    let head = trimmed
+        .chars()
+        .take(64)
+        .collect::<String>()
+        .to_ascii_uppercase();
     if head.starts_with("WEBVTT") {
         return parse_vtt(input);
     }
     if head.contains("[SCRIPT INFO]")
         || head.contains("[V4+ STYLES]")
         || head.contains("[EVENTS]")
-        || trimmed.lines().any(|l| l.trim().to_ascii_lowercase().starts_with("dialogue:"))
+        || trimmed
+            .lines()
+            .any(|l| l.trim().to_ascii_lowercase().starts_with("dialogue:"))
     {
         return parse_ass(input);
     }

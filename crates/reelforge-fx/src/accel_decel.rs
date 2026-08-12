@@ -23,7 +23,9 @@ impl AccelDecel {
 impl VideoEffect for AccelDecel {
     fn apply(&self, clip: Arc<dyn VideoClip>) -> Result<Arc<dyn VideoClip>> {
         if !self.new_duration.is_positive() {
-            return Err(CoreError::invalid_timing("accel/decel duration must be > 0"));
+            return Err(CoreError::invalid_timing(
+                "accel/decel duration must be > 0",
+            ));
         }
         if !clip.duration().is_positive() {
             return Err(CoreError::invalid_timing("accel/decel source must be > 0"));
@@ -81,7 +83,9 @@ mod tests {
             Rgb8::RED,
             Duration::from_secs(1.0),
         ));
-        let out = AccelDecel::new(Duration::from_secs(2.0)).apply(clip).unwrap();
+        let out = AccelDecel::new(Duration::from_secs(2.0))
+            .apply(clip)
+            .unwrap();
         assert!((out.duration().as_secs() - 2.0).abs() < 1e-9);
         assert!(out.frame_at(Time::from_secs(1.0)).is_ok());
     }

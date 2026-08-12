@@ -105,16 +105,7 @@ fn spawn_stream(
         .args(["-hide_banner", "-loglevel", "error", "-i"])
         .arg(path)
         .args([
-            "-an",
-            "-f",
-            "rawvideo",
-            "-pix_fmt",
-            "rgb24",
-            "-s",
-            &size_arg,
-            "-r",
-            &fps_arg,
-            "pipe:1",
+            "-an", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", &size_arg, "-r", &fps_arg, "pipe:1",
         ])
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

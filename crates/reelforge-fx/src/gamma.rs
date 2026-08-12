@@ -1,7 +1,7 @@
 //! Gamma correction effect.
 
-use reelforge_core::{Duration, Frame, Result, Size, Time, VideoClip, VideoEffect};
 use rayon::prelude::*;
+use reelforge_core::{Duration, Frame, Result, Size, Time, VideoClip, VideoEffect};
 use std::sync::Arc;
 
 /// Apply `out = in^gamma` per channel (linear-ish 0..1 space on 8-bit).

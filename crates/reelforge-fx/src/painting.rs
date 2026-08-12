@@ -79,7 +79,13 @@ impl VideoClip for PaintVideo {
 
     fn frame_at(&self, t: Time) -> Result<Frame> {
         let frame = self.inner.frame_at(t)?;
-        let painted = to_painting(frame.data(), frame.size(), frame.format().bytes_per_pixel(), self.saturation, self.black);
+        let painted = to_painting(
+            frame.data(),
+            frame.size(),
+            frame.format().bytes_per_pixel(),
+            self.saturation,
+            self.black,
+        );
         Frame::from_raw(frame.size(), frame.format(), painted)
     }
 }
@@ -142,15 +148,10 @@ fn to_painting(data: &[u8], size: Size, bpp: usize, saturation: f32, black: f32)
     for y in 1..h.saturating_sub(1) {
         for x in 1..w.saturating_sub(1) {
             let idx = |yy: usize, xx: usize| -> i32 { i32::from(gray[yy * w + xx]) };
-            let gx = -idx(y - 1, x - 1)
-                + idx(y - 1, x + 1)
-                - 2 * idx(y, x - 1)
-                + 2 * idx(y, x + 1)
+            let gx = -idx(y - 1, x - 1) + idx(y - 1, x + 1) - 2 * idx(y, x - 1) + 2 * idx(y, x + 1)
                 - idx(y + 1, x - 1)
                 + idx(y + 1, x + 1);
-            let gy = -idx(y - 1, x - 1)
-                - 2 * idx(y - 1, x)
-                - idx(y - 1, x + 1)
+            let gy = -idx(y - 1, x - 1) - 2 * idx(y - 1, x) - idx(y - 1, x + 1)
                 + idx(y + 1, x - 1)
                 + 2 * idx(y + 1, x)
                 + idx(y + 1, x + 1);

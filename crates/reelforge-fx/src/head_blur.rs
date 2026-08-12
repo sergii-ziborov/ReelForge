@@ -113,7 +113,14 @@ impl VideoClip for HeadBlurVideo {
     fn frame_at(&self, t: Time) -> Result<Frame> {
         let mut frame = self.inner.frame_at(t)?;
         let (cx, cy) = (self.center)(t.as_secs());
-        apply_head_blur(&mut frame, cx, cy, self.radius, self.intensity, self.feather);
+        apply_head_blur(
+            &mut frame,
+            cx,
+            cy,
+            self.radius,
+            self.intensity,
+            self.feather,
+        );
         Ok(frame)
     }
 }
@@ -207,7 +214,14 @@ fn gaussian_kernel(sigma: f32) -> Vec<f32> {
     clippy::cast_precision_loss,
     clippy::similar_names
 )]
-fn blur_separable(src: &[u8], dst: &mut [u8], width: usize, height: usize, bpp: usize, kernel: &[f32]) {
+fn blur_separable(
+    src: &[u8],
+    dst: &mut [u8],
+    width: usize,
+    height: usize,
+    bpp: usize,
+    kernel: &[f32],
+) {
     let r = kernel.len() / 2;
     let mut tmp = vec![0_u8; src.len()];
     let w_i = width as isize;

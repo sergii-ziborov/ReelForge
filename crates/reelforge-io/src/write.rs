@@ -2,9 +2,7 @@
 
 use crate::control::{WriteControl, WriteProgress, WriteStage};
 use crate::error::{IoError, Result};
-use crate::ffmpeg::{
-    FfmpegTools, encode_rawvideo_gif, frame_count_for, mux_video_audio,
-};
+use crate::ffmpeg::{FfmpegTools, encode_rawvideo_gif, frame_count_for, mux_video_audio};
 use crate::options::{WriteGifOptions, WriteVideoOptions};
 use crate::pipeline::encode_sampled_h264;
 use reelforge_core::{AudioClip, Duration, Size, Time, VideoClip};
@@ -322,9 +320,13 @@ fn render_audio_pcm_streaming(
     let total = usize::try_from(total).map_err(|_| IoError::message("audio length overflow"))?;
     let total_u64 = u64::try_from(total).unwrap_or(u64::MAX);
 
-    let mut file = std::fs::File::create(path)
-        .map_err(|e| IoError::message(format!("create pcm: {e}")))?;
-    let mut scratch = Vec::with_capacity(CHUNK.saturating_mul(4).saturating_mul(format.channels() as usize));
+    let mut file =
+        std::fs::File::create(path).map_err(|e| IoError::message(format!("create pcm: {e}")))?;
+    let mut scratch = Vec::with_capacity(
+        CHUNK
+            .saturating_mul(4)
+            .saturating_mul(format.channels() as usize),
+    );
     let mut written = 0_usize;
     let mut chunk_idx = 0_u64;
     #[allow(clippy::cast_possible_truncation)]
@@ -456,9 +458,13 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("rf-pcm-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join("a.pcm");
-        let fmt =
-            render_audio_pcm_streaming(&audio, Duration::from_secs(0.05), &path, &WriteControl::default())
-                .unwrap();
+        let fmt = render_audio_pcm_streaming(
+            &audio,
+            Duration::from_secs(0.05),
+            &path,
+            &WriteControl::default(),
+        )
+        .unwrap();
         assert_eq!(fmt.sample_rate, 8_000);
         let bytes = std::fs::read(&path).unwrap();
         assert!(!bytes.is_empty());

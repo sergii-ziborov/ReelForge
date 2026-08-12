@@ -34,11 +34,11 @@ pub use render_plan::{
     extract_from_optimized, is_known_custom, optimize, optimize_plan, require_full_ffmpeg,
     run_render_plan, run_render_plan_with, validate_remainder,
 };
-pub use video_file::{VideoFileClip, open_video};
 pub use tracks_json::{
-    TRACKS_JSON_VERSION, SampleJson, TrackJson, TracksDocument, load_track_set, parse_track_set,
+    SampleJson, TRACKS_JSON_VERSION, TrackJson, TracksDocument, load_track_set, parse_track_set,
     track_set_from_value,
 };
+pub use video_file::{VideoFileClip, open_video};
 pub use write::{
     write_av, write_av_with, write_duration, write_gif, write_gif_with, write_video,
     write_video_with,

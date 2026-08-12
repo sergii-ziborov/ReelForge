@@ -126,7 +126,9 @@ mod tests {
             Duration::from_secs(1.0),
         ));
         // Silence stays silence; just ensure apply works.
-        let out = AudioFadeIn::new(Duration::from_secs(0.2)).apply(clip).unwrap();
+        let out = AudioFadeIn::new(Duration::from_secs(0.2))
+            .apply(clip)
+            .unwrap();
         let b = out.samples_at(Time::ZERO, 100).unwrap();
         assert_eq!(b.frame_count(), 100);
     }

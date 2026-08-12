@@ -44,12 +44,7 @@ pub fn run_hybrid_plan(
         if extracted.has_ffmpeg_segment() {
             control.check_cancel()?;
             let mid = temp_plan_path(Path::new(&output.path), "rf-hyb-pfx");
-            run_prefix_to_file(
-                input,
-                &mid,
-                &extracted.filter_graph(),
-                output,
-            )?;
+            run_prefix_to_file(input, &mid, &extracted.filter_graph(), output)?;
             temps.push(mid.clone());
             source = mid;
             control.report(WriteProgress::new(WriteStage::Video, 0, 1));

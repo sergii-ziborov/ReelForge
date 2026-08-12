@@ -12,9 +12,7 @@ use std::sync::Arc;
 use std::time::Duration as StdDuration;
 
 fn sample_clip(size: Size, secs: f64) -> Arc<dyn VideoClip> {
-    Arc::new(
-        ColorClip::new(size, Rgb8::new(40, 80, 160), Duration::from_secs(secs)).with_fps(24.0),
-    )
+    Arc::new(ColorClip::new(size, Rgb8::new(40, 80, 160), Duration::from_secs(secs)).with_fps(24.0))
 }
 
 fn chain(
@@ -23,9 +21,16 @@ fn chain(
     target: Size,
     filter: ResizeFilter,
 ) -> Arc<dyn VideoClip> {
-    let cropped = Crop::new(crop.0, crop.1, crop.2, crop.3).apply(base).unwrap();
-    let resized = Resize::to(target).with_filter(filter).apply(cropped).unwrap();
-    let faded = FadeIn::new(Duration::from_secs(0.5)).apply(resized).unwrap();
+    let cropped = Crop::new(crop.0, crop.1, crop.2, crop.3)
+        .apply(base)
+        .unwrap();
+    let resized = Resize::to(target)
+        .with_filter(filter)
+        .apply(cropped)
+        .unwrap();
+    let faded = FadeIn::new(Duration::from_secs(0.5))
+        .apply(resized)
+        .unwrap();
     BlackAndWhite.apply(faded).unwrap()
 }
 

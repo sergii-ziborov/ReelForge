@@ -93,14 +93,7 @@ pub fn encode_sampled_h264(
         .take()
         .ok_or_else(|| IoError::process("ffmpeg stdin missing"))?;
 
-    let write_result = pump_frames(
-        &mut stdin,
-        size,
-        expected,
-        frame_count,
-        sample,
-        control,
-    );
+    let write_result = pump_frames(&mut stdin, size, expected, frame_count, sample, control);
 
     drop(stdin);
     let output = child

@@ -2,8 +2,8 @@
 
 use super::ops::PlanOp;
 use crate::error::{IoError, Result};
-use reelforge_core::{Duration, Size, Time, VideoClip, VideoEffect, subclip_video};
 use crate::tracks_json::{load_track_set, track_set_from_value};
+use reelforge_core::{Duration, Size, Time, VideoClip, VideoEffect, subclip_video};
 use reelforge_fx::{
     BlackAndWhite, Crop, EvenSize, FadeIn, FadeOut, HeadBlur, InvertColors, MirrorX, MirrorY,
     MultiplyColor, Painting, Resize, Rotate, TrackedBlur,
@@ -15,10 +15,7 @@ use std::sync::Arc;
 /// # Errors
 ///
 /// Invalid parameters or unknown custom op names.
-pub fn apply_plan_ops(
-    mut clip: Arc<dyn VideoClip>,
-    ops: &[PlanOp],
-) -> Result<Arc<dyn VideoClip>> {
+pub fn apply_plan_ops(mut clip: Arc<dyn VideoClip>, ops: &[PlanOp]) -> Result<Arc<dyn VideoClip>> {
     for op in ops {
         clip = apply_one(clip, op)?;
     }
@@ -33,9 +30,7 @@ fn apply_one(clip: Arc<dyn VideoClip>, op: &PlanOp) -> Result<Arc<dyn VideoClip>
             let duration = Duration::from_secs(*duration);
             subclip_video(clip, start, duration).map_err(IoError::from)
         }
-        PlanOp::Crop { x, y, w, h } => Crop::new(*x, *y, *w, *h)
-            .apply(clip)
-            .map_err(IoError::from),
+        PlanOp::Crop { x, y, w, h } => Crop::new(*x, *y, *w, *h).apply(clip).map_err(IoError::from),
         PlanOp::Scale { w, h } => Resize::to(Size::new(*w, *h))
             .apply(clip)
             .map_err(IoError::from),
@@ -223,11 +218,13 @@ mod tests {
 
     #[test]
     fn rejects_unknown_custom() {
-        assert!(validate_remainder(&[PlanOp::Custom {
-            name: "not_a_real_effect".into(),
-            params: None,
-        }])
-        .is_err());
+        assert!(
+            validate_remainder(&[PlanOp::Custom {
+                name: "not_a_real_effect".into(),
+                params: None,
+            }])
+            .is_err()
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! Orthogonal and free-angle rotate effects.
 
-use crate::raster::{rotate_180, rotate_270_cw, rotate_90_cw, rotate_degrees};
+use crate::raster::{rotate_90_cw, rotate_180, rotate_270_cw, rotate_degrees};
 use reelforge_core::{Duration, Frame, Result, Size, Time, VideoClip, VideoEffect};
 use std::sync::Arc;
 
