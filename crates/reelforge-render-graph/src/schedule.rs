@@ -3,9 +3,7 @@
 use crate::error::{GraphError, Result};
 use crate::graph::{RenderGraph, RenderNodeKind};
 use crate::op::{BackendClass, OperationId, OperationRegistry};
-use crate::stage::{
-    AdapterStage, ExecutionPlan, ExecutionStage, FfmpegStage, GpuStage, RustStage,
-};
+use crate::stage::{AdapterStage, ExecutionPlan, ExecutionStage, FfmpegStage, GpuStage, RustStage};
 
 /// Schedule hybrid stages from a validated graph + operation registry.
 ///
@@ -112,13 +110,7 @@ pub fn schedule_graph(graph: &RenderGraph, registry: &OperationRegistry) -> Resu
     }
 
     if let Some(b) = current_backend {
-        flush(
-            &mut plan,
-            b,
-            current_nodes,
-            current_ops,
-            current_adapter,
-        );
+        flush(&mut plan, b, current_nodes, current_ops, current_adapter);
     }
 
     Ok(plan)
@@ -194,10 +186,11 @@ mod tests {
         assert!(plan.stages.len() >= 3);
         // First stage FFmpeg (src+trim), then Rust redaction, then FFmpeg encode+out.
         assert!(matches!(plan.stages[0], ExecutionStage::Ffmpeg(_)));
-        assert!(plan
-            .stages
-            .iter()
-            .any(|s| matches!(s, ExecutionStage::Rust(_))));
+        assert!(
+            plan.stages
+                .iter()
+                .any(|s| matches!(s, ExecutionStage::Rust(_)))
+        );
         assert!(matches!(
             plan.stages.last().unwrap(),
             ExecutionStage::Ffmpeg(_)

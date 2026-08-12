@@ -1,9 +1,9 @@
 //! `RenderGraph` DAG (executable media model).
 
+use crate::RENDER_GRAPH_VERSION;
 use crate::error::{GraphError, Result};
 use crate::op::OperationId;
 use crate::redaction::RegionRedaction;
-use crate::RENDER_GRAPH_VERSION;
 use reelforge_core::MediaTime;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -134,8 +134,7 @@ impl RenderGraph {
     ///
     /// Serde / version.
     pub fn from_json(text: &str) -> Result<Self> {
-        let g: Self =
-            serde_json::from_str(text).map_err(|e| GraphError::message(e.to_string()))?;
+        let g: Self = serde_json::from_str(text).map_err(|e| GraphError::message(e.to_string()))?;
         g.validate()?;
         Ok(g)
     }
@@ -222,9 +221,7 @@ impl RenderGraph {
         for n in &self.nodes {
             indeg.entry(n.id.0.clone()).or_insert(0);
             for inp in &n.inputs {
-                adj.entry(inp.0.clone())
-                    .or_default()
-                    .push(n.id.0.clone());
+                adj.entry(inp.0.clone()).or_default().push(n.id.0.clone());
                 *indeg.entry(n.id.0.clone()).or_insert(0) += 1;
                 indeg.entry(inp.0.clone()).or_insert(0);
             }
@@ -302,16 +299,12 @@ mod tests {
             nodes: vec![
                 RenderNode {
                     id: NodeId("a".into()),
-                    body: RenderNodeKind::Output {
-                        name: "x".into(),
-                    },
+                    body: RenderNodeKind::Output { name: "x".into() },
                     inputs: vec![NodeId("b".into())],
                 },
                 RenderNode {
                     id: NodeId("b".into()),
-                    body: RenderNodeKind::Output {
-                        name: "y".into(),
-                    },
+                    body: RenderNodeKind::Output { name: "y".into() },
                     inputs: vec![NodeId("a".into())],
                 },
             ],

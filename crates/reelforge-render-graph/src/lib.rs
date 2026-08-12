@@ -34,9 +34,7 @@ pub use op::{
 };
 pub use redaction::{RedactionStyle, RegionRedaction};
 pub use schedule::schedule_graph;
-pub use stage::{
-    AdapterStage, ExecutionPlan, ExecutionStage, FfmpegStage, GpuStage, RustStage,
-};
+pub use stage::{AdapterStage, ExecutionPlan, ExecutionStage, FfmpegStage, GpuStage, RustStage};
 
 /// Schema version for serialized `RenderGraph` documents.
 pub const RENDER_GRAPH_VERSION: u32 = 1;

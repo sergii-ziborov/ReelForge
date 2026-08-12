@@ -58,7 +58,10 @@ impl WaveformOptions {
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-pub fn compute_waveform(clip: &dyn AudioClip, options: &WaveformOptions) -> Result<Vec<WaveformPeak>> {
+pub fn compute_waveform(
+    clip: &dyn AudioClip,
+    options: &WaveformOptions,
+) -> Result<Vec<WaveformPeak>> {
     let duration = clip.duration();
     if !duration.is_positive() {
         return Err(IoError::message("waveform: clip duration must be > 0"));
@@ -90,8 +93,8 @@ pub fn compute_waveform(clip: &dyn AudioClip, options: &WaveformOptions) -> Resu
             let lo = -peak;
             let hi = peak;
             let gi = frame_i + f as u64;
-            let b = ((u128::from(gi) * u128::from(buckets as u64))
-                / u128::from(total_frames)) as usize;
+            let b =
+                ((u128::from(gi) * u128::from(buckets as u64)) / u128::from(total_frames)) as usize;
             let b = b.min(buckets - 1);
             if seen[b] {
                 mins[b] = mins[b].min(lo);
@@ -152,7 +155,11 @@ mod tests {
         let clip = SilenceClip::new(AudioFormat::STEREO_48K, Duration::from_secs(0.1));
         let peaks = compute_waveform(&clip, &WaveformOptions::new(20)).unwrap();
         assert_eq!(peaks.len(), 20);
-        assert!(peaks.iter().all(|p| p.max.abs() < 1e-5 && p.min.abs() < 1e-5));
+        assert!(
+            peaks
+                .iter()
+                .all(|p| p.max.abs() < 1e-5 && p.min.abs() < 1e-5)
+        );
     }
 
     #[test]

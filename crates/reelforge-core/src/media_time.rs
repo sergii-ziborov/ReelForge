@@ -121,7 +121,11 @@ impl MediaTime {
     /// When `fps` is a whole number, uses integer arithmetic to avoid float
     /// intermediate rounding near frame boundaries.
     #[must_use]
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_precision_loss)]
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss
+    )]
     pub fn frame_index(self, fps: f64) -> u64 {
         if !(fps.is_finite() && fps > 0.0) || self.ticks <= 0 {
             return 0;
@@ -138,11 +142,7 @@ impl MediaTime {
         }
         // ticks/timescale * fps = ticks * fps / timescale
         let v = (self.ticks as f64) * fps / f64::from(timescale);
-        if v <= 0.0 {
-            0
-        } else {
-            v.floor() as u64
-        }
+        if v <= 0.0 { 0 } else { v.floor() as u64 }
     }
 
     /// Duration between two times on the **same** timescale (tick delta as Duration).
@@ -166,7 +166,13 @@ impl MediaTime {
 
 impl fmt::Display for MediaTime {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}/{} ({:.6}s)", self.ticks, self.timescale, self.as_secs())
+        write!(
+            f,
+            "{}/{} ({:.6}s)",
+            self.ticks,
+            self.timescale,
+            self.as_secs()
+        )
     }
 }
 

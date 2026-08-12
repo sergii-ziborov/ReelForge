@@ -343,11 +343,7 @@ pub fn run_execution_plan_with(
 }
 
 fn restore_cached_outputs(graph: &RenderGraph, cached: &Path) -> Result<()> {
-    let paths: Vec<String> = graph
-        .outputs
-        .iter()
-        .filter_map(|o| o.uri.clone())
-        .collect();
+    let paths: Vec<String> = graph.outputs.iter().filter_map(|o| o.uri.clone()).collect();
     if paths.is_empty() {
         return Err(IoError::message(
             "cache hit but graph has no GraphOutput.uri to restore",
@@ -417,11 +413,8 @@ pub fn materialize_graph_bundle<S: BuildHasher, A: BuildHasher>(
         .map_err(|e| IoError::message(e.to_string()))?;
     let node_map: HashMap<&str, &RenderNode> =
         graph.nodes.iter().map(|n| (n.id.0.as_str(), n)).collect();
-    let asset_map: HashMap<&str, &reelforge_render_graph::MediaAsset> = graph
-        .assets
-        .iter()
-        .map(|a| (a.id.0.as_str(), a))
-        .collect();
+    let asset_map: HashMap<&str, &reelforge_render_graph::MediaAsset> =
+        graph.assets.iter().map(|a| (a.id.0.as_str(), a)).collect();
 
     let mut produced: HashMap<String, NodeMedia> = HashMap::new();
     let mut hints = GraphEncodeHints {
@@ -447,9 +440,7 @@ pub fn materialize_graph_bundle<S: BuildHasher, A: BuildHasher>(
                 let video = apply_compose_layers(videos, params, registry)?;
                 NodeMedia { video, audio }
             }
-            RenderNodeKind::Op { operation, params }
-                if operation.as_str() == "rf.audio.mix" =>
-            {
+            RenderNodeKind::Op { operation, params } if operation.as_str() == "rf.audio.mix" => {
                 let inputs = multi_input_media(node, &produced)?;
                 apply_audio_mix(inputs, params, registry)?
             }
@@ -565,9 +556,10 @@ fn multi_input_media(
     }
     let mut clips = Vec::with_capacity(node.inputs.len());
     for up in &node.inputs {
-        let c = produced.get(&up.0).cloned().ok_or_else(|| {
-            IoError::message(format!("upstream {} not produced yet", up.0))
-        })?;
+        let c = produced
+            .get(&up.0)
+            .cloned()
+            .ok_or_else(|| IoError::message(format!("upstream {} not produced yet", up.0)))?;
         clips.push(c);
     }
     Ok(clips)
@@ -644,20 +636,13 @@ fn apply_compose_layers(
     let layer_params = params.get("layers").and_then(|v| v.as_array());
     let mut layers = Vec::with_capacity(inputs.len());
     for (i, clip) in inputs.into_iter().enumerate() {
-        let mut layer = CompositeLayer::new(clip).with_layer_index(
-            i32::try_from(i).unwrap_or(i32::MAX),
-        );
+        let mut layer =
+            CompositeLayer::new(clip).with_layer_index(i32::try_from(i).unwrap_or(i32::MAX));
         if let Some(arr) = layer_params
             && let Some(lp) = arr.get(i)
         {
-            let x = lp
-                .get("x")
-                .and_then(serde_json::Value::as_i64)
-                .unwrap_or(0);
-            let y = lp
-                .get("y")
-                .and_then(serde_json::Value::as_i64)
-                .unwrap_or(0);
+            let x = lp.get("x").and_then(serde_json::Value::as_i64).unwrap_or(0);
+            let y = lp.get("y").and_then(serde_json::Value::as_i64).unwrap_or(0);
             #[allow(clippy::cast_possible_truncation)]
             {
                 layer = layer.with_position(Position::absolute(x as i32, y as i32));
@@ -740,13 +725,8 @@ fn apply_registered_op_media(
             "audio operation '{op}' is registered but has no executor yet"
         ))),
         _ => {
-            let video = apply_registered_op(
-                Arc::clone(&input.video),
-                operation,
-                params,
-                registry,
-                hints,
-            )?;
+            let video =
+                apply_registered_op(Arc::clone(&input.video), operation, params, registry, hints)?;
             let audio = match operation.as_str() {
                 "rf.transform.trim" => match input.audio {
                     Some(a) => Some(apply_trim_audio(a, params)?),
@@ -850,10 +830,8 @@ fn apply_registered_op(
             paint.apply(clip).map_err(IoError::from)
         }
         "rf.redaction.region" => {
-            let empty = params.is_null()
-                || params
-                    .as_object()
-                    .is_some_and(serde_json::Map::is_empty);
+            let empty =
+                params.is_null() || params.as_object().is_some_and(serde_json::Map::is_empty);
             if empty {
                 return Err(IoError::message(
                     "rf.redaction.region requires masks params (or use Redaction node)",
@@ -884,7 +862,9 @@ fn apply_registered_op(
             if let Some(fps) = params.get("fps").and_then(serde_json::Value::as_f64) {
                 hints.fps = Some(fps);
             }
-            if let Some(pa) = params.get("preserve_audio").and_then(serde_json::Value::as_bool)
+            if let Some(pa) = params
+                .get("preserve_audio")
+                .and_then(serde_json::Value::as_bool)
             {
                 hints.preserve_audio = pa;
             }
@@ -896,7 +876,10 @@ fn apply_registered_op(
     }
 }
 
-fn apply_rotate(clip: Arc<dyn VideoClip>, params: &serde_json::Value) -> Result<Arc<dyn VideoClip>> {
+fn apply_rotate(
+    clip: Arc<dyn VideoClip>,
+    params: &serde_json::Value,
+) -> Result<Arc<dyn VideoClip>> {
     let mode = params
         .get("mode")
         .and_then(|v| v.as_str())
@@ -927,12 +910,8 @@ fn apply_trim(clip: Arc<dyn VideoClip>, params: &serde_json::Value) -> Result<Ar
     let duration = param_seconds(params, "duration")?.ok_or_else(|| {
         IoError::message("rf.transform.trim requires duration (seconds or MediaTime)")
     })?;
-    subclip_video(
-        clip,
-        Time::from_secs(start),
-        Duration::from_secs(duration),
-    )
-    .map_err(IoError::from)
+    subclip_video(clip, Time::from_secs(start), Duration::from_secs(duration))
+        .map_err(IoError::from)
 }
 
 fn apply_trim_audio(
@@ -943,12 +922,8 @@ fn apply_trim_audio(
     let duration = param_seconds(params, "duration")?.ok_or_else(|| {
         IoError::message("rf.transform.trim requires duration (seconds or MediaTime)")
     })?;
-    subclip_audio(
-        clip,
-        Time::from_secs(start),
-        Duration::from_secs(duration),
-    )
-    .map_err(IoError::from)
+    subclip_audio(clip, Time::from_secs(start), Duration::from_secs(duration))
+        .map_err(IoError::from)
 }
 
 fn param_seconds(params: &serde_json::Value, key: &str) -> Result<Option<f64>> {
@@ -994,11 +969,7 @@ fn write_graph_outputs(
     hints: &GraphEncodeHints,
     control: &WriteControl,
 ) -> Result<()> {
-    let mut paths: Vec<String> = graph
-        .outputs
-        .iter()
-        .filter_map(|o| o.uri.clone())
-        .collect();
+    let mut paths: Vec<String> = graph.outputs.iter().filter_map(|o| o.uri.clone()).collect();
     if paths.is_empty()
         && let Some(p) = &hints.output_path
     {
@@ -1176,9 +1147,8 @@ fn try_hybrid_ffmpeg_prefix(
         return Ok(None);
     }
 
-    let out_path = resolve_output_path(graph).ok_or_else(|| {
-        IoError::message("hybrid run needs GraphOutput.uri or encode path")
-    })?;
+    let out_path = resolve_output_path(graph)
+        .ok_or_else(|| IoError::message("hybrid run needs GraphOutput.uri or encode path"))?;
 
     control.check_cancel()?;
     let mid = temp_graph_path(Path::new(&out_path), "rf-g-pfx");
@@ -1211,22 +1181,11 @@ fn try_hybrid_ffmpeg_prefix(
     let result = (|| {
         let seeds = HashMap::new();
         let audio_seeds = HashMap::new();
-        let mut bundle = materialize_graph_bundle(
-            &reduced,
-            &options.registry,
-            &seeds,
-            &audio_seeds,
-            false,
-        )?;
+        let mut bundle =
+            materialize_graph_bundle(&reduced, &options.registry, &seeds, &audio_seeds, false)?;
         bundle.hints.output_path = Some(out_path);
         merge_option_hints(&mut bundle.hints, options);
-        write_graph_outputs(
-            graph,
-            bundle.video.as_ref(),
-            None,
-            &bundle.hints,
-            control,
-        )
+        write_graph_outputs(graph, bundle.video.as_ref(), None, &bundle.hints, control)
     })();
 
     let _ = std::fs::remove_file(&mid);
@@ -1325,9 +1284,7 @@ pub fn is_executable_op(id: &str) -> bool {
 #[must_use]
 pub fn node_backend(node: &RenderNode, registry: &OperationRegistry) -> Option<BackendClass> {
     match &node.body {
-        RenderNodeKind::Source { .. } | RenderNodeKind::Output { .. } => {
-            Some(BackendClass::Ffmpeg)
-        }
+        RenderNodeKind::Source { .. } | RenderNodeKind::Output { .. } => Some(BackendClass::Ffmpeg),
         RenderNodeKind::Redaction { .. } => Some(BackendClass::Rust),
         RenderNodeKind::Op { operation, .. } => registry.get(operation).ok().map(|d| d.backend),
     }
@@ -1338,8 +1295,8 @@ mod tests {
     use super::*;
     use reelforge_core::{ColorClip, Rgb8, Size};
     use reelforge_render_graph::{
-        GraphOutput, MaskSample, MaskTimeline, MediaAsset, MediaAssetId, RegionRedaction,
-        RenderNode, RENDER_GRAPH_VERSION,
+        GraphOutput, MaskSample, MaskTimeline, MediaAsset, MediaAssetId, RENDER_GRAPH_VERSION,
+        RegionRedaction, RenderNode,
     };
 
     fn linear_redaction_graph() -> RenderGraph {

@@ -141,14 +141,8 @@ impl AudioClip for MixAudio {
                 continue;
             }
             let need = frame_count - skip_frames;
-            let local_start = if t0 < start {
-                0.0
-            } else {
-                local_t0
-            };
-            let buf = track
-                .clip
-                .samples_at(Time::from_secs(local_start), need)?;
+            let local_start = if t0 < start { 0.0 } else { local_t0 };
+            let buf = track.clip.samples_at(Time::from_secs(local_start), need)?;
             let got = buf.frame_count().min(need);
             let samples = buf.samples();
             let g = track.gain;

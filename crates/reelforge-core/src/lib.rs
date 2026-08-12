@@ -15,7 +15,6 @@ mod stream;
 mod time;
 
 pub use audio::{AudioBuffer, AudioFormat, SampleLayout};
-pub use media_time::MediaTime;
 pub use cache::{
     CacheConfig, CacheStats, CachedVideo, cache_video, cache_video_realtime, cache_video_with,
 };
@@ -27,6 +26,7 @@ pub use effect::{AudioEffect, VideoEffect, apply_audio_effects, apply_video_effe
 pub use error::{CoreError, Result};
 pub use frame::{Frame, FrameFormat, Mask};
 pub use layout::{Anchor, Position, Size};
+pub use media_time::MediaTime;
 pub use quality::{psnr_rgb, ssim_rgb};
 pub use solid::{ColorClip, SilenceClip};
 pub use stream::{FrameStream, stream_video, stream_video_raw};

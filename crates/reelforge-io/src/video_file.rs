@@ -167,8 +167,7 @@ impl VideoFileClip {
         if self.fps <= 0.0 {
             return 0;
         }
-        MediaTime::from_time(t, MediaTime::HZ_90K)
-            .map_or(0, |mt| mt.frame_index(self.fps))
+        MediaTime::from_time(t, MediaTime::HZ_90K).map_or(0, |mt| mt.frame_index(self.fps))
     }
 
     /// Decode at exact media time (same cache key as [`VideoClip::frame_at`]).

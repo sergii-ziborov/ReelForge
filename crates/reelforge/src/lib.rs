@@ -22,15 +22,6 @@ pub use reelforge_core::{
     cache_video_realtime, cache_video_with, psnr_rgb, ssim_rgb, stream_video, stream_video_raw,
     subclip_audio, subclip_video,
 };
-pub use reelforge_render_graph::{
-    AdapterStage, Animated, BackendClass, CapabilitySet, Easing, ExecutionPlan, ExecutionStage,
-    FfmpegStage, GraphOutput, GpuStage, Keyframe, MaskInterpolation, MaskSample, MaskTimeline,
-    MediaAsset, MediaAssetId, MediaContract, MissingMaskPolicy, NodeId, OperationDescriptor,
-    OperationId, OperationLimits, OperationRegistry, RENDER_GRAPH_VERSION, RedactionStyle,
-    RegionRedaction, RenderGraph, RenderNode, RenderNodeKind, RustStage, SemVer,
-    fingerprint_execution_plan, fingerprint_graph_run, fingerprint_render_graph, fingerprint_stage,
-    schedule_graph,
-};
 pub use reelforge_fx::{
     AccelDecel, AudioDelay, AudioFadeIn, AudioFadeOut, AudioNormalize, BlackAndWhite, Blink, Crop,
     CrossFadeIn, CrossFadeOut, EvenSize, FadeIn, FadeOut, Freeze, FreezeRegion, GammaCorrection,
@@ -41,12 +32,12 @@ pub use reelforge_fx::{
     resize_bicubic, resize_bilinear, validate_gain,
 };
 pub use reelforge_io::{
-    AudioFileClip, CancelToken, ExtractedPlan, FilterGraph, FilterOp, GraphBundle, GraphEncodeHints,
-    GraphRunOptions, ImageClip, IoError, OpenAudioOptions, OpenVideoOptions, OptimizeStats,
-    OptimizedPlan, PlanBackend, PlanOp, PlanOutput, PlanSource, ProgressCallback, ProxyOptions,
-    RENDER_PLAN_VERSION, RenderPlan, RgbFramePool, SampleJson, StageCache, TRACKS_JSON_VERSION,
-    TrackJson, TracksDocument, VideoFileClip, WaveformOptions, WaveformPeak, WriteControl,
-    WriteGifOptions, WriteProgress, WriteStage, WriteVideoOptions, apply_plan_ops,
+    AudioFileClip, CancelToken, ExtractedPlan, FilterGraph, FilterOp, GraphBundle,
+    GraphEncodeHints, GraphRunOptions, ImageClip, IoError, OpenAudioOptions, OpenVideoOptions,
+    OptimizeStats, OptimizedPlan, PlanBackend, PlanOp, PlanOutput, PlanSource, ProgressCallback,
+    ProxyOptions, RENDER_PLAN_VERSION, RenderPlan, RgbFramePool, SampleJson, StageCache,
+    TRACKS_JSON_VERSION, TrackJson, TracksDocument, VideoFileClip, WaveformOptions, WaveformPeak,
+    WriteControl, WriteGifOptions, WriteProgress, WriteStage, WriteVideoOptions, apply_plan_ops,
     apply_region_redaction, compute_waveform, compute_waveform_default, explain_plan,
     explain_render_graph, explain_render_graph_with, extract_ffmpeg, extract_from_optimized,
     ffmpeg_available, is_executable_op, is_known_custom, load_track_set, mask_timeline_from_box,
@@ -58,6 +49,15 @@ pub use reelforge_io::{
     thumbnail_png_bytes, track_set_from_value, validate_remainder, waveform_to_json, write_av,
     write_av_with, write_gif, write_gif_with, write_proxy, write_thumbnail, write_video,
     write_video_with,
+};
+pub use reelforge_render_graph::{
+    AdapterStage, Animated, BackendClass, CapabilitySet, Easing, ExecutionPlan, ExecutionStage,
+    FfmpegStage, GpuStage, GraphOutput, Keyframe, MaskInterpolation, MaskSample, MaskTimeline,
+    MediaAsset, MediaAssetId, MediaContract, MissingMaskPolicy, NodeId, OperationDescriptor,
+    OperationId, OperationLimits, OperationRegistry, RENDER_GRAPH_VERSION, RedactionStyle,
+    RegionRedaction, RenderGraph, RenderNode, RenderNodeKind, RustStage, SemVer,
+    fingerprint_execution_plan, fingerprint_graph_run, fingerprint_render_graph, fingerprint_stage,
+    schedule_graph,
 };
 pub use reelforge_text::{
     BITMAP_FONT, BurnInOptions, SubtitleCue, TextClip, TextClipOptions, TextError, burn_in_layers,

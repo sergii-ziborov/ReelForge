@@ -31,13 +31,10 @@ pub use ffmpeg::{
 };
 pub use filtergraph::{FilterGraph, FilterOp, run_filtergraph};
 pub use graph_run::{
-    GraphBundle, GraphEncodeHints, GraphRunOptions, explain_render_graph, explain_render_graph_with,
-    is_executable_op, materialize_graph, materialize_graph_bundle, materialize_graph_with_seeds,
-    node_backend, run_execution_plan, run_execution_plan_with, run_render_graph,
-    run_render_graph_with,
-};
-pub use preview::{
-    ProxyOptions, proxy_size, thumbnail_png_bytes, write_proxy, write_thumbnail,
+    GraphBundle, GraphEncodeHints, GraphRunOptions, explain_render_graph,
+    explain_render_graph_with, is_executable_op, materialize_graph, materialize_graph_bundle,
+    materialize_graph_with_seeds, node_backend, run_execution_plan, run_execution_plan_with,
+    run_render_graph, run_render_graph_with,
 };
 pub use image_clip::ImageClip;
 pub use mask_bridge::{
@@ -46,6 +43,7 @@ pub use mask_bridge::{
 };
 pub use options::{OpenAudioOptions, OpenVideoOptions, WriteGifOptions, WriteVideoOptions};
 pub use pool::RgbFramePool;
+pub use preview::{ProxyOptions, proxy_size, thumbnail_png_bytes, write_proxy, write_thumbnail};
 pub use render_plan::{
     ExtractedPlan, OptimizeStats, OptimizedPlan, PlanBackend, PlanOp, PlanOutput, PlanSource,
     RENDER_PLAN_VERSION, RenderPlan, apply_plan_ops, explain_plan, extract_ffmpeg,
@@ -53,14 +51,14 @@ pub use render_plan::{
     run_render_plan, run_render_plan_with, validate_remainder,
 };
 pub use stage_cache::StageCache;
-pub use waveform::{
-    WaveformOptions, WaveformPeak, compute_waveform, compute_waveform_default, waveform_to_json,
-};
 pub use tracks_json::{
     SampleJson, TRACKS_JSON_VERSION, TrackJson, TracksDocument, load_track_set, parse_track_set,
     track_set_from_value,
 };
 pub use video_file::{VideoFileClip, open_video};
+pub use waveform::{
+    WaveformOptions, WaveformPeak, compute_waveform, compute_waveform_default, waveform_to_json,
+};
 pub use write::{
     write_av, write_av_with, write_duration, write_gif, write_gif_with, write_video,
     write_video_with,

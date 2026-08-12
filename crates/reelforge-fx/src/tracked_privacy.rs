@@ -193,12 +193,7 @@ fn apply_multi_blur(frame: &mut Frame, regions: &[(f32, f32, f32)], intensity: f
     clippy::cast_precision_loss,
     clippy::many_single_char_names
 )]
-fn apply_multi_pixelate(
-    frame: &mut Frame,
-    regions: &[(f32, f32, f32)],
-    block: u16,
-    feather: f32,
-) {
+fn apply_multi_pixelate(frame: &mut Frame, regions: &[(f32, f32, f32)], block: u16, feather: f32) {
     let size = frame.size();
     let bpp = frame.format().bytes_per_pixel();
     let w = size.width as usize;

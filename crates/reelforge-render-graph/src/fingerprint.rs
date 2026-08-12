@@ -57,8 +57,8 @@ fn hash_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::{GraphOutput, MediaAsset, MediaAssetId, NodeId, RenderNode, RenderNodeKind};
     use crate::RENDER_GRAPH_VERSION;
+    use crate::graph::{GraphOutput, MediaAsset, MediaAssetId, NodeId, RenderNode, RenderNodeKind};
 
     fn tiny_graph() -> RenderGraph {
         RenderGraph {

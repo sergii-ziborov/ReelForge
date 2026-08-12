@@ -119,12 +119,11 @@ impl MaskTimeline {
     /// Push and keep time order (by seconds).
     pub fn push(&mut self, sample: MaskSample) {
         self.samples.push(sample);
-        self.samples
-            .sort_by(|a, b| {
-                a.t.as_secs()
-                    .partial_cmp(&b.t.as_secs())
-                    .unwrap_or(core::cmp::Ordering::Equal)
-            });
+        self.samples.sort_by(|a, b| {
+            a.t.as_secs()
+                .partial_cmp(&b.t.as_secs())
+                .unwrap_or(core::cmp::Ordering::Equal)
+        });
     }
 
     /// Merge many subject timelines into one (union of samples for fused redaction).
@@ -226,9 +225,19 @@ mod tests {
     #[test]
     fn merge_and_near() {
         let mut a = MaskTimeline::new();
-        a.push(MaskSample::ellipse(MediaTime::new(0, 30).unwrap(), 10.0, 10.0, 5.0));
+        a.push(MaskSample::ellipse(
+            MediaTime::new(0, 30).unwrap(),
+            10.0,
+            10.0,
+            5.0,
+        ));
         let mut b = MaskTimeline::new();
-        b.push(MaskSample::ellipse(MediaTime::new(0, 30).unwrap(), 50.0, 50.0, 8.0));
+        b.push(MaskSample::ellipse(
+            MediaTime::new(0, 30).unwrap(),
+            50.0,
+            50.0,
+            8.0,
+        ));
         let m = MaskTimeline::merge([a, b]);
         let r = m.regions_at(MediaTime::new(0, 30).unwrap());
         assert_eq!(r.len(), 2);

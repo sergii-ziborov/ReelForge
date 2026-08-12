@@ -1,12 +1,10 @@
 //! End-to-end `RenderGraph` runner (optional host `FFmpeg`).
 
 use reelforge_core::MediaTime;
-use reelforge_io::{
-    explain_render_graph, ffmpeg_available, materialize_graph, run_render_graph,
-};
+use reelforge_io::{explain_render_graph, ffmpeg_available, materialize_graph, run_render_graph};
 use reelforge_render_graph::{
     GraphOutput, MaskSample, MaskTimeline, MediaAsset, MediaAssetId, NodeId, OperationId,
-    RegionRedaction, RenderGraph, RenderNode, RenderNodeKind, RENDER_GRAPH_VERSION,
+    RENDER_GRAPH_VERSION, RegionRedaction, RenderGraph, RenderNode, RenderNodeKind,
 };
 use std::path::PathBuf;
 use std::process::Command;

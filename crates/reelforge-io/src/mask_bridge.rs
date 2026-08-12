@@ -12,19 +12,18 @@ pub fn mask_timeline_to_track_set(masks: &MaskTimeline) -> TrackSet {
     let mut set = TrackSet::new();
     let mut track = RegionTrack::new("mask_timeline");
     for s in &masks.samples {
-        let sample = if let (Some(l), Some(t), Some(r), Some(b)) =
-            (s.left, s.top, s.right, s.bottom)
-        {
-            RegionSample::from_bbox(s.t.as_secs(), l, t, r, b, s.conf)
-        } else {
-            RegionSample {
-                t: s.t.as_secs(),
-                cx: s.cx,
-                cy: s.cy,
-                radius: s.radius,
-                conf: s.conf,
-            }
-        };
+        let sample =
+            if let (Some(l), Some(t), Some(r), Some(b)) = (s.left, s.top, s.right, s.bottom) {
+                RegionSample::from_bbox(s.t.as_secs(), l, t, r, b, s.conf)
+            } else {
+                RegionSample {
+                    t: s.t.as_secs(),
+                    cx: s.cx,
+                    cy: s.cy,
+                    radius: s.radius,
+                    conf: s.conf,
+                }
+            };
         track.push(sample);
     }
     set.push(track);

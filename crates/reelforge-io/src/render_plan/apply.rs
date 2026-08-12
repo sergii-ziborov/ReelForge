@@ -77,7 +77,9 @@ fn apply_custom(
         }
         "region_redaction" | "redaction" | "rf.redaction.region" => {
             let params = params.ok_or_else(|| {
-                IoError::message("region_redaction requires params with masks (and optional style/sigma)")
+                IoError::message(
+                    "region_redaction requires params with masks (and optional style/sigma)",
+                )
             })?;
             let redaction = region_redaction_from_value(params)?;
             apply_region_redaction(clip, &redaction)

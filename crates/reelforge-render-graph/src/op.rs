@@ -529,9 +529,7 @@ mod tests {
     fn builtins_contain_redaction() {
         let r = OperationRegistry::with_builtins();
         assert!(r.len() >= 3);
-        let d = r
-            .get(&OperationId::new("rf.redaction.region"))
-            .unwrap();
+        let d = r.get(&OperationId::new("rf.redaction.region")).unwrap();
         assert_eq!(d.backend, BackendClass::Rust);
     }
 }

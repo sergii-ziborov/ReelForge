@@ -59,7 +59,12 @@ impl StageCache {
     /// # Errors
     ///
     /// I/O failures.
-    pub fn store_copy(&self, fingerprint: &str, ext: &str, src: impl AsRef<Path>) -> Result<PathBuf> {
+    pub fn store_copy(
+        &self,
+        fingerprint: &str,
+        ext: &str,
+        src: impl AsRef<Path>,
+    ) -> Result<PathBuf> {
         let dest = self.path_for(fingerprint, ext);
         if let Some(parent) = dest.parent() {
             fs::create_dir_all(parent)
