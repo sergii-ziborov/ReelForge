@@ -61,11 +61,51 @@ Odd frame sizes are cropped to even for yuv420 encoders. Expand size with `Resiz
 
 ## Filtergraph
 
-`FilterGraph` + `FilterOp` + `run_filtergraph` build an ffmpeg `-filter_complex` / simple filter chain without importing frames:
+`FilterGraph` + `FilterOp` + `run_filtergraph` build an ffmpeg simple filter chain without importing frames:
 
 - Trim, crop, scale, hflip/vflip, fade, even dims
 
 Use when the whole job can stay in FFmpeg.
+
+## RenderPlan (JSON + optimizer)
+
+Typed deterministic plan for agents, CLI, and batch jobs:
+
+```json
+{
+  "version": 1,
+  "source": { "type": "file", "path": "in.mp4" },
+  "ops": [
+    { "op": "trim", "start": 1.0, "duration": 5.0 },
+    { "op": "crop", "x": 0, "y": 0, "w": 1280, "h": 720 },
+    { "op": "scale", "w": 640, "h": 360 },
+    { "op": "h_flip" },
+    { "op": "even_dims" }
+  ],
+  "output": { "path": "out.mp4", "crf": 23 }
+}
+```
+
+| API | Role |
+|-----|------|
+| `RenderPlan::load` / `save` / `from_json` | JSON document |
+| `optimize_plan` | Drop identity, cancel double flips, merge crops/scales |
+| `extract_ffmpeg` | Longest pure-FFmpeg **prefix** + Rust/custom remainder |
+| `run_render_plan` | Execute when **fully** FFmpeg-extractable |
+| `explain_plan` | Human-readable split summary |
+
+`Custom` ops (e.g. `{ "op": "custom", "name": "head_blur" }`) break the FFmpeg prefix; everything after stays on the remainder path.
+
+CLI:
+
+```bash
+reelforge plan job.json              # explain (default)
+reelforge plan job.json --optimize
+reelforge plan job.json --extract
+reelforge plan job.json --run        # full FFmpeg plans only
+```
+
+Benches (no encode): `cargo bench -p reelforge-io --bench render_plan`
 
 ## Formats
 

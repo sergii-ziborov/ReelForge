@@ -1,7 +1,10 @@
 //! Declarative filter operations compiled to an `ffmpeg` filter string.
 
+use serde::{Deserialize, Serialize};
+
 /// One video transform expressible as an `FFmpeg` filter.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
 pub enum FilterOp {
     /// Trim to `[start, start+duration)` seconds.
     Trim {
@@ -51,7 +54,7 @@ pub enum FilterOp {
 }
 
 /// Ordered filter chain for a single input → single output.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FilterGraph {
     /// Operations in order.
     pub ops: Vec<FilterOp>,

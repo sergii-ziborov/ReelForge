@@ -58,11 +58,12 @@ cargo install reelforge-cli    # installs the `reelforge` binary
 - `write_video` (H.264 default), `write_av` (audio mux), `write_gif` (palette)
 - Hardware encode helpers: **NVENC / QSV / AMF** + free-form `extra_ffmpeg_args`
 - Filtergraph fast path for pure file transforms (trim/crop/scale/flip)
+- **RenderPlan** JSON: optimize (fuse/DCE) + automatic FFmpeg subgraph extraction
 
 ### Quality & tooling
 - `psnr_rgb` / `ssim_rgb` frame metrics
-- CLI: `version`, `probe`, `cut`, `filter`
-- Criterion benches: `cargo bench -p reelforge-fx`
+- CLI: `version`, `probe`, `cut`, `filter`, `plan`
+- Criterion benches: `cargo bench -p reelforge-fx`, `cargo bench -p reelforge-io --bench render_plan`
 
 ---
 
@@ -142,6 +143,23 @@ let layers = burn_in_layers(&cues, &BurnInOptions::default())?;
 // composite `layers` over your base video…
 ```
 
+### RenderPlan (JSON + FFmpeg extract)
+
+```rust
+use reelforge::prelude::*;
+
+let plan = RenderPlan::from_file("in.mp4")
+    .then(PlanOp::Trim { start: 1.0, duration: 5.0 })
+    .then(PlanOp::HFlip)
+    .then(PlanOp::Scale { w: 640, h: 360 })
+    .then(PlanOp::EvenDims)
+    .with_output(PlanOutput::new("out.mp4"));
+
+let extracted = extract_ffmpeg(&plan);
+assert!(extracted.fully_ffmpeg);
+// run_render_plan(&plan)?; // host ffmpeg, no Rust pixel import
+```
+
 ### CLI
 
 ```bash
@@ -149,6 +167,8 @@ reelforge version
 reelforge probe input.mp4
 reelforge cut --start 10 --duration 5 in.mp4 out.mp4
 reelforge filter --hflip in.mp4 out.mp4
+reelforge plan job.json --explain
+reelforge plan job.json --run
 ```
 
 ---

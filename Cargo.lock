@@ -689,6 +689,7 @@ version = "0.1.1"
 dependencies = [
  "clap",
  "reelforge",
+ "serde_json",
 ]
 
 [[package]]
@@ -720,6 +721,7 @@ dependencies = [
 name = "reelforge-io"
 version = "0.1.1"
 dependencies = [
+ "criterion",
  "image",
  "reelforge-core",
  "serde",

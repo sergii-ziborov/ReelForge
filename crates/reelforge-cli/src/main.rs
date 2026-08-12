@@ -53,6 +53,26 @@ enum Commands {
         #[arg(long)]
         height: Option<u32>,
     },
+    /// Inspect / optimize / extract / run a JSON `RenderPlan`.
+    Plan {
+        /// Path to `RenderPlan` JSON.
+        path: String,
+        /// Print extraction summary (default).
+        #[arg(long, group = "mode")]
+        explain: bool,
+        /// Emit optimized plan JSON.
+        #[arg(long, group = "mode")]
+        optimize: bool,
+        /// Emit extraction JSON (`FFmpeg` prefix + remainder).
+        #[arg(long, group = "mode")]
+        extract: bool,
+        /// Execute fully `FFmpeg`-extractable plan (`output` required in JSON).
+        #[arg(long, group = "mode")]
+        run: bool,
+        /// Optional output path for `--optimize` / `--extract` JSON.
+        #[arg(long)]
+        out: Option<String>,
+    },
 }
 
 fn main() {
@@ -84,5 +104,27 @@ fn run(cli: Cli) -> Result<(), String> {
             width,
             height,
         } => commands::filter::run(&input, &output, hflip, vflip, width, height),
+        Commands::Plan {
+            path,
+            explain,
+            optimize,
+            extract,
+            run,
+            out,
+        } => {
+            use commands::plan::PlanMode;
+            let mode = if run {
+                PlanMode::Run
+            } else if optimize {
+                PlanMode::Optimize
+            } else if extract {
+                PlanMode::Extract
+            } else {
+                // default + explicit --explain
+                let _ = explain;
+                PlanMode::Explain
+            };
+            commands::plan::run(&path, mode, out.as_deref())
+        }
     }
 }
