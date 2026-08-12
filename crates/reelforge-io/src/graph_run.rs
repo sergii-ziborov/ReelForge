@@ -1513,8 +1513,8 @@ mod tests {
             Duration::from_secs(1.0),
         ));
         let audio: Arc<dyn AudioClip> = Arc::new(SilenceClip::new(
+            AudioFormat::STEREO_48K,
             Duration::from_secs(1.0),
-            AudioFormat::mono_f32(48_000),
         ));
         let g = RenderGraph {
             version: RENDER_GRAPH_VERSION,
