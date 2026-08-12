@@ -305,7 +305,7 @@ impl OperationRegistry {
             id: OperationId::new("rf.color.painting"),
             version: SemVer::V1,
             input: video_only.clone(),
-            output: video_only,
+            output: video_only.clone(),
             backend: BackendClass::Rust,
             deterministic: true,
             capabilities: CapabilitySet {
@@ -348,6 +348,58 @@ impl OperationRegistry {
                     "layers": { "type": "array" }
                 }
             }),
+            limits: OperationLimits::default(),
+        });
+        r.register(OperationDescriptor {
+            id: OperationId::new("rf.audio.gain"),
+            version: SemVer::V1,
+            input: MediaContract {
+                video: false,
+                audio: true,
+                masks: false,
+                notes: None,
+            },
+            output: MediaContract {
+                video: false,
+                audio: true,
+                masks: false,
+                notes: None,
+            },
+            backend: BackendClass::Rust,
+            deterministic: true,
+            capabilities: CapabilitySet {
+                tags: vec!["audio".into()],
+            },
+            parameter_schema: serde_json::json!({
+                "type": "object",
+                "properties": { "factor": { "type": "number" } }
+            }),
+            limits: OperationLimits::default(),
+        });
+        r.register(OperationDescriptor {
+            id: OperationId::new("rf.audio.drop"),
+            version: SemVer::V1,
+            input: video_av.clone(),
+            output: video_only.clone(),
+            backend: BackendClass::Rust,
+            deterministic: true,
+            capabilities: CapabilitySet {
+                tags: vec!["audio".into()],
+            },
+            parameter_schema: serde_json::json!({ "type": "object" }),
+            limits: OperationLimits::default(),
+        });
+        r.register(OperationDescriptor {
+            id: OperationId::new("rf.audio.preserve"),
+            version: SemVer::V1,
+            input: video_av.clone(),
+            output: video_av.clone(),
+            backend: BackendClass::Rust,
+            deterministic: true,
+            capabilities: CapabilitySet {
+                tags: vec!["audio".into()],
+            },
+            parameter_schema: serde_json::json!({ "type": "object" }),
             limits: OperationLimits::default(),
         });
         r.register(OperationDescriptor {

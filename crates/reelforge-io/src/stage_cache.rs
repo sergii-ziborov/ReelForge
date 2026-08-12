@@ -4,7 +4,9 @@ use crate::error::{IoError, Result};
 use reelforge_render_graph::{
     ExecutionPlan, RenderGraph, fingerprint_graph_run, fingerprint_stage,
 };
+use std::collections::hash_map::DefaultHasher;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 
 /// Directory-backed stage output cache.
@@ -81,6 +83,39 @@ impl StageCache {
     #[must_use]
     pub fn stage_key(backend: &str, node_ids: &[impl AsRef<str>]) -> String {
         fingerprint_stage(backend, node_ids)
+    }
+
+    /// Fingerprint an intermediate `FFmpeg` filter stage (source URI + vf + node ids).
+    #[must_use]
+    pub fn ffmpeg_prefix_key(source_uri: &str, vf: &str, node_ids: &[impl AsRef<str>]) -> String {
+        let mut h = DefaultHasher::new();
+        "ffmpeg_prefix".hash(&mut h);
+        source_uri.hash(&mut h);
+        vf.hash(&mut h);
+        for id in node_ids {
+            id.as_ref().hash(&mut h);
+        }
+        format!("{:016x}", h.finish())
+    }
+
+    /// Restore a cached intermediate into `dest` when present.
+    ///
+    /// # Errors
+    ///
+    /// Copy failures.
+    pub fn restore_to(&self, fingerprint: &str, ext: &str, dest: impl AsRef<Path>) -> Result<bool> {
+        let Some(src) = self.hit(fingerprint, ext) else {
+            return Ok(false);
+        };
+        if let Some(parent) = dest.as_ref().parent()
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent)
+                .map_err(|e| IoError::message(format!("stage restore mkdir: {e}")))?;
+        }
+        fs::copy(src, dest.as_ref())
+            .map_err(|e| IoError::message(format!("stage restore copy: {e}")))?;
+        Ok(true)
     }
 }
 

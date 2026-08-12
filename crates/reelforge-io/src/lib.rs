@@ -15,6 +15,7 @@ mod mask_bridge;
 mod options;
 mod pipeline;
 mod pool;
+mod preview;
 mod render_plan;
 mod stage_cache;
 mod tracks_json;
@@ -29,9 +30,13 @@ pub use ffmpeg::{
 };
 pub use filtergraph::{FilterGraph, FilterOp, run_filtergraph};
 pub use graph_run::{
-    GraphEncodeHints, GraphRunOptions, explain_render_graph, explain_render_graph_with,
-    is_executable_op, materialize_graph, materialize_graph_with_seeds, node_backend,
-    run_execution_plan, run_execution_plan_with, run_render_graph, run_render_graph_with,
+    GraphBundle, GraphEncodeHints, GraphRunOptions, explain_render_graph, explain_render_graph_with,
+    is_executable_op, materialize_graph, materialize_graph_bundle, materialize_graph_with_seeds,
+    node_backend, run_execution_plan, run_execution_plan_with, run_render_graph,
+    run_render_graph_with,
+};
+pub use preview::{
+    ProxyOptions, proxy_size, thumbnail_png_bytes, write_proxy, write_thumbnail,
 };
 pub use image_clip::ImageClip;
 pub use mask_bridge::{
