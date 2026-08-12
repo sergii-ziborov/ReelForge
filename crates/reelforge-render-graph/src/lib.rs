@@ -15,6 +15,7 @@ mod graph;
 mod mask;
 mod op;
 mod redaction;
+mod schedule;
 mod stage;
 
 pub use animated::{Animated, Easing, Keyframe};
@@ -28,7 +29,10 @@ pub use op::{
     OperationRegistry, SemVer,
 };
 pub use redaction::{RedactionStyle, RegionRedaction};
-pub use stage::{ExecutionPlan, ExecutionStage, FfmpegStage, GpuStage, RustStage};
+pub use schedule::schedule_graph;
+pub use stage::{
+    AdapterStage, ExecutionPlan, ExecutionStage, FfmpegStage, GpuStage, RustStage,
+};
 
 /// Schema version for serialized `RenderGraph` documents.
 pub const RENDER_GRAPH_VERSION: u32 = 1;

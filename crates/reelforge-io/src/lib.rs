@@ -29,6 +29,7 @@ pub use filtergraph::{FilterGraph, FilterOp, run_filtergraph};
 pub use image_clip::ImageClip;
 pub use mask_bridge::{
     apply_region_redaction, mask_timeline_from_box, mask_timeline_to_track_set,
+    region_redaction_from_value,
 };
 pub use options::{OpenAudioOptions, OpenVideoOptions, WriteGifOptions, WriteVideoOptions};
 pub use pool::RgbFramePool;

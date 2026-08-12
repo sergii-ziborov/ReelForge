@@ -118,14 +118,26 @@ impl MediaTime {
     /// Frame index using **exact** tick math: `floor(ticks * fps / timescale)`.
     ///
     /// Prefer this over `floor(as_secs() * fps)` for constant-fps indexes.
+    /// When `fps` is a whole number, uses integer arithmetic to avoid float
+    /// intermediate rounding near frame boundaries.
     #[must_use]
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_precision_loss)]
     pub fn frame_index(self, fps: f64) -> u64 {
         if !(fps.is_finite() && fps > 0.0) || self.ticks <= 0 {
             return 0;
         }
+        let timescale = self.timescale.max(1);
+        // Integer path for constant integer FPS (common CFR files).
+        if fps.fract() == 0.0 && fps >= 1.0 && fps <= f64::from(u32::MAX) {
+            let fps_u = fps as u32;
+            let ticks = i128::from(self.ticks);
+            let num = ticks.saturating_mul(i128::from(fps_u));
+            let den = i128::from(timescale);
+            let idx = num.div_euclid(den);
+            return u64::try_from(idx).unwrap_or(0);
+        }
         // ticks/timescale * fps = ticks * fps / timescale
-        let v = (self.ticks as f64) * fps / f64::from(self.timescale.max(1));
+        let v = (self.ticks as f64) * fps / f64::from(timescale);
         if v <= 0.0 {
             0
         } else {

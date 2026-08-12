@@ -22,11 +22,11 @@ pub use reelforge_core::{
     subclip_audio, subclip_video,
 };
 pub use reelforge_render_graph::{
-    Animated, BackendClass, CapabilitySet, Easing, ExecutionPlan, ExecutionStage, FfmpegStage,
-    GraphOutput, GpuStage, Keyframe, MaskInterpolation, MaskSample, MaskTimeline, MediaAsset,
-    MediaAssetId, MediaContract, MissingMaskPolicy, NodeId, OperationDescriptor, OperationId,
-    OperationLimits, OperationRegistry, RENDER_GRAPH_VERSION, RedactionStyle, RegionRedaction,
-    RenderGraph, RenderNode, RenderNodeKind, RustStage, SemVer,
+    AdapterStage, Animated, BackendClass, CapabilitySet, Easing, ExecutionPlan, ExecutionStage,
+    FfmpegStage, GraphOutput, GpuStage, Keyframe, MaskInterpolation, MaskSample, MaskTimeline,
+    MediaAsset, MediaAssetId, MediaContract, MissingMaskPolicy, NodeId, OperationDescriptor,
+    OperationId, OperationLimits, OperationRegistry, RENDER_GRAPH_VERSION, RedactionStyle,
+    RegionRedaction, RenderGraph, RenderNode, RenderNodeKind, RustStage, SemVer, schedule_graph,
 };
 pub use reelforge_fx::{
     AccelDecel, AudioDelay, AudioFadeIn, AudioFadeOut, AudioNormalize, BlackAndWhite, Blink, Crop,
@@ -45,9 +45,10 @@ pub use reelforge_io::{
     WriteGifOptions, WriteProgress, WriteStage, WriteVideoOptions, apply_plan_ops,
     apply_region_redaction, explain_plan, extract_ffmpeg, extract_from_optimized, ffmpeg_available,
     is_known_custom, load_track_set, mask_timeline_from_box, mask_timeline_to_track_set, open_audio,
-    open_video, optimize, optimize_plan, parse_track_set, require_full_ffmpeg, run_filtergraph,
-    run_render_plan, run_render_plan_with, track_set_from_value, validate_remainder, write_av,
-    write_av_with, write_gif, write_gif_with, write_video, write_video_with,
+    open_video, optimize, optimize_plan, parse_track_set, region_redaction_from_value,
+    require_full_ffmpeg, run_filtergraph, run_render_plan, run_render_plan_with,
+    track_set_from_value, validate_remainder, write_av, write_av_with, write_gif, write_gif_with,
+    write_video, write_video_with,
 };
 pub use reelforge_text::{
     BITMAP_FONT, BurnInOptions, SubtitleCue, TextClip, TextClipOptions, TextError, burn_in_layers,

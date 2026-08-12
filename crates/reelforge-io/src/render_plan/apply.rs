@@ -2,6 +2,7 @@
 
 use super::ops::PlanOp;
 use crate::error::{IoError, Result};
+use crate::mask_bridge::{apply_region_redaction, region_redaction_from_value};
 use crate::tracks_json::{load_track_set, track_set_from_value};
 use reelforge_core::{Duration, Size, Time, VideoClip, VideoEffect, subclip_video};
 use reelforge_fx::{
@@ -74,8 +75,15 @@ fn apply_custom(
         "head_blur" | "tracked_blur" | "privacy_blur" | "face_blur" => {
             apply_tracked_blur(clip, params)
         }
+        "region_redaction" | "redaction" | "rf.redaction.region" => {
+            let params = params.ok_or_else(|| {
+                IoError::message("region_redaction requires params with masks (and optional style/sigma)")
+            })?;
+            let redaction = region_redaction_from_value(params)?;
+            apply_region_redaction(clip, &redaction)
+        }
         other => Err(IoError::message(format!(
-            "unknown custom plan op '{other}' (supported: black_and_white, invert, painting, multiply_color, head_blur/tracked_blur, identity)"
+            "unknown custom plan op '{other}' (supported: black_and_white, invert, painting, multiply_color, head_blur/tracked_blur, region_redaction, identity)"
         ))),
     }
 }
@@ -166,6 +174,9 @@ pub fn is_known_custom(name: &str) -> bool {
             | "tracked_blur"
             | "privacy_blur"
             | "face_blur"
+            | "region_redaction"
+            | "redaction"
+            | "rf.redaction.region"
     )
 }
 
@@ -231,6 +242,37 @@ mod tests {
     fn head_blur_is_known() {
         assert!(is_known_custom("head_blur"));
         assert!(is_known_custom("tracked_blur"));
+        assert!(is_known_custom("region_redaction"));
+        assert!(is_known_custom("rf.redaction.region"));
+    }
+
+    #[test]
+    fn region_redaction_from_plan_params() {
+        let base: Arc<dyn VideoClip> = Arc::new(ColorClip::new(
+            Size::new(64, 64),
+            Rgb8::WHITE,
+            Duration::from_secs(1.0),
+        ));
+        let params = serde_json::json!({
+            "sigma": 10.0,
+            "masks": {
+                "samples": [{
+                    "t": { "ticks": 0, "timescale": 30 },
+                    "cx": 32.0,
+                    "cy": 32.0,
+                    "radius": 12.0
+                }]
+            }
+        });
+        let out = apply_plan_ops(
+            base,
+            &[PlanOp::Custom {
+                name: "region_redaction".into(),
+                params: Some(params),
+            }],
+        )
+        .unwrap();
+        let _ = out.frame_at(Time::from_secs(0.0)).unwrap();
     }
 
     #[test]

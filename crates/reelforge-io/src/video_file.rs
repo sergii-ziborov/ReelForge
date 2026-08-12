@@ -4,7 +4,7 @@ use crate::audio_file::AudioFileClip;
 use crate::error::{IoError, Result};
 use crate::ffmpeg::{FfmpegTools, SequentialRgbDecoder, decode_frame_rgb, probe_video};
 use crate::options::{OpenAudioOptions, OpenVideoOptions};
-use reelforge_core::{CoreError, Duration, Frame, Size, Time, VideoClip};
+use reelforge_core::{CoreError, Duration, Frame, MediaTime, Size, Time, VideoClip};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -159,23 +159,25 @@ impl VideoFileClip {
         }
     }
 
+    /// Map presentation time → frame index via [`MediaTime`] (tick math).
+    ///
+    /// Uses a 90 kHz timescale when converting floating [`Time`], then
+    /// `MediaTime::frame_index` so CFR indexing avoids `floor(secs × fps)` drift.
     fn frame_index(&self, t: Time) -> u64 {
         if self.fps <= 0.0 {
             return 0;
         }
-        let idx = (t.as_secs() * self.fps).floor();
-        if idx < 0.0 {
-            0
-        } else {
-            #[allow(
-                clippy::cast_possible_truncation,
-                clippy::cast_sign_loss,
-                clippy::cast_precision_loss
-            )]
-            {
-                idx as u64
-            }
-        }
+        MediaTime::from_time(t, MediaTime::HZ_90K)
+            .map_or(0, |mt| mt.frame_index(self.fps))
+    }
+
+    /// Decode at exact media time (same cache key as [`VideoClip::frame_at`]).
+    ///
+    /// # Errors
+    ///
+    /// Out of range or decode failure.
+    pub fn frame_at_media(&self, t: MediaTime) -> reelforge_core::Result<Frame> {
+        self.frame_at(t.to_time())
     }
 
     fn decode_sequential(&self, index: u64) -> reelforge_core::Result<Frame> {
