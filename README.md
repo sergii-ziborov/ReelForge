@@ -22,7 +22,13 @@ Cut, concatenate, overlay, title, composite, and render media from code — a fl
 reelforge = "0.1"
 ```
 
-Rust toolchain: see `rust-toolchain.toml`. Media tools: **ffmpeg** and **ffprobe** on `PATH` (or `REELFORGE_FFMPEG` / `REELFORGE_FFPROBE`).
+```bash
+cargo add reelforge
+cargo install reelforge-cli   # binary: reelforge
+```
+
+Crates: [reelforge](https://crates.io/crates/reelforge) · [docs.rs](https://docs.rs/reelforge)  
+Rust toolchain: see `rust-toolchain.toml` (MSRV **1.97**). Media tools: **ffmpeg** and **ffprobe** on `PATH` (or `REELFORGE_FFMPEG` / `REELFORGE_FFPROBE`).
 
 ## Documentation
 
