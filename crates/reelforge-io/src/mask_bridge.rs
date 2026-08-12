@@ -2,11 +2,11 @@
 
 use crate::error::{IoError, Result};
 use reelforge_core::{MediaTime, VideoClip, VideoEffect};
-use reelforge_fx::{RegionSample, RegionTrack, TrackSet, TrackedBlur};
+use reelforge_fx::{PrivacyStyle, RegionSample, RegionTrack, TrackSet, TrackedPrivacy};
 use reelforge_render_graph::{MaskSample, MaskTimeline, RedactionStyle, RegionRedaction};
 use std::sync::Arc;
 
-/// Convert a [`MaskTimeline`] into a [`TrackSet`] for [`TrackedBlur`].
+/// Convert a [`MaskTimeline`] into a [`TrackSet`] for privacy effects.
 #[must_use]
 pub fn mask_timeline_to_track_set(masks: &MaskTimeline) -> TrackSet {
     let mut set = TrackSet::new();
@@ -31,13 +31,25 @@ pub fn mask_timeline_to_track_set(masks: &MaskTimeline) -> TrackSet {
     set
 }
 
-/// Apply [`RegionRedaction`] to a clip when style is Gaussian (M2 preview path).
-///
-/// Pixelate / Solid return an error until those kernels land.
+/// Map contract [`RedactionStyle`] → fx [`PrivacyStyle`].
+#[must_use]
+pub fn privacy_style_from_redaction(style: &RedactionStyle) -> PrivacyStyle {
+    match style {
+        RedactionStyle::Gaussian { sigma } => PrivacyStyle::Gaussian {
+            sigma: sigma.max(0.5),
+        },
+        RedactionStyle::Pixelate { block_size } => PrivacyStyle::Pixelate {
+            block_size: (*block_size).max(2),
+        },
+        RedactionStyle::Solid { color } => PrivacyStyle::Solid { color: *color },
+    }
+}
+
+/// Apply [`RegionRedaction`] (gaussian / pixelate / solid) via [`TrackedPrivacy`].
 ///
 /// # Errors
 ///
-/// Unsupported style or empty masks.
+/// Empty masks or effect failure.
 pub fn apply_region_redaction(
     clip: Arc<dyn VideoClip>,
     redaction: &RegionRedaction,
@@ -45,16 +57,11 @@ pub fn apply_region_redaction(
     if redaction.masks.samples.is_empty() {
         return Err(IoError::message("RegionRedaction masks are empty"));
     }
-    match &redaction.style {
-        RedactionStyle::Gaussian { sigma } => {
-            let tracks = mask_timeline_to_track_set(&redaction.masks);
-            let blur = TrackedBlur::new(tracks).with_intensity(*sigma);
-            blur.apply(clip).map_err(IoError::from)
-        }
-        RedactionStyle::Pixelate { .. } | RedactionStyle::Solid { .. } => Err(IoError::message(
-            "RegionRedaction style pixelate/solid not implemented yet; use gaussian",
-        )),
-    }
+    let tracks = mask_timeline_to_track_set(&redaction.masks);
+    let style = privacy_style_from_redaction(&redaction.style);
+    TrackedPrivacy::new(tracks, style)
+        .apply(clip)
+        .map_err(IoError::from)
 }
 
 /// Build a single-sample [`MaskTimeline`] at media time for tests / adapters.
@@ -142,5 +149,42 @@ mod tests {
         ));
         let out = apply_region_redaction(clip, &redaction).unwrap();
         let _ = out.frame_at(Time::ZERO).unwrap();
+    }
+
+    #[test]
+    fn apply_pixelate_and_solid() {
+        let masks = {
+            let mut tl = MaskTimeline::new();
+            tl.push(MaskSample::ellipse(
+                MediaTime::new(0, 30).unwrap(),
+                16.0,
+                16.0,
+                10.0,
+            ));
+            tl
+        };
+        let clip: Arc<dyn VideoClip> = Arc::new(ColorClip::new(
+            Size::new(32, 32),
+            Rgb8::WHITE,
+            Duration::from_secs(1.0),
+        ));
+        let pix = RegionRedaction {
+            masks: masks.clone(),
+            style: RedactionStyle::Pixelate { block_size: 4 },
+        };
+        let _ = apply_region_redaction(Arc::clone(&clip), &pix)
+            .unwrap()
+            .frame_at(Time::ZERO)
+            .unwrap();
+        let solid = RegionRedaction {
+            masks,
+            style: RedactionStyle::Solid {
+                color: reelforge_core::Rgba8::new(0, 0, 0, 255),
+            },
+        };
+        let _ = apply_region_redaction(clip, &solid)
+            .unwrap()
+            .frame_at(Time::ZERO)
+            .unwrap();
     }
 }

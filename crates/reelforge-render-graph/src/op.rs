@@ -157,37 +157,118 @@ impl OperationRegistry {
         Self::default()
     }
 
-    /// Builtin `ReelForge` M0/M2 ops.
+    /// Builtin `ReelForge` M0–M3 ops.
     #[must_use]
+    #[allow(clippy::too_many_lines)]
     pub fn with_builtins() -> Self {
         let mut r = Self::new();
-        r.register(OperationDescriptor {
-            id: OperationId::new("rf.transform.trim"),
-            version: SemVer::V1,
-            input: MediaContract {
-                video: true,
-                audio: true,
-                masks: false,
-                notes: None,
-            },
-            output: MediaContract {
-                video: true,
-                audio: true,
-                masks: false,
-                notes: None,
-            },
-            backend: BackendClass::Ffmpeg,
-            deterministic: true,
-            capabilities: CapabilitySet {
-                tags: vec!["edit".into()],
-            },
-            parameter_schema: serde_json::json!({
+        let video_av = MediaContract {
+            video: true,
+            audio: true,
+            masks: false,
+            notes: None,
+        };
+        let video_only = MediaContract {
+            video: true,
+            audio: false,
+            masks: false,
+            notes: None,
+        };
+
+        let mut transform = |id: &str, backend: BackendClass, schema: Value, tags: &[&str]| {
+            r.register(OperationDescriptor {
+                id: OperationId::new(id),
+                version: SemVer::V1,
+                input: video_av.clone(),
+                output: video_av.clone(),
+                backend,
+                deterministic: true,
+                capabilities: CapabilitySet {
+                    tags: tags.iter().map(|t| (*t).into()).collect(),
+                },
+                parameter_schema: schema,
+                limits: OperationLimits::default(),
+            });
+        };
+
+        transform(
+            "rf.transform.trim",
+            BackendClass::Ffmpeg,
+            serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "start": { "type": "object" },
-                    "duration": { "type": "object" }
+                    "start": {},
+                    "duration": {}
                 }
             }),
+            &["edit"],
+        );
+        transform(
+            "rf.transform.hflip",
+            BackendClass::Ffmpeg,
+            serde_json::json!({ "type": "object" }),
+            &["edit"],
+        );
+        transform(
+            "rf.transform.vflip",
+            BackendClass::Ffmpeg,
+            serde_json::json!({ "type": "object" }),
+            &["edit"],
+        );
+        transform(
+            "rf.transform.scale",
+            BackendClass::Ffmpeg,
+            serde_json::json!({
+                "type": "object",
+                "properties": { "w": { "type": "integer" }, "h": { "type": "integer" } }
+            }),
+            &["edit"],
+        );
+        transform(
+            "rf.transform.crop",
+            BackendClass::Ffmpeg,
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "x": { "type": "integer" },
+                    "y": { "type": "integer" },
+                    "w": { "type": "integer" },
+                    "h": { "type": "integer" }
+                }
+            }),
+            &["edit"],
+        );
+        transform(
+            "rf.transform.even_dims",
+            BackendClass::Ffmpeg,
+            serde_json::json!({ "type": "object" }),
+            &["edit"],
+        );
+
+        r.register(OperationDescriptor {
+            id: OperationId::new("rf.color.black_and_white"),
+            version: SemVer::V1,
+            input: video_only.clone(),
+            output: video_only.clone(),
+            backend: BackendClass::Rust,
+            deterministic: true,
+            capabilities: CapabilitySet {
+                tags: vec!["color".into()],
+            },
+            parameter_schema: serde_json::json!({ "type": "object" }),
+            limits: OperationLimits::default(),
+        });
+        r.register(OperationDescriptor {
+            id: OperationId::new("rf.color.invert"),
+            version: SemVer::V1,
+            input: video_only.clone(),
+            output: video_only,
+            backend: BackendClass::Rust,
+            deterministic: true,
+            capabilities: CapabilitySet {
+                tags: vec!["color".into()],
+            },
+            parameter_schema: serde_json::json!({ "type": "object" }),
             limits: OperationLimits::default(),
         });
         r.register(OperationDescriptor {
@@ -222,12 +303,7 @@ impl OperationRegistry {
         r.register(OperationDescriptor {
             id: OperationId::new("rf.encode.h264"),
             version: SemVer::V1,
-            input: MediaContract {
-                video: true,
-                audio: true,
-                masks: false,
-                notes: None,
-            },
+            input: video_av.clone(),
             output: MediaContract {
                 video: true,
                 audio: true,

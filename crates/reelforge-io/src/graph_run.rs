@@ -16,7 +16,10 @@ use crate::mask_bridge::{apply_region_redaction, region_redaction_from_value};
 use crate::options::{OpenVideoOptions, WriteVideoOptions};
 use crate::video_file::open_video;
 use crate::{run_filtergraph, write_video_with};
-use reelforge_core::{Duration, MediaTime, Time, VideoClip, subclip_video};
+use reelforge_core::{Duration, MediaTime, Size, Time, VideoClip, VideoEffect, subclip_video};
+use reelforge_fx::{
+    BlackAndWhite, Crop, EvenSize, InvertColors, MirrorX, MirrorY, Resize,
+};
 use reelforge_render_graph::{
     BackendClass, ExecutionPlan, ExecutionStage, MediaAssetId, NodeId, OperationId,
     OperationRegistry, RENDER_GRAPH_VERSION, RenderGraph, RenderNode, RenderNodeKind,
@@ -386,6 +389,47 @@ fn apply_registered_op(
 
     match operation.as_str() {
         "rf.transform.trim" => apply_trim(clip, params),
+        "rf.transform.hflip" => MirrorX.apply(clip).map_err(IoError::from),
+        "rf.transform.vflip" => MirrorY.apply(clip).map_err(IoError::from),
+        "rf.transform.even_dims" => EvenSize.apply(clip).map_err(IoError::from),
+        "rf.transform.scale" => {
+            let w = params
+                .get("w")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| IoError::message("rf.transform.scale requires w"))?;
+            let h = params
+                .get("h")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| IoError::message("rf.transform.scale requires h"))?;
+            #[allow(clippy::cast_possible_truncation)]
+            Resize::to(Size::new(w as u32, h as u32))
+                .apply(clip)
+                .map_err(IoError::from)
+        }
+        "rf.transform.crop" => {
+            let x = params
+                .get("x")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            let y = params
+                .get("y")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            let w = params
+                .get("w")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| IoError::message("rf.transform.crop requires w"))?;
+            let h = params
+                .get("h")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| IoError::message("rf.transform.crop requires h"))?;
+            #[allow(clippy::cast_possible_truncation)]
+            Crop::new(x as u32, y as u32, w as u32, h as u32)
+                .apply(clip)
+                .map_err(IoError::from)
+        }
+        "rf.color.black_and_white" => BlackAndWhite.apply(clip).map_err(IoError::from),
+        "rf.color.invert" => InvertColors.apply(clip).map_err(IoError::from),
         "rf.redaction.region" => {
             let empty = params.is_null()
                 || params
@@ -543,6 +587,7 @@ fn can_use_ffmpeg_prefix(graph: &RenderGraph, plan: &ExecutionPlan) -> bool {
 }
 
 /// Returns `Ok(Some(()))` when hybrid path fully finished, `Ok(None)` to fall back.
+#[allow(clippy::too_many_lines)]
 fn try_hybrid_ffmpeg_prefix(
     graph: &RenderGraph,
     plan: &ExecutionPlan,
@@ -565,24 +610,84 @@ fn try_hybrid_ffmpeg_prefix(
             .ok_or_else(|| IoError::message(format!("missing node {}", nid.0)))?;
         match &node.body {
             RenderNodeKind::Source { .. } | RenderNodeKind::Output { .. } => {}
-            RenderNodeKind::Op { operation, params }
-                if operation.as_str() == "rf.transform.trim" =>
-            {
-                let start = param_seconds(params, "start")?.unwrap_or(0.0);
-                let duration = param_seconds(params, "duration")?.ok_or_else(|| {
-                    IoError::message("trim duration required for FFmpeg prefix")
-                })?;
-                filter = filter.then(FilterOp::Trim { start, duration });
-                saw_trim = true;
-                strip_ids.insert(nid.0.clone());
-            }
-            RenderNodeKind::Op { operation, .. } if operation.as_str() == "rf.encode.h264" => {
-                return Ok(None);
-            }
-            _ => return Ok(None),
+            RenderNodeKind::Op { operation, params } => match operation.as_str() {
+                "rf.transform.trim" => {
+                    let start = param_seconds(params, "start")?.unwrap_or(0.0);
+                    let duration = param_seconds(params, "duration")?.ok_or_else(|| {
+                        IoError::message("trim duration required for FFmpeg prefix")
+                    })?;
+                    filter = filter.then(FilterOp::Trim { start, duration });
+                    saw_trim = true;
+                    strip_ids.insert(nid.0.clone());
+                }
+                "rf.transform.hflip" => {
+                    filter = filter.then(FilterOp::HFlip);
+                    strip_ids.insert(nid.0.clone());
+                }
+                "rf.transform.vflip" => {
+                    filter = filter.then(FilterOp::VFlip);
+                    strip_ids.insert(nid.0.clone());
+                }
+                "rf.transform.scale" => {
+                    let w = params
+                        .get("w")
+                        .and_then(serde_json::Value::as_u64)
+                        .ok_or_else(|| IoError::message("scale w required"))?;
+                    let h = params
+                        .get("h")
+                        .and_then(serde_json::Value::as_u64)
+                        .ok_or_else(|| IoError::message("scale h required"))?;
+                    #[allow(clippy::cast_possible_truncation)]
+                    {
+                        filter = filter.then(FilterOp::Scale {
+                            w: w as u32,
+                            h: h as u32,
+                        });
+                    }
+                    strip_ids.insert(nid.0.clone());
+                }
+                "rf.transform.crop" => {
+                    let x = params
+                        .get("x")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0);
+                    let y = params
+                        .get("y")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0);
+                    let w = params
+                        .get("w")
+                        .and_then(serde_json::Value::as_u64)
+                        .ok_or_else(|| IoError::message("crop w required"))?;
+                    let h = params
+                        .get("h")
+                        .and_then(serde_json::Value::as_u64)
+                        .ok_or_else(|| IoError::message("crop h required"))?;
+                    #[allow(clippy::cast_possible_truncation)]
+                    {
+                        filter = filter.then(FilterOp::Crop {
+                            w: w as u32,
+                            h: h as u32,
+                            x: x as u32,
+                            y: y as u32,
+                        });
+                    }
+                    strip_ids.insert(nid.0.clone());
+                }
+                "rf.transform.even_dims" => {
+                    filter = filter.then(FilterOp::EvenDims);
+                    strip_ids.insert(nid.0.clone());
+                }
+                _ => return Ok(None),
+            },
+            RenderNodeKind::Redaction { .. } => return Ok(None),
         }
     }
-    if !saw_trim {
+    // Prefix must apply at least one real filter (trim and/or geometry).
+    if filter.is_empty() && !saw_trim {
+        return Ok(None);
+    }
+    if filter.is_empty() {
         return Ok(None);
     }
 
@@ -691,7 +796,16 @@ fn temp_graph_path(output: &Path, tag: &str) -> PathBuf {
 pub fn is_executable_op(id: &str) -> bool {
     matches!(
         id,
-        "rf.transform.trim" | "rf.redaction.region" | "rf.encode.h264"
+        "rf.transform.trim"
+            | "rf.transform.hflip"
+            | "rf.transform.vflip"
+            | "rf.transform.scale"
+            | "rf.transform.crop"
+            | "rf.transform.even_dims"
+            | "rf.color.black_and_white"
+            | "rf.color.invert"
+            | "rf.redaction.region"
+            | "rf.encode.h264"
     )
 }
 
