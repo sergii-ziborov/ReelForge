@@ -3,6 +3,11 @@
 //! ```bash
 //! cargo run -p reelforge-io --example real_bench --release -- path/to/in.mp4 [out.mp4]
 //! ```
+#![allow(
+    clippy::print_stdout,
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation
+)]
 
 use reelforge_core::{Duration, Size, Time, VideoClip, VideoEffect, psnr_rgb, ssim_rgb};
 use reelforge_fx::{BlackAndWhite, Crop, FadeIn, Resize, ResizeFilter};
@@ -16,40 +21,135 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut args = env::args().skip(1);
-    let input = args
-        .next()
-        .ok_or("usage: real_bench <input.mp4> [output.mp4]")?;
-    let output = args
-        .next()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("target/demo/real_bench_out.mp4"));
+struct Probe {
+    size: Size,
+    dur: Duration,
+    fps: f64,
+    open_ms: f64,
+}
 
-    if !ffmpeg_available() {
-        return Err("ffmpeg/ffprobe not found on PATH (or REELFORGE_FFMPEG)".into());
+struct GraphOut {
+    chain: Arc<dyn VideoClip>,
+    crop_w: u32,
+    crop_h: u32,
+    x: u32,
+    y: u32,
+    target: Size,
+    graph_ms: f64,
+}
+
+fn main() {
+    if let Err(e) = run() {
+        eprintln!("error: {e}");
+        std::process::exit(1);
     }
+}
+
+fn run() -> Result<(), Box<dyn std::error::Error>> {
+    let (input, output) = parse_args()?;
+    ensure_ffmpeg()?;
 
     println!("=== ReelForge real-file bench ===");
     println!("input : {input}");
     println!("output: {}", output.display());
 
-    let t_open = Instant::now();
-    let video = open_video(&OpenVideoOptions::new(&input))?;
-    let open_ms = t_open.elapsed().as_secs_f64() * 1000.0;
-    let size = video.size();
-    let dur = video.duration();
-    let fps = video.fps().unwrap_or(24.0);
+    let probe = open_and_probe(&input)?;
     println!(
-        "probe : {}x{}  duration={:.3}s  fps={fps:.3}  open_ms={open_ms:.1}",
-        size.width,
-        size.height,
-        dur.as_secs()
+        "probe : {}x{}  duration={:.3}s  fps={:.3}  open_ms={:.1}",
+        probe.size.width,
+        probe.size.height,
+        probe.dur.as_secs(),
+        probe.fps,
+        probe.open_ms
     );
 
-    let clip: Arc<dyn VideoClip> = Arc::new(video);
+    let graph = build_chain(&probe)?;
+    println!(
+        "graph : crop {}x{}@({},{}) → {}x{} + fade + bw  build_ms={:.2}",
+        graph.crop_w,
+        graph.crop_h,
+        graph.x,
+        graph.y,
+        graph.target.width,
+        graph.target.height,
+        graph.graph_ms
+    );
 
-    // Representative MoviePy-like chain: crop → resize → fade → B&W
+    let sample = sample_frames(graph.chain.as_ref(), &probe)?;
+    println!(
+        "sample: {} frames  total_ms={:.1}  ms/frame={:.2}  fps_eq={:.1}",
+        sample.count,
+        sample.total_ms,
+        sample.per_frame_ms,
+        1000.0 / sample.per_frame_ms.max(1e-9)
+    );
+    println!(
+        "quality(self): psnr={:?}  ssim={:.6}",
+        sample.psnr, sample.ssim
+    );
+
+    if let Some(parent) = output.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let enc = encode_chain(graph.chain.as_ref(), &probe, &output)?;
+    println!(
+        "encode: duration={:.2}s @ {:.2} fps  max_in_flight=4  crf=23",
+        enc.write_secs, enc.write_fps
+    );
+    println!("--- results ---");
+    println!("open_ms          {:.1}", probe.open_ms);
+    println!("graph_build_ms   {:.2}", graph.graph_ms);
+    println!("sample_ms/frame  {:.2}", sample.per_frame_ms);
+    println!("encode_ms        {:.1}", enc.enc_ms);
+    println!("encode_fps       {:.2}", enc.enc_fps);
+    println!("progress_frames  {}", enc.progress_frames);
+    println!("output_bytes     {}", enc.out_bytes);
+    println!("output_path      {}", output.display());
+    println!("self_psnr        {:?}", sample.psnr);
+    println!("self_ssim        {:.6}", sample.ssim);
+    Ok(())
+}
+
+fn parse_args() -> Result<(String, PathBuf), Box<dyn std::error::Error>> {
+    let mut args = env::args().skip(1);
+    let input = args
+        .next()
+        .ok_or("usage: real_bench <input.mp4> [output.mp4]")?;
+    let output = args.next().map_or_else(
+        || PathBuf::from("target/demo/real_bench_out.mp4"),
+        PathBuf::from,
+    );
+    Ok((input, output))
+}
+
+fn ensure_ffmpeg() -> Result<(), Box<dyn std::error::Error>> {
+    if ffmpeg_available() {
+        Ok(())
+    } else {
+        Err("ffmpeg/ffprobe not found on PATH (or REELFORGE_FFMPEG)".into())
+    }
+}
+
+fn open_and_probe(input: &str) -> Result<Probe, Box<dyn std::error::Error>> {
+    let t_open = Instant::now();
+    let video = open_video(&OpenVideoOptions::new(input))?;
+    let open_ms = t_open.elapsed().as_secs_f64() * 1000.0;
+    Ok(Probe {
+        size: video.size(),
+        dur: video.duration(),
+        fps: video.fps().unwrap_or(24.0),
+        open_ms,
+    })
+}
+
+fn build_chain(probe: &Probe) -> Result<GraphOut, Box<dyn std::error::Error>> {
+    let video = open_video(&OpenVideoOptions::new(
+        // re-open path not stored — caller still has input; rebuild from env
+        env::args().nth(1).ok_or("missing input for graph build")?,
+    ))?;
+    let clip: Arc<dyn VideoClip> = Arc::new(video);
+    let size = probe.size;
     let crop_w = (size.width * 9 / 10).max(2) & !1;
     let crop_h = (size.height * 9 / 10).max(2) & !1;
     let x = (size.width - crop_w) / 2;
@@ -57,46 +157,79 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let target = Size::new(((crop_w / 2).max(2)) & !1, ((crop_h / 2).max(2)) & !1);
 
     let t_graph = Instant::now();
-    let cropped = Crop::new(x, y, crop_w, crop_h).apply(Arc::clone(&clip))?;
+    let cropped = Crop::new(x, y, crop_w, crop_h).apply(clip)?;
     let resized = Resize::to(target)
         .with_filter(ResizeFilter::Bilinear)
         .apply(cropped)?;
-    let faded =
-        FadeIn::new(Duration::from_secs((dur.as_secs() * 0.05).clamp(0.05, 0.5))).apply(resized)?;
+    let fade_secs = (probe.dur.as_secs() * 0.05).clamp(0.05, 0.5);
+    let faded = FadeIn::new(Duration::from_secs(fade_secs)).apply(resized)?;
     let chain = BlackAndWhite.apply(faded)?;
-    let graph_ms = t_graph.elapsed().as_secs_f64() * 1000.0;
-    println!(
-        "graph : crop {crop_w}x{crop_h}@({x},{y}) → {}x{} + fade + bw  build_ms={graph_ms:.2}",
-        target.width, target.height
-    );
+    Ok(GraphOut {
+        chain,
+        crop_w,
+        crop_h,
+        x,
+        y,
+        target,
+        graph_ms: t_graph.elapsed().as_secs_f64() * 1000.0,
+    })
+}
 
-    // Sample a few frames (transform-only throughput, no encode)
-    let sample_times = [0.05, 0.25, 0.5, 0.75]
-        .map(|f| Time::from_secs((dur.as_secs() * f).min((dur.as_secs() - 1.0 / fps).max(0.0))));
+struct SampleStats {
+    count: usize,
+    total_ms: f64,
+    per_frame_ms: f64,
+    psnr: f64,
+    ssim: f64,
+}
+
+fn sample_frames(
+    chain: &dyn VideoClip,
+    probe: &Probe,
+) -> Result<SampleStats, Box<dyn std::error::Error>> {
+    let fracs = [0.05_f64, 0.25, 0.5, 0.75];
+    let sample_times: Vec<Time> = fracs
+        .iter()
+        .map(|f| {
+            Time::from_secs(
+                (probe.dur.as_secs() * f).min((probe.dur.as_secs() - 1.0 / probe.fps).max(0.0)),
+            )
+        })
+        .collect();
+
     let t_sample = Instant::now();
-    let mut frames = Vec::new();
-    for t in sample_times {
-        frames.push(chain.frame_at(t)?);
+    for t in &sample_times {
+        let _ = chain.frame_at(*t)?;
     }
-    let sample_ms = t_sample.elapsed().as_secs_f64() * 1000.0;
-    let per_frame = sample_ms / frames.len() as f64;
-    println!(
-        "sample: {} frames  total_ms={sample_ms:.1}  ms/frame={per_frame:.2}  fps_eq={:.1}",
-        frames.len(),
-        1000.0 / per_frame.max(1e-9)
-    );
+    let total_ms = t_sample.elapsed().as_secs_f64() * 1000.0;
+    let count = sample_times.len();
+    let per_frame_ms = total_ms / count as f64;
 
-    // Self-consistency on same timestamp
     let a = chain.frame_at(sample_times[1])?;
     let b = chain.frame_at(sample_times[1])?;
-    let psnr = psnr_rgb(&a, &b)?;
-    let ssim = ssim_rgb(&a, &b)?;
-    println!("quality(self): psnr={psnr:?}  ssim={ssim:.6}");
+    Ok(SampleStats {
+        count,
+        total_ms,
+        per_frame_ms,
+        psnr: psnr_rgb(&a, &b)?,
+        ssim: ssim_rgb(&a, &b)?,
+    })
+}
 
-    if let Some(parent) = output.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
+struct EncodeStats {
+    write_secs: f64,
+    write_fps: f64,
+    enc_ms: f64,
+    enc_fps: f64,
+    progress_frames: u64,
+    out_bytes: u64,
+}
 
+fn encode_chain(
+    chain: &dyn VideoClip,
+    probe: &Probe,
+    output: &PathBuf,
+) -> Result<EncodeStats, Box<dyn std::error::Error>> {
     let frames_done = Arc::new(AtomicU64::new(0));
     let frames_done2 = Arc::clone(&frames_done);
     let control =
@@ -108,35 +241,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             });
 
-    let write_fps = fps.clamp(12.0, 30.0);
-    // Cap long demos so the bench finishes in reasonable time.
-    let write_dur = Duration::from_secs(dur.as_secs().min(8.0).max(0.5));
+    let write_fps = probe.fps.clamp(12.0, 30.0);
+    let write_secs = probe.dur.as_secs().clamp(0.5, 8.0);
+    let write_dur = Duration::from_secs(write_secs);
     let opts = WriteVideoOptions::new(output.to_string_lossy(), write_fps)
         .with_crf(23)
         .with_duration(write_dur);
 
-    println!(
-        "encode: duration={:.2}s @ {write_fps:.2} fps  max_in_flight=4  crf=23",
-        write_dur.as_secs()
-    );
     let t_enc = Instant::now();
-    write_video_with(chain.as_ref(), &opts, &control)?;
+    write_video_with(chain, &opts, &control)?;
     let enc_ms = t_enc.elapsed().as_secs_f64() * 1000.0;
-    let n_prog = frames_done.load(Ordering::Relaxed);
-    let out_bytes = std::fs::metadata(&output)?.len();
-    let n_frames = (write_dur.as_secs() * write_fps).round().max(1.0);
+    let n_frames = (write_secs * write_fps).round().max(1.0);
     let enc_fps = n_frames / (enc_ms / 1000.0).max(1e-9);
-
-    println!("--- results ---");
-    println!("open_ms          {open_ms:.1}");
-    println!("graph_build_ms   {graph_ms:.2}");
-    println!("sample_ms/frame  {per_frame:.2}");
-    println!("encode_ms        {enc_ms:.1}");
-    println!("encode_fps       {enc_fps:.2}");
-    println!("progress_frames  {n_prog}");
-    println!("output_bytes     {out_bytes}");
-    println!("output_path      {}", output.display());
-    println!("self_psnr        {psnr:?}");
-    println!("self_ssim        {ssim:.6}");
-    Ok(())
+    Ok(EncodeStats {
+        write_secs,
+        write_fps,
+        enc_ms,
+        enc_fps,
+        progress_frames: frames_done.load(Ordering::Relaxed),
+        out_bytes: std::fs::metadata(output)?.len(),
+    })
 }
