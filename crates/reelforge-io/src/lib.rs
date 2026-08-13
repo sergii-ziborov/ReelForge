@@ -28,7 +28,8 @@ pub use audio_file::{AudioFileClip, layout_for_channels, open_audio};
 pub use control::{CancelToken, ProgressCallback, WriteControl, WriteProgress, WriteStage};
 pub use error::{IoError, Result};
 pub use ffmpeg::{
-    AudioProbe, FfmpegTools, VideoProbe, encode_rawvideo_h264, ffmpeg_available, frame_to_rgb24,
+    AudioProbe, FfmpegTools, FrameTimingIndex, SequentialMode, VideoProbe, encode_rawvideo_h264,
+    ffmpeg_available, frame_to_rgb24, probe_frame_timing,
 };
 pub use filtergraph::{FilterGraph, FilterOp, run_filtergraph};
 pub use graph_run::{

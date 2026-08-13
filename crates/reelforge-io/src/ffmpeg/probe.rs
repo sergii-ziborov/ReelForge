@@ -2,7 +2,7 @@
 
 use crate::error::{IoError, Result};
 use crate::ffmpeg::path::FfmpegTools;
-use reelforge_core::{Duration, Size};
+use reelforge_core::{Duration, MediaTime, Size};
 use serde::Deserialize;
 use std::path::Path;
 use std::process::Command;
@@ -14,8 +14,50 @@ pub struct VideoProbe {
     pub size: Size,
     /// Duration of the media.
     pub duration: Duration,
-    /// Nominal frames per second.
+    /// Nominal frames per second (`avg_frame_rate`, else `r_frame_rate`).
     pub fps: f64,
+    /// Average frame rate when reported.
+    pub avg_fps: Option<f64>,
+    /// Base / codec frame rate when reported (`r_frame_rate`).
+    pub r_fps: Option<f64>,
+    /// Stream `time_base` numerator (e.g. `1` in `1/90000`).
+    pub time_base_num: u32,
+    /// Stream `time_base` denominator (e.g. `90000`).
+    pub time_base_den: u32,
+    /// Duration in stream time-base ticks when `duration_ts` is present.
+    pub duration_ts: Option<i64>,
+    /// Container/stream frame count when `nb_frames` is present.
+    pub nb_frames: Option<u64>,
+    /// True when avg/r rates diverge or rates are missing in a VFR-like way.
+    pub is_vfr: bool,
+}
+
+impl VideoProbe {
+    /// Stream timescale for [`MediaTime`] (`time_base` denominator).
+    #[must_use]
+    pub fn timescale(&self) -> u32 {
+        self.time_base_den.max(1)
+    }
+
+    /// Duration as [`MediaTime`] when `duration_ts` is known; else from seconds.
+    #[must_use]
+    pub fn duration_media(&self) -> MediaTime {
+        if let Some(ts) = self.duration_ts {
+            return MediaTime::from_pts(ts, self.time_base_num.max(1), self.time_base_den.max(1))
+                .unwrap_or_else(|_| {
+                    MediaTime::from_secs(self.duration.as_secs(), self.timescale())
+                        .unwrap_or_else(|_| MediaTime::zero(self.timescale()))
+                });
+        }
+        MediaTime::from_secs(self.duration.as_secs(), self.timescale())
+            .unwrap_or_else(|_| MediaTime::zero(self.timescale()))
+    }
+
+    /// CFR half-open frame range for `[start, end)` using nominal fps.
+    #[must_use]
+    pub fn frame_range_cfr(&self, start: MediaTime, end: MediaTime) -> (u64, u64) {
+        MediaTime::frame_range_cfr(start, end, self.fps)
+    }
 }
 
 /// Audio stream metadata used to build [`crate::AudioFileClip`].
@@ -48,11 +90,18 @@ struct StreamSection {
     avg_frame_rate: Option<String>,
     r_frame_rate: Option<String>,
     duration: Option<String>,
+    duration_ts: Option<i64>,
+    time_base: Option<String>,
+    nb_frames: Option<String>,
     sample_rate: Option<String>,
     channels: Option<u16>,
 }
 
 /// Probe the primary video stream of `path`.
+///
+/// Populates VFR-related fields (`time_base`, `avg`/`r` rates, `duration_ts`,
+/// `is_vfr`). Does **not** load a full PTS index (see
+/// [`crate::ffmpeg::timing::probe_frame_timing`]).
 ///
 /// # Errors
 ///
@@ -75,27 +124,44 @@ pub fn probe_video(tools: &FfmpegTools, path: &Path) -> Result<VideoProbe> {
         .require_positive()
         .map_err(|e| IoError::probe(e.to_string()))?;
 
-    let fps = parse_frame_rate(
-        video
-            .avg_frame_rate
-            .as_deref()
-            .or(video.r_frame_rate.as_deref()),
-    )
-    .unwrap_or(24.0);
+    let avg_fps = parse_frame_rate(video.avg_frame_rate.as_deref());
+    let r_fps = parse_frame_rate(video.r_frame_rate.as_deref());
+    let fps = avg_fps.or(r_fps).unwrap_or(24.0);
     if !(fps.is_finite() && fps > 0.0) {
         return Err(IoError::probe(format!("invalid fps {fps}")));
     }
 
-    let duration_secs = first_duration(&[
-        video.duration.as_deref(),
-        doc.format.as_ref().and_then(|f| f.duration.as_deref()),
-    ])
-    .ok_or_else(|| IoError::probe("duration missing"))?;
+    let (tb_num, tb_den) = parse_time_base(video.time_base.as_deref()).unwrap_or((1, 90_000));
+
+    let duration_ts = video.duration_ts.filter(|&t| t > 0);
+    let duration_secs = duration_from_ts(duration_ts, tb_num, tb_den)
+        .or_else(|| {
+            first_duration(&[
+                video.duration.as_deref(),
+                doc.format.as_ref().and_then(|f| f.duration.as_deref()),
+            ])
+        })
+        .ok_or_else(|| IoError::probe("duration missing"))?;
+
+    let nb_frames = video
+        .nb_frames
+        .as_deref()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|&n| n > 0);
+
+    let is_vfr = detect_vfr(avg_fps, r_fps, nb_frames, duration_secs, fps);
 
     Ok(VideoProbe {
         size,
         duration: Duration::from_secs(duration_secs),
         fps,
+        avg_fps,
+        r_fps,
+        time_base_num: tb_num,
+        time_base_den: tb_den,
+        duration_ts,
+        nb_frames,
+        is_vfr,
     })
 }
 
@@ -168,9 +234,38 @@ fn parse_frame_rate(raw: Option<&str>) -> Option<f64> {
         if d == 0.0 {
             return None;
         }
-        return Some(n / d);
+        let v = n / d;
+        if v.is_finite() && v > 0.0 {
+            return Some(v);
+        }
+        return None;
     }
-    raw.parse().ok()
+    raw.parse().ok().filter(|v: &f64| v.is_finite() && *v > 0.0)
+}
+
+fn parse_time_base(raw: Option<&str>) -> Option<(u32, u32)> {
+    let raw = raw?;
+    let (num, den) = raw.split_once('/')?;
+    let n: u32 = num.parse().ok()?;
+    let d: u32 = den.parse().ok()?;
+    if n == 0 || d == 0 {
+        return None;
+    }
+    Some((n, d))
+}
+
+fn duration_from_ts(duration_ts: Option<i64>, num: u32, den: u32) -> Option<f64> {
+    let ts = duration_ts?;
+    if ts <= 0 || den == 0 {
+        return None;
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let secs = (ts as f64) * f64::from(num) / f64::from(den);
+    if secs.is_finite() && secs > 0.0 {
+        Some(secs)
+    } else {
+        None
+    }
 }
 
 fn first_duration(candidates: &[Option<&str>]) -> Option<f64> {
@@ -183,4 +278,64 @@ fn first_duration(candidates: &[Option<&str>]) -> Option<f64> {
         }
     }
     None
+}
+
+/// Heuristic: rates disagree, or frame count disagrees with duration×fps.
+fn detect_vfr(
+    avg: Option<f64>,
+    r: Option<f64>,
+    nb_frames: Option<u64>,
+    duration_secs: f64,
+    fps: f64,
+) -> bool {
+    if let (Some(a), Some(rr)) = (avg, r)
+        && a > 0.0
+        && rr > 0.0
+    {
+        let rel = (a - rr).abs() / a.max(rr);
+        if rel > 0.02 {
+            return true;
+        }
+    }
+    // Only one rate present as 0/0-style missing other → mild signal only if nb_frames mismatches.
+    if let Some(n) = nb_frames
+        && duration_secs > 0.0
+        && fps > 0.0
+    {
+        #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+        let expected = (duration_secs * fps).round();
+        if expected > 0.0 {
+            #[allow(clippy::cast_precision_loss)]
+            let err = (expected - n as f64).abs() / expected;
+            if err > 0.05 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_time_base_ok() {
+        assert_eq!(parse_time_base(Some("1/90000")), Some((1, 90_000)));
+        assert_eq!(parse_time_base(Some("0/1")), None);
+        assert_eq!(parse_time_base(Some("bad")), None);
+    }
+
+    #[test]
+    fn vfr_when_rates_diverge() {
+        assert!(detect_vfr(Some(24.0), Some(30.0), None, 10.0, 24.0));
+        assert!(!detect_vfr(Some(30.0), Some(30.0), Some(300), 10.0, 30.0));
+        assert!(detect_vfr(Some(30.0), Some(30.0), Some(200), 10.0, 30.0));
+    }
+
+    #[test]
+    fn duration_from_ts_90k() {
+        let d = duration_from_ts(Some(180_000), 1, 90_000).unwrap();
+        assert!((d - 2.0).abs() < 1e-9);
+    }
 }

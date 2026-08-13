@@ -2,7 +2,10 @@
 
 use crate::audio_file::AudioFileClip;
 use crate::error::{IoError, Result};
-use crate::ffmpeg::{FfmpegTools, SequentialRgbDecoder, decode_frame_rgb, probe_video};
+use crate::ffmpeg::{
+    FfmpegTools, FrameTimingIndex, SequentialRgbDecoder, decode_frame_rgb, probe_frame_timing,
+    probe_video,
+};
 use crate::options::{OpenAudioOptions, OpenVideoOptions};
 use reelforge_core::{CoreError, Duration, Frame, MediaTime, Size, Time, VideoClip};
 use std::path::{Path, PathBuf};
@@ -13,17 +16,29 @@ use std::sync::Mutex;
 /// Random access uses single-frame seeks. Monotonic sequential access reuses a
 /// long-lived rawvideo pipe (sequential RGB decoder) — the fast path for
 /// ordered writers.
+///
+/// # VFR
+///
+/// When probe detects variable frame rate (`is_vfr`), frame indexing prefers a
+/// lazy PTS table ([`FrameTimingIndex`]) and sequential decode uses native
+/// passthrough (no `-r` CFR resample). Random access still seeks by timestamp.
 pub struct VideoFileClip {
     path: PathBuf,
     size: Size,
     duration: Duration,
     fps: f64,
+    time_base_num: u32,
+    time_base_den: u32,
+    is_vfr: bool,
+    nb_frames: Option<u64>,
     tools: FfmpegTools,
     /// Optional companion audio opened when `with_audio` is true.
     audio: Option<AudioFileClip>,
     /// Multi-frame LRU (index → frame) for random / repeated access.
     cache: Mutex<FrameLru>,
     seq: Mutex<Option<SequentialRgbDecoder>>,
+    /// Lazy PTS index for VFR mapping (None until first need).
+    timing: Mutex<Option<FrameTimingIndex>>,
 }
 
 /// Small LRU for decoded file frames (index-keyed).
@@ -81,6 +96,11 @@ impl std::fmt::Debug for VideoFileClip {
             .field("size", &self.size)
             .field("duration", &self.duration)
             .field("fps", &self.fps)
+            .field("is_vfr", &self.is_vfr)
+            .field(
+                "time_base",
+                &format!("{}/{}", self.time_base_num, self.time_base_den),
+            )
             .field("has_audio", &self.audio.is_some())
             .finish_non_exhaustive()
     }
@@ -126,11 +146,16 @@ impl VideoFileClip {
             size: probe.size,
             duration: probe.duration,
             fps: probe.fps,
+            time_base_num: probe.time_base_num,
+            time_base_den: probe.time_base_den,
+            is_vfr: probe.is_vfr,
+            nb_frames: probe.nb_frames,
             tools,
             audio,
             // ~2s of 30fps by default — warm seeks without huge RAM.
             cache: Mutex::new(FrameLru::new(64)),
             seq: Mutex::new(None),
+            timing: Mutex::new(None),
         })
     }
 
@@ -146,6 +171,30 @@ impl VideoFileClip {
         self.fps
     }
 
+    /// Whether probe classified the stream as variable frame rate.
+    #[must_use]
+    pub fn is_vfr(&self) -> bool {
+        self.is_vfr
+    }
+
+    /// Stream time base as `(num, den)`.
+    #[must_use]
+    pub fn time_base(&self) -> (u32, u32) {
+        (self.time_base_num, self.time_base_den)
+    }
+
+    /// Stream timescale for [`MediaTime`] (`time_base` denominator).
+    #[must_use]
+    pub fn timescale(&self) -> u32 {
+        self.time_base_den.max(1)
+    }
+
+    /// Optional container frame count.
+    #[must_use]
+    pub fn nb_frames(&self) -> Option<u64> {
+        self.nb_frames
+    }
+
     /// Attached audio track when open requested audio and the container has one.
     #[must_use]
     pub fn audio(&self) -> Option<&AudioFileClip> {
@@ -159,15 +208,85 @@ impl VideoFileClip {
         }
     }
 
-    /// Map presentation time → frame index via [`MediaTime`] (tick math).
+    /// Ensure a PTS timing index is loaded (no-op when already present).
     ///
-    /// Uses a 90 kHz timescale when converting floating [`Time`], then
-    /// `MediaTime::frame_index` so CFR indexing avoids `floor(secs × fps)` drift.
-    fn frame_index(&self, t: Time) -> u64 {
-        if self.fps <= 0.0 {
-            return 0;
+    /// For VFR clips this is called automatically on first timed sample.
+    ///
+    /// # Errors
+    ///
+    /// `ffprobe` packet listing failures.
+    pub fn ensure_timing_index(&self) -> Result<()> {
+        let mut guard = self
+            .timing
+            .lock()
+            .map_err(|_| IoError::message("timing lock poisoned"))?;
+        if guard.is_some() {
+            return Ok(());
         }
-        MediaTime::from_time(t, MediaTime::HZ_90K).map_or(0, |mt| mt.frame_index(self.fps))
+        // Cap very long files: 0 = unlimited for short clips; soft cap 500k packets.
+        let max = if self.duration.as_secs() > 600.0 {
+            250_000
+        } else {
+            0
+        };
+        let idx = probe_frame_timing(&self.tools, &self.path, max)?;
+        *guard = Some(idx);
+        Ok(())
+    }
+
+    /// Inject a prebuilt timing index (tests / hosts with external PTS tables).
+    pub fn set_timing_index(&self, index: FrameTimingIndex) {
+        if let Ok(mut g) = self.timing.lock() {
+            *g = Some(index);
+        }
+    }
+
+    /// Map media time → frame ordinal (PTS table when VFR / available, else CFR).
+    ///
+    /// # Errors
+    ///
+    /// Timing probe failures when VFR index must be built.
+    pub fn frame_index_for_media(&self, t: MediaTime) -> Result<u64> {
+        if self.is_vfr {
+            self.ensure_timing_index()?;
+            if let Ok(guard) = self.timing.lock()
+                && let Some(idx) = guard.as_ref()
+                && !idx.is_empty()
+            {
+                return Ok(idx.frame_index_at(t));
+            }
+        }
+        Ok(t.frame_index(self.fps))
+    }
+
+    /// Half-open frame range `[start, end)` for a media interval.
+    ///
+    /// VFR uses the PTS index; CFR uses exact tick math at nominal fps.
+    ///
+    /// # Errors
+    ///
+    /// Timing probe failures for VFR.
+    pub fn frame_range_media(&self, start: MediaTime, end: MediaTime) -> Result<(u64, u64)> {
+        if self.is_vfr {
+            self.ensure_timing_index()?;
+            if let Ok(guard) = self.timing.lock()
+                && let Some(idx) = guard.as_ref()
+                && !idx.is_empty()
+            {
+                return Ok(idx.frame_range(start, end));
+            }
+        }
+        Ok(MediaTime::frame_range_cfr(start, end, self.fps))
+    }
+
+    /// Map presentation time → frame index via [`MediaTime`] (tick math / PTS).
+    fn frame_index(&self, t: Time) -> u64 {
+        let mt = MediaTime::from_time(t, self.timescale()).unwrap_or_else(|_| {
+            MediaTime::from_secs(t.as_secs(), MediaTime::HZ_90K)
+                .unwrap_or_else(|_| MediaTime::zero(MediaTime::HZ_90K))
+        });
+        self.frame_index_for_media(mt)
+            .unwrap_or_else(|_| mt.frame_index(self.fps))
     }
 
     /// Decode at exact media time (same cache key as [`VideoClip::frame_at`]).
@@ -185,8 +304,12 @@ impl VideoFileClip {
             .lock()
             .map_err(|_| CoreError::invalid_frame("sequential decoder lock poisoned"))?;
         if guard.is_none() {
-            let dec = SequentialRgbDecoder::open(&self.tools, &self.path, self.size, self.fps)
-                .map_err(|e| CoreError::invalid_frame(format!("seq open: {e}")))?;
+            let dec = if self.is_vfr {
+                SequentialRgbDecoder::open_native(&self.tools, &self.path, self.size)
+            } else {
+                SequentialRgbDecoder::open(&self.tools, &self.path, self.size, self.fps)
+            }
+            .map_err(|e| CoreError::invalid_frame(format!("seq open: {e}")))?;
             *guard = Some(dec);
         }
         let dec = guard
@@ -226,6 +349,7 @@ impl VideoClip for VideoFileClip {
         }
 
         // Prefer sequential pipe (handles restart on backward jumps); fall back to seek.
+        // Timestamp seek (`-ss`) is PTS-correct for both CFR and VFR random access.
         let frame = if let Ok(f) = self.decode_sequential(index) {
             f
         } else {
@@ -241,18 +365,24 @@ impl VideoClip for VideoFileClip {
     }
 }
 
-// Manual Clone: fresh cache / decoder per clone.
+// Manual Clone: fresh cache / decoder / timing share for PTS table.
 impl Clone for VideoFileClip {
     fn clone(&self) -> Self {
+        let timing = self.timing.lock().ok().and_then(|g| g.clone());
         Self {
             path: self.path.clone(),
             size: self.size,
             duration: self.duration,
             fps: self.fps,
+            time_base_num: self.time_base_num,
+            time_base_den: self.time_base_den,
+            is_vfr: self.is_vfr,
+            nb_frames: self.nb_frames,
             tools: self.tools.clone(),
             audio: self.audio.clone(),
             cache: Mutex::new(FrameLru::new(64)),
             seq: Mutex::new(None),
+            timing: Mutex::new(timing),
         }
     }
 }
@@ -264,4 +394,19 @@ impl Clone for VideoFileClip {
 /// Propagates [`VideoFileClip::open_with`] errors.
 pub fn open_video(options: &OpenVideoOptions) -> Result<VideoFileClip> {
     VideoFileClip::open_with(options)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reelforge_core::MediaTime;
+
+    #[test]
+    fn vfr_index_maps_without_file() {
+        // Build a fake clip-like mapping via FrameTimingIndex alone.
+        let idx = FrameTimingIndex::from_pts_secs([0.0, 0.05, 0.12, 0.13, 0.25], 1_000).unwrap();
+        let t = |s: f64| MediaTime::from_secs(s, 1_000).unwrap();
+        assert_eq!(idx.frame_index_at(t(0.12)), 2);
+        assert_eq!(idx.frame_range(t(0.05), t(0.13)), (1, 3));
+    }
 }

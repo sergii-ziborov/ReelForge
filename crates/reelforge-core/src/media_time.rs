@@ -162,6 +162,70 @@ impl MediaTime {
             dt as f64 / f64::from(self.timescale.max(1)),
         ))
     }
+
+    /// From a stream PTS and `time_base = num/den` (`FFmpeg` style, e.g. `1/90000`).
+    ///
+    /// Result timescale is `den` (ticks are PTS units).
+    ///
+    /// # Errors
+    ///
+    /// Zero denominator.
+    pub fn from_pts(pts: i64, time_base_num: u32, time_base_den: u32) -> Result<Self> {
+        if time_base_den == 0 {
+            return Err(CoreError::invalid_timing(
+                "time_base denominator must be > 0",
+            ));
+        }
+        if time_base_num == 0 {
+            return Err(CoreError::invalid_timing("time_base numerator must be > 0"));
+        }
+        // pts * num / den seconds → ticks at timescale=den: ticks = pts * num
+        let ticks = pts.saturating_mul(i64::from(time_base_num));
+        Ok(Self {
+            ticks,
+            timescale: time_base_den,
+        })
+    }
+
+    /// Rebase onto another timescale (rounding half-away-from-zero).
+    ///
+    /// # Errors
+    ///
+    /// Zero target timescale.
+    pub fn rebase(self, new_timescale: u32) -> Result<Self> {
+        if new_timescale == 0 {
+            return Err(CoreError::invalid_timing("media timescale must be > 0"));
+        }
+        if self.timescale == new_timescale {
+            return Ok(self);
+        }
+        let ticks = i128::from(self.ticks);
+        let old = i128::from(self.timescale.max(1));
+        let new = i128::from(new_timescale);
+        let num = ticks.saturating_mul(new);
+        let half = old / 2;
+        let adjusted = if num >= 0 { num + half } else { num - half };
+        let t = adjusted.div_euclid(old);
+        let ticks = i64::try_from(t).unwrap_or(if t.is_positive() { i64::MAX } else { i64::MIN });
+        Ok(Self {
+            ticks,
+            timescale: new_timescale,
+        })
+    }
+
+    /// CFR half-open frame index range `[start, end)` for a media interval.
+    ///
+    /// Uses exact tick math via [`Self::frame_index`]. Empty when `end <= start`
+    /// or `fps` is invalid.
+    #[must_use]
+    pub fn frame_range_cfr(start: Self, end: Self, fps: f64) -> (u64, u64) {
+        if !(fps.is_finite() && fps > 0.0) {
+            return (0, 0);
+        }
+        let a = start.frame_index(fps);
+        let b = end.frame_index(fps);
+        if b <= a { (a, a) } else { (a, b) }
+    }
 }
 
 impl fmt::Display for MediaTime {
@@ -197,5 +261,34 @@ mod tests {
         let t = MediaTime::from_secs(1.5, 1000).unwrap();
         assert_eq!(t.ticks, 1500);
         assert!((t.as_secs() - 1.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn from_pts_90k() {
+        // 1 second at 1/90000 → ticks=90000, timescale=90000
+        let t = MediaTime::from_pts(90_000, 1, 90_000).unwrap();
+        assert_eq!(t.ticks, 90_000);
+        assert_eq!(t.timescale, 90_000);
+        assert!((t.as_secs() - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn frame_range_cfr_half_open() {
+        let s = MediaTime::new(0, 30).unwrap();
+        let e = MediaTime::new(30, 30).unwrap(); // 1s
+        assert_eq!(MediaTime::frame_range_cfr(s, e, 30.0), (0, 30));
+        assert_eq!(
+            MediaTime::frame_range_cfr(e, s, 30.0),
+            (30, 30),
+            "empty when inverted"
+        );
+    }
+
+    #[test]
+    fn rebase_preserves_seconds() {
+        let t = MediaTime::new(1_000, 1_000).unwrap(); // 1s
+        let r = t.rebase(90_000).unwrap();
+        assert_eq!(r.ticks, 90_000);
+        assert!((r.as_secs() - 1.0).abs() < 1e-12);
     }
 }

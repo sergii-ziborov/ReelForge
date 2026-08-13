@@ -5,6 +5,7 @@ mod path;
 mod probe;
 mod process;
 mod stream;
+mod timing;
 
 pub use helpers::{frame_count_for, frame_to_rgb24, frame_to_rgb24_into};
 pub use path::{FfmpegTools, ffmpeg_available};
@@ -13,4 +14,5 @@ pub use process::{
     decode_frame_rgb, decode_pcm_f32le, default_pcm_format, encode_rawvideo_gif,
     encode_rawvideo_h264, mux_video_audio,
 };
-pub use stream::SequentialRgbDecoder;
+pub use stream::{SequentialMode, SequentialRgbDecoder};
+pub use timing::{FrameTimingIndex, probe_frame_timing};
