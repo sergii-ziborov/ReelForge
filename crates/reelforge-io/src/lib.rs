@@ -33,9 +33,9 @@ pub use ffmpeg::{
 pub use filtergraph::{FilterGraph, FilterOp, run_filtergraph};
 pub use graph_run::{
     GraphBundle, GraphEncodeHints, GraphRunOptions, explain_render_graph,
-    explain_render_graph_with, is_executable_op, materialize_graph, materialize_graph_bundle,
-    materialize_graph_with_seeds, node_backend, run_execution_plan, run_execution_plan_with,
-    run_render_graph, run_render_graph_with,
+    explain_render_graph_with, is_executable_op, materialize_execution_plan, materialize_graph,
+    materialize_graph_bundle, materialize_graph_with_seeds, node_backend, run_execution_plan,
+    run_execution_plan_with, run_render_graph, run_render_graph_with,
 };
 pub use image_clip::ImageClip;
 pub use mask_bridge::{

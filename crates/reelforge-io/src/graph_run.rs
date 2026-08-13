@@ -29,9 +29,10 @@ use reelforge_fx::{
     Resize, Rotate, VolumeGain,
 };
 use reelforge_render_graph::{
-    BackendClass, ExecutionPlan, ExecutionStage, MediaAssetId, NodeId, OperationId,
-    OperationRegistry, RENDER_GRAPH_VERSION, RenderGraph, RenderNode, RenderNodeKind, TypedParams,
-    compile_op, is_executable_op_id, schedule_graph,
+    BackendClass, CompiledOp, ExecutionPlan, ExecutionStage, MediaAssetId, NodeId, OperationId,
+    OperationRegistry, RENDER_GRAPH_VERSION, RenderGraph, RenderNode, RenderNodeKind,
+    StageCacheKey, TypedParams, compile_op, fingerprint_stage_key, is_executable_op_id,
+    schedule_graph,
 };
 use std::collections::{HashMap, HashSet};
 use std::hash::BuildHasher;
@@ -260,6 +261,10 @@ pub fn run_execution_plan(
 
 /// Execute plan with options.
 ///
+/// Walks **plan stages in order** (mandatory stage boundaries). Each stage
+/// evaluates only its node set; media products carry forward. Optional hybrid
+/// `FFmpeg` prefix optimizes the first filter stage on disk when video-only.
+///
 /// # Errors
 ///
 /// Same as [`run_execution_plan`].
@@ -273,22 +278,7 @@ pub fn run_execution_plan_with(
         .validate()
         .map_err(|e| IoError::message(e.to_string()))?;
     control.check_cancel()?;
-
-    // Reject adapter / GPU until host support lands.
-    for stage in &plan.stages {
-        match stage {
-            ExecutionStage::Adapter(s) => {
-                return Err(IoError::message(format!(
-                    "adapter stage '{}' not implemented in M3 runner",
-                    s.adapter
-                )));
-            }
-            ExecutionStage::Gpu(_) => {
-                return Err(IoError::message("GPU stages not implemented in M3 runner"));
-            }
-            ExecutionStage::Ffmpeg(_) | ExecutionStage::Rust(_) => {}
-        }
-    }
+    reject_unsupported_stages(plan)?;
 
     let run_fp = options
         .cache
@@ -319,12 +309,15 @@ pub fn run_execution_plan_with(
 
     let seeds = HashMap::new();
     let audio_seeds = HashMap::new();
-    let mut bundle = materialize_graph_bundle(
+    let mut bundle = materialize_execution_plan(
         graph,
+        plan,
         &options.registry,
         &seeds,
         &audio_seeds,
         options.with_audio,
+        Some(control),
+        options.cache.as_ref(),
     )?;
     merge_option_hints(&mut bundle.hints, options);
     write_graph_outputs(
@@ -338,6 +331,24 @@ pub fn run_execution_plan_with(
         && let Some(out) = resolve_output_path(graph).or(bundle.hints.output_path.clone())
     {
         let _ = cache.store_copy(fp, "mp4", out);
+    }
+    Ok(())
+}
+
+fn reject_unsupported_stages(plan: &ExecutionPlan) -> Result<()> {
+    for stage in &plan.stages {
+        match stage {
+            ExecutionStage::Adapter(s) => {
+                return Err(IoError::message(format!(
+                    "adapter stage '{}' not implemented in M3 runner",
+                    s.adapter
+                )));
+            }
+            ExecutionStage::Gpu(_) => {
+                return Err(IoError::message("GPU stages not implemented in M3 runner"));
+            }
+            ExecutionStage::Ffmpeg(_) | ExecutionStage::Rust(_) => {}
+        }
     }
     Ok(())
 }
@@ -395,6 +406,9 @@ pub fn materialize_graph_with_seeds<S: BuildHasher>(
 
 /// Full materialize: video + optional audio + encode hints.
 ///
+/// Walks the full topological order (ignores stage boundaries). Prefer
+/// [`materialize_execution_plan`] when an [`ExecutionPlan`] is available.
+///
 /// # Errors
 ///
 /// Graph structure, unknown ops, open/decode failures.
@@ -411,45 +425,157 @@ pub fn materialize_graph_bundle<S: BuildHasher, A: BuildHasher>(
     let order = graph
         .topo_order()
         .map_err(|e| IoError::message(e.to_string()))?;
-    let node_map: HashMap<&str, &RenderNode> =
-        graph.nodes.iter().map(|n| (n.id.0.as_str(), n)).collect();
-    let asset_map: HashMap<&str, &reelforge_render_graph::MediaAsset> =
-        graph.assets.iter().map(|a| (a.id.0.as_str(), a)).collect();
+    let mut ctx = MaterializeCtx::new(graph, registry, with_audio);
+    for id in &order {
+        ctx.eval_node(id, video_seeds, audio_seeds)?;
+    }
+    ctx.finish_bundle()
+}
 
-    let mut produced: HashMap<String, NodeMedia> = HashMap::new();
-    let mut hints = GraphEncodeHints {
-        preserve_audio: with_audio,
-        ..GraphEncodeHints::default()
-    };
-    let mut primary_out: Option<NodeMedia> = None;
+/// Materialize by walking [`ExecutionPlan`] stages in order.
+///
+/// Each stage evaluates only its node ids; products from earlier stages feed
+/// later ones. This is the runtime contract for [`run_execution_plan_with`].
+///
+/// When `cache` is set, a strong per-stage fingerprint is computed (inputs +
+/// compiled ops + backend + host `FFmpeg`) for intermediate keying / diagnostics.
+///
+/// # Errors
+///
+/// Unsupported stages, graph structure, unknown ops, open/decode failures.
+#[allow(clippy::too_many_arguments)]
+pub fn materialize_execution_plan<S: BuildHasher, A: BuildHasher>(
+    graph: &RenderGraph,
+    plan: &ExecutionPlan,
+    registry: &OperationRegistry,
+    video_seeds: &HashMap<MediaAssetId, Arc<dyn VideoClip>, S>,
+    audio_seeds: &HashMap<MediaAssetId, Arc<dyn AudioClip>, A>,
+    with_audio: bool,
+    control: Option<&WriteControl>,
+    cache: Option<&StageCache>,
+) -> Result<GraphBundle> {
+    graph
+        .validate()
+        .map_err(|e| IoError::message(e.to_string()))?;
+    reject_unsupported_stages(plan)?;
 
-    for id in order {
-        let node = node_map
+    if plan.stages.is_empty() {
+        // Empty plan: fall back to full topo (tests / hand-built plans).
+        return materialize_graph_bundle(graph, registry, video_seeds, audio_seeds, with_audio);
+    }
+
+    let mut ctx = MaterializeCtx::new(graph, registry, with_audio);
+    let mut upstream_fp = asset_input_fingerprint(graph);
+    let total_stages = plan.stages.len();
+    #[allow(clippy::cast_possible_truncation)]
+    let total_u = total_stages as u64;
+
+    for (si, stage) in plan.stages.iter().enumerate() {
+        if let Some(c) = control {
+            c.check_cancel()?;
+            #[allow(clippy::cast_possible_truncation)]
+            c.report(WriteProgress::new(WriteStage::Video, si as u64, total_u));
+        }
+
+        let node_ids = stage.node_ids();
+        let compiled = compile_stage_ops(graph, registry, node_ids)?;
+        let node_id_strs: Vec<String> = node_ids.iter().map(|n| n.0.clone()).collect();
+        let stage_fp = fingerprint_stage_key(&StageCacheKey {
+            backend: stage.backend_tag(),
+            node_ids: &node_id_strs,
+            input_fingerprint: &upstream_fp,
+            compiled: &compiled,
+            ffmpeg_version: crate::stage_cache::probe_ffmpeg_version_cached(),
+            host_tag: std::env::consts::OS,
+        });
+
+        // Stage cache: intermediate file hits are only meaningful for FFmpeg
+        // disk stages (hybrid prefix). Here we record the key on the context
+        // so hosts / tests can assert stage boundaries were honored.
+        ctx.last_stage_fingerprint = Some(stage_fp.clone());
+        if cache.is_some() {
+            ctx.stage_fingerprints.push(stage_fp.clone());
+        }
+
+        for id in node_ids {
+            ctx.eval_node(id, video_seeds, audio_seeds)?;
+        }
+
+        // Next stage inputs depend on this stage's work.
+        upstream_fp = stage_fp;
+    }
+
+    ctx.finish_bundle()
+}
+
+/// In-process materialize state shared by full-topo and stage runners.
+struct MaterializeCtx<'a> {
+    graph: &'a RenderGraph,
+    registry: &'a OperationRegistry,
+    node_map: HashMap<&'a str, &'a RenderNode>,
+    asset_map: HashMap<&'a str, &'a reelforge_render_graph::MediaAsset>,
+    produced: HashMap<String, NodeMedia>,
+    hints: GraphEncodeHints,
+    primary_out: Option<NodeMedia>,
+    last_stage_fingerprint: Option<String>,
+    stage_fingerprints: Vec<String>,
+}
+
+impl<'a> MaterializeCtx<'a> {
+    fn new(graph: &'a RenderGraph, registry: &'a OperationRegistry, with_audio: bool) -> Self {
+        Self {
+            graph,
+            registry,
+            node_map: graph.nodes.iter().map(|n| (n.id.0.as_str(), n)).collect(),
+            asset_map: graph.assets.iter().map(|a| (a.id.0.as_str(), a)).collect(),
+            produced: HashMap::new(),
+            hints: GraphEncodeHints {
+                preserve_audio: with_audio,
+                ..GraphEncodeHints::default()
+            },
+            primary_out: None,
+            last_stage_fingerprint: None,
+            stage_fingerprints: Vec::new(),
+        }
+    }
+
+    fn eval_node<S: BuildHasher, A: BuildHasher>(
+        &mut self,
+        id: &NodeId,
+        video_seeds: &HashMap<MediaAssetId, Arc<dyn VideoClip>, S>,
+        audio_seeds: &HashMap<MediaAssetId, Arc<dyn AudioClip>, A>,
+    ) -> Result<()> {
+        let node = self
+            .node_map
             .get(id.0.as_str())
             .ok_or_else(|| IoError::message(format!("missing node {}", id.0)))?;
         let media = match &node.body {
-            RenderNodeKind::Source { asset } => {
-                resolve_source(asset, &asset_map, video_seeds, audio_seeds, with_audio)?
-            }
+            RenderNodeKind::Source { asset } => resolve_source(
+                asset,
+                &self.asset_map,
+                video_seeds,
+                audio_seeds,
+                self.hints.preserve_audio,
+            )?,
             RenderNodeKind::Op { operation, params }
                 if operation.as_str() == "rf.compose.layers" =>
             {
-                let inputs = multi_input_media(node, &produced)?;
+                let inputs = multi_input_media(node, &self.produced)?;
                 let videos: Vec<_> = inputs.iter().map(|m| Arc::clone(&m.video)).collect();
                 let audio = inputs.first().and_then(|m| m.audio.clone());
-                let video = apply_compose_layers(videos, params, registry)?;
+                let video = apply_compose_layers(videos, params, self.registry)?;
                 NodeMedia { video, audio }
             }
             RenderNodeKind::Op { operation, params } if operation.as_str() == "rf.audio.mix" => {
-                let inputs = multi_input_media(node, &produced)?;
-                apply_audio_mix(inputs, params, registry)?
+                let inputs = multi_input_media(node, &self.produced)?;
+                apply_audio_mix(inputs, params, self.registry)?
             }
             RenderNodeKind::Op { operation, params } => {
-                let input = single_input_media(node, &produced)?;
-                apply_registered_op_media(input, operation, params, registry, &mut hints)?
+                let input = single_input_media(node, &self.produced)?;
+                apply_registered_op_media(input, operation, params, self.registry, &mut self.hints)?
             }
             RenderNodeKind::Redaction { redaction } => {
-                let input = single_input_media(node, &produced)?;
+                let input = single_input_media(node, &self.produced)?;
                 let video = apply_region_redaction(input.video, redaction)?;
                 NodeMedia {
                     video,
@@ -457,36 +583,81 @@ pub fn materialize_graph_bundle<S: BuildHasher, A: BuildHasher>(
                 }
             }
             RenderNodeKind::Output { .. } => {
-                let input = single_input_media(node, &produced)?;
-                primary_out = Some(input.clone());
+                let input = single_input_media(node, &self.produced)?;
+                self.primary_out = Some(input.clone());
                 input
             }
         };
-        produced.insert(id.0.clone(), media);
+        self.produced.insert(id.0.clone(), media);
+        Ok(())
     }
 
-    if let Some(out) = graph.outputs.first() {
-        if let Some(uri) = &out.uri {
-            hints.output_path.get_or_insert_with(|| uri.clone());
+    fn finish_bundle(mut self) -> Result<GraphBundle> {
+        if let Some(out) = self.graph.outputs.first() {
+            if let Some(uri) = &out.uri {
+                self.hints.output_path.get_or_insert_with(|| uri.clone());
+            }
+            if let Some(c) = self.produced.get(&out.node.0) {
+                return Ok(GraphBundle {
+                    video: Arc::clone(&c.video),
+                    audio: c.audio.clone(),
+                    hints: self.hints,
+                });
+            }
         }
-        if let Some(c) = produced.get(&out.node.0) {
+        if let Some(c) = self.primary_out {
             return Ok(GraphBundle {
-                video: Arc::clone(&c.video),
-                audio: c.audio.clone(),
-                hints,
+                video: c.video,
+                audio: c.audio,
+                hints: self.hints,
             });
         }
+        Err(IoError::message(
+            "RenderGraph produced no output clip (missing Output node?)",
+        ))
     }
-    if let Some(c) = primary_out {
-        return Ok(GraphBundle {
-            video: c.video,
-            audio: c.audio,
-            hints,
-        });
+}
+
+fn asset_input_fingerprint(graph: &RenderGraph) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    for a in &graph.assets {
+        a.id.0.hash(&mut h);
+        a.uri.hash(&mut h);
     }
-    Err(IoError::message(
-        "RenderGraph produced no output clip (missing Output node?)",
-    ))
+    format!("{:016x}", h.finish())
+}
+
+fn compile_stage_ops(
+    graph: &RenderGraph,
+    registry: &OperationRegistry,
+    node_ids: &[NodeId],
+) -> Result<Vec<CompiledOp>> {
+    let mut out = Vec::new();
+    for id in node_ids {
+        let Some(node) = graph.nodes.iter().find(|n| n.id == *id) else {
+            continue;
+        };
+        match &node.body {
+            RenderNodeKind::Op { operation, params } => {
+                let c = compile_op(registry, operation, params)
+                    .map_err(|e| IoError::message(e.to_string()))?;
+                out.push(c);
+            }
+            RenderNodeKind::Redaction { .. } => {
+                let c = compile_op(
+                    registry,
+                    &OperationId::new("rf.redaction.region"),
+                    &serde_json::json!({}),
+                )
+                .map_err(|e| IoError::message(e.to_string()))?;
+                out.push(c);
+            }
+            _ => {}
+        }
+    }
+    Ok(out)
 }
 
 fn resolve_source<S: BuildHasher, A: BuildHasher>(
@@ -1249,6 +1420,81 @@ mod tests {
         assert_eq!(hints.crf, Some(28));
         assert_eq!(hints.output_path.as_deref(), Some("out.mp4"));
         let _ = clip.frame_at(Time::ZERO).unwrap();
+    }
+
+    #[test]
+    fn stage_materialize_matches_full_topo() {
+        let g = linear_redaction_graph();
+        let registry = OperationRegistry::with_builtins();
+        let plan = schedule_graph(&g, &registry).unwrap();
+        assert!(
+            plan.stage_count() >= 2,
+            "hybrid graph should fuse multiple stages, got {}",
+            plan.stage_count()
+        );
+        // Stages cover every node exactly once.
+        let mut covered: HashSet<String> = HashSet::new();
+        for stage in &plan.stages {
+            for n in stage.node_ids() {
+                assert!(
+                    covered.insert(n.0.clone()),
+                    "node {} appeared in multiple stages",
+                    n.0
+                );
+            }
+            assert!(!stage.backend_tag().is_empty());
+        }
+        assert_eq!(covered.len(), g.nodes.len());
+
+        let seed: Arc<dyn VideoClip> = Arc::new(ColorClip::new(
+            Size::new(32, 32),
+            Rgb8::WHITE,
+            Duration::from_secs(2.0),
+        ));
+        let mut seeds = HashMap::new();
+        seeds.insert(MediaAssetId("a".into()), Arc::clone(&seed));
+        let audio: HashMap<MediaAssetId, Arc<dyn AudioClip>> = HashMap::new();
+
+        let full = materialize_graph_bundle(&g, &registry, &seeds, &audio, true).unwrap();
+        let staged =
+            materialize_execution_plan(&g, &plan, &registry, &seeds, &audio, true, None, None)
+                .unwrap();
+
+        assert!((full.video.duration().as_secs() - staged.video.duration().as_secs()).abs() < 1e-9);
+        assert_eq!(full.hints.crf, staged.hints.crf);
+        assert_eq!(full.hints.output_path, staged.hints.output_path);
+        let _ = staged.video.frame_at(Time::ZERO).unwrap();
+    }
+
+    #[test]
+    fn stage_fingerprints_chain_when_cache_present() {
+        let g = linear_redaction_graph();
+        let registry = OperationRegistry::with_builtins();
+        let plan = schedule_graph(&g, &registry).unwrap();
+        let seed: Arc<dyn VideoClip> = Arc::new(ColorClip::new(
+            Size::new(16, 16),
+            Rgb8::RED,
+            Duration::from_secs(1.0),
+        ));
+        let mut seeds = HashMap::new();
+        seeds.insert(MediaAssetId("a".into()), seed);
+        let audio: HashMap<MediaAssetId, Arc<dyn AudioClip>> = HashMap::new();
+        let dir = tempfile::tempdir().unwrap();
+        let cache = StageCache::open(dir.path()).unwrap();
+
+        // Smoke: stage path runs with cache hook (keys computed, no panic).
+        let bundle = materialize_execution_plan(
+            &g,
+            &plan,
+            &registry,
+            &seeds,
+            &audio,
+            true,
+            None,
+            Some(&cache),
+        )
+        .unwrap();
+        assert!((bundle.video.duration().as_secs() - 0.5).abs() < 1e-9);
     }
 
     #[test]

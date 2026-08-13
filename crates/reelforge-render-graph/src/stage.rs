@@ -60,7 +60,35 @@ pub enum ExecutionStage {
     Gpu(GpuStage),
 }
 
+impl ExecutionStage {
+    /// Node ids covered by this stage (schedule order within the stage).
+    #[must_use]
+    pub fn node_ids(&self) -> &[NodeId] {
+        match self {
+            Self::Ffmpeg(s) => &s.nodes,
+            Self::Rust(s) => &s.nodes,
+            Self::Adapter(s) => &s.nodes,
+            Self::Gpu(s) => &s.nodes,
+        }
+    }
+
+    /// Stable backend tag for cache keys / logs.
+    #[must_use]
+    pub fn backend_tag(&self) -> &'static str {
+        match self {
+            Self::Ffmpeg(_) => "ffmpeg",
+            Self::Rust(_) => "rust",
+            Self::Adapter(_) => "adapter",
+            Self::Gpu(_) => "gpu",
+        }
+    }
+}
+
 /// Ordered hybrid execution plan derived from a [`crate::RenderGraph`].
+///
+/// Stages are **runtime boundaries**: executors must walk them in order and
+/// only evaluate each stage's [`ExecutionStage::node_ids`], carrying media
+/// products forward. Full-DAG re-materialize ignoring stages is a legacy path.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct ExecutionPlan {
     /// Stages in order.
@@ -81,5 +109,20 @@ impl ExecutionPlan {
     /// Append a stage.
     pub fn push(&mut self, stage: ExecutionStage) {
         self.stages.push(stage);
+    }
+
+    /// Total nodes across all stages (may count a node once if schedule is correct).
+    #[must_use]
+    pub fn stage_count(&self) -> usize {
+        self.stages.len()
+    }
+
+    /// Flattened node ids in stage order (for diagnostics).
+    #[must_use]
+    pub fn all_node_ids(&self) -> Vec<&NodeId> {
+        self.stages
+            .iter()
+            .flat_map(ExecutionStage::node_ids)
+            .collect()
     }
 }
