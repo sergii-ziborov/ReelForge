@@ -52,13 +52,15 @@ pub use reelforge_io::{
     write_gif_with, write_proxy, write_thumbnail, write_video, write_video_with,
 };
 pub use reelforge_render_graph::{
-    AdapterStage, Animated, BackendClass, CapabilitySet, Easing, ExecutionPlan, ExecutionStage,
-    FfmpegStage, GpuStage, GraphOutput, Keyframe, MaskInterpolation, MaskSample, MaskTimeline,
-    MediaAsset, MediaAssetId, MediaContract, MissingMaskPolicy, NodeId, OperationDescriptor,
-    OperationId, OperationLimits, OperationRegistry, RENDER_GRAPH_VERSION, RedactionStyle,
-    RegionRedaction, RenderGraph, RenderNode, RenderNodeKind, RustStage, SemVer,
+    AdapterStage, Animated, BackendClass, CapabilitySet, CompileDiagnostics, CompiledOp,
+    CostEstimate, Easing, ExecutionPlan, ExecutionStage, FfmpegStage, GpuStage, GraphErrorCode,
+    GraphOutput, Keyframe, MaskInterpolation, MaskSample, MaskTimeline, MediaAsset, MediaAssetId,
+    MediaContract, MissingMaskPolicy, NodeId, OperationDescriptor, OperationId, OperationLimits,
+    OperationRegistry, RENDER_GRAPH_VERSION, RedactionStyle, RegionRedaction, RenderGraph,
+    RenderNode, RenderNodeKind, RustStage, SemVer, StageCacheKey, TypedParams,
+    check_registry_executor_parity, compile_graph_ops, compile_op, ensure_executable,
     fingerprint_execution_plan, fingerprint_graph_run, fingerprint_render_graph, fingerprint_stage,
-    schedule_graph,
+    fingerprint_stage_key, is_executable_op_id, schedule_graph,
 };
 pub use reelforge_text::{
     BITMAP_FONT, BurnInOptions, SubtitleCue, TextClip, TextClipOptions, TextError, burn_in_layers,

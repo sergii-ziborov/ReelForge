@@ -21,8 +21,8 @@ use reelforge_compose::{
     CompositeLayer, MixTrack, composite_video, composite_video_with_background, mix_audio,
 };
 use reelforge_core::{
-    AudioClip, AudioEffect, Duration, MediaTime, Position, Rgb8, Size, Time, VideoClip,
-    VideoEffect, subclip_audio, subclip_video,
+    AudioClip, AudioEffect, Duration, Position, Rgb8, Size, Time, VideoClip, VideoEffect,
+    subclip_audio, subclip_video,
 };
 use reelforge_fx::{
     BlackAndWhite, Crop, EvenSize, FadeIn, FadeOut, InvertColors, MirrorX, MirrorY, Painting,
@@ -30,8 +30,8 @@ use reelforge_fx::{
 };
 use reelforge_render_graph::{
     BackendClass, ExecutionPlan, ExecutionStage, MediaAssetId, NodeId, OperationId,
-    OperationRegistry, RENDER_GRAPH_VERSION, RenderGraph, RenderNode, RenderNodeKind,
-    schedule_graph,
+    OperationRegistry, RENDER_GRAPH_VERSION, RenderGraph, RenderNode, RenderNodeKind, TypedParams,
+    compile_op, is_executable_op_id, schedule_graph,
 };
 use std::collections::{HashMap, HashSet};
 use std::hash::BuildHasher;
@@ -570,14 +570,19 @@ fn apply_audio_mix(
     params: &serde_json::Value,
     registry: &OperationRegistry,
 ) -> Result<NodeMedia> {
-    let _ = registry
-        .get(&OperationId::new("rf.audio.mix"))
+    let compiled = compile_op(registry, &OperationId::new("rf.audio.mix"), params)
         .map_err(|e| IoError::message(e.to_string()))?;
+    let TypedParams::AudioMix {
+        tracks: track_value,
+    } = compiled.params
+    else {
+        return Err(IoError::message("internal: expected AudioMix params"));
+    };
     if inputs.is_empty() {
         return Err(IoError::message("rf.audio.mix needs at least one input"));
     }
     let video = Arc::clone(&inputs[0].video);
-    let track_params = params.get("tracks").and_then(|v| v.as_array());
+    let track_params = track_value.as_array();
     let mut tracks = Vec::new();
     for (i, m) in inputs.into_iter().enumerate() {
         let Some(audio) = m.audio else {
@@ -616,24 +621,28 @@ fn apply_compose_layers(
     params: &serde_json::Value,
     registry: &OperationRegistry,
 ) -> Result<Arc<dyn VideoClip>> {
-    let _ = registry
-        .get(&OperationId::new("rf.compose.layers"))
+    let compiled = compile_op(registry, &OperationId::new("rf.compose.layers"), params)
         .map_err(|e| IoError::message(e.to_string()))?;
+    let TypedParams::ComposeLayers {
+        w,
+        h,
+        layers: layer_value,
+        background,
+    } = compiled.params
+    else {
+        return Err(IoError::message("internal: expected ComposeLayers params"));
+    };
     if inputs.is_empty() {
         return Err(IoError::message("rf.compose.layers needs inputs"));
     }
 
-    let size = if let (Some(w), Some(h)) = (
-        params.get("w").and_then(serde_json::Value::as_u64),
-        params.get("h").and_then(serde_json::Value::as_u64),
-    ) {
-        #[allow(clippy::cast_possible_truncation)]
-        Size::new(w as u32, h as u32)
+    let size = if let (Some(w), Some(h)) = (w, h) {
+        Size::new(w, h)
     } else {
         inputs[0].size()
     };
 
-    let layer_params = params.get("layers").and_then(|v| v.as_array());
+    let layer_params = layer_value.as_array();
     let mut layers = Vec::with_capacity(inputs.len());
     for (i, clip) in inputs.into_iter().enumerate() {
         let mut layer =
@@ -666,7 +675,7 @@ fn apply_compose_layers(
         layers.push(layer);
     }
 
-    if let Some(bg) = params.get("background") {
+    if let Some(bg) = background {
         let r = bg.get("r").and_then(serde_json::Value::as_u64).unwrap_or(0);
         let g = bg.get("g").and_then(serde_json::Value::as_u64).unwrap_or(0);
         let b = bg.get("b").and_then(serde_json::Value::as_u64).unwrap_or(0);
@@ -679,6 +688,7 @@ fn apply_compose_layers(
     }
 }
 
+/// Apply a registered op after typed compile (registry + params → [`TypedParams`]).
 #[allow(clippy::too_many_lines, clippy::cast_possible_truncation)]
 fn apply_registered_op_media(
     input: NodeMedia,
@@ -687,22 +697,13 @@ fn apply_registered_op_media(
     registry: &OperationRegistry,
     hints: &mut GraphEncodeHints,
 ) -> Result<NodeMedia> {
-    let _desc = registry
-        .get(operation)
-        .map_err(|e| IoError::message(e.to_string()))?;
+    let compiled =
+        compile_op(registry, operation, params).map_err(|e| IoError::message(e.to_string()))?;
 
-    match operation.as_str() {
-        "rf.audio.gain" => {
-            let factor = params
-                .get("factor")
-                .and_then(serde_json::Value::as_f64)
-                .unwrap_or(1.0);
+    match &compiled.params {
+        TypedParams::AudioGain { factor } => {
             let audio = match input.audio {
-                Some(a) => Some(
-                    VolumeGain::new(factor as f32)
-                        .apply(a)
-                        .map_err(IoError::from)?,
-                ),
+                Some(a) => Some(VolumeGain::new(*factor).apply(a).map_err(IoError::from)?),
                 None => None,
             };
             Ok(NodeMedia {
@@ -710,189 +711,153 @@ fn apply_registered_op_media(
                 audio,
             })
         }
-        "rf.audio.drop" => {
+        TypedParams::AudioDrop => {
             hints.preserve_audio = false;
             Ok(NodeMedia {
                 video: input.video,
                 audio: None,
             })
         }
-        "rf.audio.preserve" => {
+        TypedParams::AudioPreserve => {
             hints.preserve_audio = true;
             Ok(input)
         }
-        op if op.starts_with("rf.audio.") => Err(IoError::message(format!(
-            "audio operation '{op}' is registered but has no executor yet"
-        ))),
-        _ => {
-            let video =
-                apply_registered_op(Arc::clone(&input.video), operation, params, registry, hints)?;
-            let audio = match operation.as_str() {
-                "rf.transform.trim" => match input.audio {
-                    Some(a) => Some(apply_trim_audio(a, params)?),
-                    None => None,
-                },
-                _ => input.audio,
+        TypedParams::AudioMix { .. } => Err(IoError::message(
+            "rf.audio.mix must be applied with multi-input materialize path",
+        )),
+        TypedParams::Trim { start, duration } => {
+            let video = subclip_video(
+                Arc::clone(&input.video),
+                Time::from_secs(*start),
+                Duration::from_secs(*duration),
+            )
+            .map_err(IoError::from)?;
+            let audio = match input.audio {
+                Some(a) => Some(
+                    subclip_audio(a, Time::from_secs(*start), Duration::from_secs(*duration))
+                        .map_err(IoError::from)?,
+                ),
+                None => None,
             };
             Ok(NodeMedia { video, audio })
+        }
+        other => {
+            let video = apply_typed_video(Arc::clone(&input.video), other, hints)?;
+            Ok(NodeMedia {
+                video,
+                audio: input.audio,
+            })
         }
     }
 }
 
+/// Execute typed video/encode params (no free-form JSON field peeks).
 #[allow(clippy::too_many_lines, clippy::cast_possible_truncation)]
-fn apply_registered_op(
+fn apply_typed_video(
     clip: Arc<dyn VideoClip>,
-    operation: &OperationId,
-    params: &serde_json::Value,
-    registry: &OperationRegistry,
+    params: &TypedParams,
     hints: &mut GraphEncodeHints,
 ) -> Result<Arc<dyn VideoClip>> {
-    // Typed registry: unknown ids are rejected (not open Custom).
-    let _desc = registry
-        .get(operation)
-        .map_err(|e| IoError::message(e.to_string()))?;
-
-    match operation.as_str() {
-        "rf.transform.trim" => apply_trim(clip, params),
-        "rf.transform.hflip" => MirrorX.apply(clip).map_err(IoError::from),
-        "rf.transform.vflip" => MirrorY.apply(clip).map_err(IoError::from),
-        "rf.transform.even_dims" => EvenSize.apply(clip).map_err(IoError::from),
-        "rf.transform.scale" => {
-            let w = params
-                .get("w")
-                .and_then(serde_json::Value::as_u64)
-                .ok_or_else(|| IoError::message("rf.transform.scale requires w"))?;
-            let h = params
-                .get("h")
-                .and_then(serde_json::Value::as_u64)
-                .ok_or_else(|| IoError::message("rf.transform.scale requires h"))?;
-            Resize::to(Size::new(w as u32, h as u32))
-                .apply(clip)
-                .map_err(IoError::from)
+    match params {
+        TypedParams::Trim { start, duration } => subclip_video(
+            clip,
+            Time::from_secs(*start),
+            Duration::from_secs(*duration),
+        )
+        .map_err(IoError::from),
+        TypedParams::HFlip => MirrorX.apply(clip).map_err(IoError::from),
+        TypedParams::VFlip => MirrorY.apply(clip).map_err(IoError::from),
+        TypedParams::EvenDims => EvenSize.apply(clip).map_err(IoError::from),
+        TypedParams::Scale { w, h } => Resize::to(Size::new(*w, *h))
+            .apply(clip)
+            .map_err(IoError::from),
+        TypedParams::Crop { x, y, w, h } => {
+            Crop::new(*x, *y, *w, *h).apply(clip).map_err(IoError::from)
         }
-        "rf.transform.crop" => {
-            let x = params
-                .get("x")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0);
-            let y = params
-                .get("y")
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0);
-            let w = params
-                .get("w")
-                .and_then(serde_json::Value::as_u64)
-                .ok_or_else(|| IoError::message("rf.transform.crop requires w"))?;
-            let h = params
-                .get("h")
-                .and_then(serde_json::Value::as_u64)
-                .ok_or_else(|| IoError::message("rf.transform.crop requires h"))?;
-            Crop::new(x as u32, y as u32, w as u32, h as u32)
-                .apply(clip)
-                .map_err(IoError::from)
-        }
-        "rf.transform.rotate" => apply_rotate(clip, params),
-        "rf.transform.fade_in" => {
-            let d = param_seconds(params, "duration")?.unwrap_or(0.5);
-            FadeIn::new(Duration::from_secs(d))
-                .apply(clip)
-                .map_err(IoError::from)
-        }
-        "rf.transform.fade_out" => {
-            let d = param_seconds(params, "duration")?.unwrap_or(0.5);
-            FadeOut::new(Duration::from_secs(d))
-                .apply(clip)
-                .map_err(IoError::from)
-        }
-        "rf.color.black_and_white" => BlackAndWhite.apply(clip).map_err(IoError::from),
-        "rf.color.invert" => InvertColors.apply(clip).map_err(IoError::from),
-        "rf.color.painting" => {
-            let sat = params
-                .get("saturation")
-                .and_then(serde_json::Value::as_f64)
-                .map(|v| v as f32);
-            let black = params
-                .get("black")
-                .and_then(serde_json::Value::as_f64)
-                .map(|v| v as f32);
-            let paint = match (sat, black) {
-                (Some(s), Some(b)) => Painting::with(s, b),
+        TypedParams::Rotate { mode, degrees } => apply_rotate_typed(clip, mode, *degrees),
+        TypedParams::FadeIn { duration } => FadeIn::new(Duration::from_secs(*duration))
+            .apply(clip)
+            .map_err(IoError::from),
+        TypedParams::FadeOut { duration } => FadeOut::new(Duration::from_secs(*duration))
+            .apply(clip)
+            .map_err(IoError::from),
+        TypedParams::BlackAndWhite => BlackAndWhite.apply(clip).map_err(IoError::from),
+        TypedParams::Invert => InvertColors.apply(clip).map_err(IoError::from),
+        TypedParams::Painting { saturation, black } => {
+            let paint = match (saturation, black) {
+                (Some(s), Some(b)) => Painting::with(*s, *b),
                 (Some(s), None) => Painting {
-                    saturation: s,
+                    saturation: *s,
                     ..Painting::new()
                 },
                 (None, Some(b)) => Painting {
-                    black: b,
+                    black: *b,
                     ..Painting::new()
                 },
                 (None, None) => Painting::new(),
             };
             paint.apply(clip).map_err(IoError::from)
         }
-        "rf.redaction.region" => {
-            let empty =
-                params.is_null() || params.as_object().is_some_and(serde_json::Map::is_empty);
+        TypedParams::Redaction { value } => {
+            let empty = value.is_null() || value.as_object().is_some_and(serde_json::Map::is_empty);
             if empty {
                 return Err(IoError::message(
                     "rf.redaction.region requires masks params (or use Redaction node)",
                 ));
             }
-            let redaction = region_redaction_from_value(params)?;
+            let redaction = region_redaction_from_value(value)?;
             apply_region_redaction(clip, &redaction)
         }
-        "rf.compose.layers" => Err(IoError::message(
+        TypedParams::ComposeLayers { .. } => Err(IoError::message(
             "rf.compose.layers must be applied with multi-input materialize path",
         )),
-        "rf.audio.gain" | "rf.audio.drop" | "rf.audio.preserve" => {
-            // Handled in apply_registered_op_media; video passthrough if called here.
+        TypedParams::AudioGain { .. }
+        | TypedParams::AudioDrop
+        | TypedParams::AudioPreserve
+        | TypedParams::AudioMix { .. } => {
+            // Audio handled in apply_registered_op_media; video passthrough.
             Ok(clip)
         }
-        "rf.encode.h264" => {
-            if let Some(path) = params.get("path").and_then(|v| v.as_str()) {
-                hints.output_path = Some(path.to_string());
+        TypedParams::EncodeH264 {
+            path,
+            crf,
+            codec,
+            fps,
+            preserve_audio,
+        } => {
+            if let Some(p) = path {
+                hints.output_path = Some(p.clone());
             }
-            if let Some(crf) = params.get("crf").and_then(serde_json::Value::as_u64) {
-                hints.crf = Some(crf.min(51) as u8);
+            if let Some(c) = crf {
+                hints.crf = Some(*c);
             }
-            if let Some(codec) = params.get("codec").and_then(|v| v.as_str()) {
-                hints.video_codec = Some(codec.to_string());
+            if let Some(c) = codec {
+                hints.video_codec = Some(c.clone());
             } else {
                 hints.video_codec.get_or_insert_with(|| "libx264".into());
             }
-            if let Some(fps) = params.get("fps").and_then(serde_json::Value::as_f64) {
-                hints.fps = Some(fps);
+            if let Some(f) = fps {
+                hints.fps = Some(*f);
             }
-            if let Some(pa) = params
-                .get("preserve_audio")
-                .and_then(serde_json::Value::as_bool)
-            {
-                hints.preserve_audio = pa;
+            if let Some(pa) = preserve_audio {
+                hints.preserve_audio = *pa;
             }
             Ok(clip)
         }
-        other => Err(IoError::message(format!(
-            "operation '{other}' is registered but has no executor yet"
-        ))),
     }
 }
 
-fn apply_rotate(
+fn apply_rotate_typed(
     clip: Arc<dyn VideoClip>,
-    params: &serde_json::Value,
+    mode: &str,
+    degrees: Option<f64>,
 ) -> Result<Arc<dyn VideoClip>> {
-    let mode = params
-        .get("mode")
-        .and_then(|v| v.as_str())
-        .unwrap_or("cw90");
     let rot = match mode {
         "cw90" | "90" => Rotate::cw90(),
         "cw180" | "180" => Rotate::half(),
         "cw270" | "270" | "ccw90" => Rotate::cw270(),
         "degrees" => {
-            let d = params
-                .get("degrees")
-                .and_then(serde_json::Value::as_f64)
-                .ok_or_else(|| IoError::message("rotate mode=degrees needs degrees"))?;
+            let d = degrees.ok_or_else(|| IoError::message("rotate mode=degrees needs degrees"))?;
             #[allow(clippy::cast_possible_truncation)]
             Rotate::degrees(d as f32)
         }
@@ -903,51 +868,6 @@ fn apply_rotate(
         }
     };
     rot.apply(clip).map_err(IoError::from)
-}
-
-fn apply_trim(clip: Arc<dyn VideoClip>, params: &serde_json::Value) -> Result<Arc<dyn VideoClip>> {
-    let start = param_seconds(params, "start")?.unwrap_or(0.0);
-    let duration = param_seconds(params, "duration")?.ok_or_else(|| {
-        IoError::message("rf.transform.trim requires duration (seconds or MediaTime)")
-    })?;
-    subclip_video(clip, Time::from_secs(start), Duration::from_secs(duration))
-        .map_err(IoError::from)
-}
-
-fn apply_trim_audio(
-    clip: Arc<dyn AudioClip>,
-    params: &serde_json::Value,
-) -> Result<Arc<dyn AudioClip>> {
-    let start = param_seconds(params, "start")?.unwrap_or(0.0);
-    let duration = param_seconds(params, "duration")?.ok_or_else(|| {
-        IoError::message("rf.transform.trim requires duration (seconds or MediaTime)")
-    })?;
-    subclip_audio(clip, Time::from_secs(start), Duration::from_secs(duration))
-        .map_err(IoError::from)
-}
-
-fn param_seconds(params: &serde_json::Value, key: &str) -> Result<Option<f64>> {
-    let Some(v) = params.get(key) else {
-        return Ok(None);
-    };
-    if let Some(n) = v.as_f64() {
-        return Ok(Some(n));
-    }
-    if let Some(n) = v.as_i64() {
-        #[allow(clippy::cast_precision_loss)]
-        return Ok(Some(n as f64));
-    }
-    if let (Some(ticks), Some(ts)) = (
-        v.get("ticks").and_then(serde_json::Value::as_i64),
-        v.get("timescale").and_then(serde_json::Value::as_u64),
-    ) {
-        #[allow(clippy::cast_possible_truncation)]
-        let mt = MediaTime::new(ticks, ts as u32).map_err(IoError::from)?;
-        return Ok(Some(mt.as_secs()));
-    }
-    Err(IoError::message(format!(
-        "param '{key}' must be number or MediaTime object"
-    )))
 }
 
 fn merge_option_hints(hints: &mut GraphEncodeHints, options: &GraphRunOptions) {
@@ -1057,76 +977,38 @@ fn try_hybrid_ffmpeg_prefix(
             .ok_or_else(|| IoError::message(format!("missing node {}", nid.0)))?;
         match &node.body {
             RenderNodeKind::Source { .. } | RenderNodeKind::Output { .. } => {}
-            RenderNodeKind::Op { operation, params } => match operation.as_str() {
-                "rf.transform.trim" => {
-                    let start = param_seconds(params, "start")?.unwrap_or(0.0);
-                    let duration = param_seconds(params, "duration")?.ok_or_else(|| {
-                        IoError::message("trim duration required for FFmpeg prefix")
-                    })?;
-                    filter = filter.then(FilterOp::Trim { start, duration });
-                    saw_trim = true;
-                    strip_ids.insert(nid.0.clone());
-                }
-                "rf.transform.hflip" => {
-                    filter = filter.then(FilterOp::HFlip);
-                    strip_ids.insert(nid.0.clone());
-                }
-                "rf.transform.vflip" => {
-                    filter = filter.then(FilterOp::VFlip);
-                    strip_ids.insert(nid.0.clone());
-                }
-                "rf.transform.scale" => {
-                    let w = params
-                        .get("w")
-                        .and_then(serde_json::Value::as_u64)
-                        .ok_or_else(|| IoError::message("scale w required"))?;
-                    let h = params
-                        .get("h")
-                        .and_then(serde_json::Value::as_u64)
-                        .ok_or_else(|| IoError::message("scale h required"))?;
-                    #[allow(clippy::cast_possible_truncation)]
-                    {
-                        filter = filter.then(FilterOp::Scale {
-                            w: w as u32,
-                            h: h as u32,
-                        });
+            RenderNodeKind::Op { operation, params } => {
+                let compiled = compile_op(&options.registry, operation, params)
+                    .map_err(|e| IoError::message(e.to_string()))?;
+                match compiled.params {
+                    TypedParams::Trim { start, duration } => {
+                        filter = filter.then(FilterOp::Trim { start, duration });
+                        saw_trim = true;
+                        strip_ids.insert(nid.0.clone());
                     }
-                    strip_ids.insert(nid.0.clone());
-                }
-                "rf.transform.crop" => {
-                    let x = params
-                        .get("x")
-                        .and_then(serde_json::Value::as_u64)
-                        .unwrap_or(0);
-                    let y = params
-                        .get("y")
-                        .and_then(serde_json::Value::as_u64)
-                        .unwrap_or(0);
-                    let w = params
-                        .get("w")
-                        .and_then(serde_json::Value::as_u64)
-                        .ok_or_else(|| IoError::message("crop w required"))?;
-                    let h = params
-                        .get("h")
-                        .and_then(serde_json::Value::as_u64)
-                        .ok_or_else(|| IoError::message("crop h required"))?;
-                    #[allow(clippy::cast_possible_truncation)]
-                    {
-                        filter = filter.then(FilterOp::Crop {
-                            w: w as u32,
-                            h: h as u32,
-                            x: x as u32,
-                            y: y as u32,
-                        });
+                    TypedParams::HFlip => {
+                        filter = filter.then(FilterOp::HFlip);
+                        strip_ids.insert(nid.0.clone());
                     }
-                    strip_ids.insert(nid.0.clone());
+                    TypedParams::VFlip => {
+                        filter = filter.then(FilterOp::VFlip);
+                        strip_ids.insert(nid.0.clone());
+                    }
+                    TypedParams::Scale { w, h } => {
+                        filter = filter.then(FilterOp::Scale { w, h });
+                        strip_ids.insert(nid.0.clone());
+                    }
+                    TypedParams::Crop { x, y, w, h } => {
+                        filter = filter.then(FilterOp::Crop { w, h, x, y });
+                        strip_ids.insert(nid.0.clone());
+                    }
+                    TypedParams::EvenDims => {
+                        filter = filter.then(FilterOp::EvenDims);
+                        strip_ids.insert(nid.0.clone());
+                    }
+                    _ => return Ok(None),
                 }
-                "rf.transform.even_dims" => {
-                    filter = filter.then(FilterOp::EvenDims);
-                    strip_ids.insert(nid.0.clone());
-                }
-                _ => return Ok(None),
-            },
+            }
             RenderNodeKind::Redaction { .. } => return Ok(None),
         }
     }
@@ -1254,30 +1136,11 @@ fn temp_graph_path(output: &Path, tag: &str) -> PathBuf {
 }
 
 /// Whether the registry backend for `id` is known to the M3 runner.
+///
+/// Delegates to [`is_executable_op_id`] so registry and executor share one list.
 #[must_use]
 pub fn is_executable_op(id: &str) -> bool {
-    matches!(
-        id,
-        "rf.transform.trim"
-            | "rf.transform.hflip"
-            | "rf.transform.vflip"
-            | "rf.transform.scale"
-            | "rf.transform.crop"
-            | "rf.transform.even_dims"
-            | "rf.transform.rotate"
-            | "rf.transform.fade_in"
-            | "rf.transform.fade_out"
-            | "rf.color.black_and_white"
-            | "rf.color.invert"
-            | "rf.color.painting"
-            | "rf.compose.layers"
-            | "rf.redaction.region"
-            | "rf.audio.gain"
-            | "rf.audio.drop"
-            | "rf.audio.preserve"
-            | "rf.audio.mix"
-            | "rf.encode.h264"
-    )
+    is_executable_op_id(id)
 }
 
 /// Backend class for a graph node (for hosts / debug).
@@ -1293,7 +1156,7 @@ pub fn node_backend(node: &RenderNode, registry: &OperationRegistry) -> Option<B
 #[cfg(test)]
 mod tests {
     use super::*;
-    use reelforge_core::{ColorClip, Rgb8, Size};
+    use reelforge_core::{ColorClip, MediaTime, Rgb8, Size};
     use reelforge_render_graph::{
         GraphOutput, MaskSample, MaskTimeline, MediaAsset, MediaAssetId, RENDER_GRAPH_VERSION,
         RegionRedaction, RenderNode,

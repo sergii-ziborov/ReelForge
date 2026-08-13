@@ -2,12 +2,14 @@
 
 use crate::error::{IoError, Result};
 use reelforge_render_graph::{
-    ExecutionPlan, RenderGraph, fingerprint_graph_run, fingerprint_stage,
+    CompiledOp, ExecutionPlan, RenderGraph, StageCacheKey, fingerprint_graph_run,
+    fingerprint_stage, fingerprint_stage_key,
 };
 use std::collections::hash_map::DefaultHasher;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 /// Directory-backed stage output cache.
 ///
@@ -84,22 +86,46 @@ impl StageCache {
         fingerprint_graph_run(graph, plan).map_err(|e| IoError::message(e.to_string()))
     }
 
-    /// Stage-local fingerprint helper.
+    /// Stage-local fingerprint helper (legacy: backend + node ids only).
     #[must_use]
     pub fn stage_key(backend: &str, node_ids: &[impl AsRef<str>]) -> String {
         fingerprint_stage(backend, node_ids)
     }
 
-    /// Fingerprint an intermediate `FFmpeg` filter stage (source URI + vf + node ids).
+    /// Strong stage key: input hash + compiled ops (id/version/params) + backend + `FFmpeg`.
+    #[must_use]
+    pub fn stage_key_full(
+        backend: &str,
+        node_ids: &[String],
+        input_fingerprint: &str,
+        compiled: &[CompiledOp],
+        ffmpeg_version: &str,
+        host_tag: &str,
+    ) -> String {
+        fingerprint_stage_key(&StageCacheKey {
+            backend,
+            node_ids,
+            input_fingerprint,
+            compiled,
+            ffmpeg_version,
+            host_tag,
+        })
+    }
+
+    /// Fingerprint an intermediate `FFmpeg` filter stage.
+    ///
+    /// Includes source URI, filtergraph, node ids, and host `FFmpeg` version so a
+    /// tool upgrade does not reuse stale intermediates.
     #[must_use]
     pub fn ffmpeg_prefix_key(source_uri: &str, vf: &str, node_ids: &[impl AsRef<str>]) -> String {
         let mut h = DefaultHasher::new();
-        "ffmpeg_prefix".hash(&mut h);
+        "ffmpeg_prefix_v2".hash(&mut h);
         source_uri.hash(&mut h);
         vf.hash(&mut h);
         for id in node_ids {
             id.as_ref().hash(&mut h);
         }
+        probe_ffmpeg_version_cached().hash(&mut h);
         format!("{:016x}", h.finish())
     }
 
@@ -124,6 +150,29 @@ impl StageCache {
     }
 }
 
+/// Best-effort host `FFmpeg` version (first line), cached for the process.
+#[must_use]
+pub fn probe_ffmpeg_version_cached() -> &'static str {
+    static VER: OnceLock<String> = OnceLock::new();
+    VER.get_or_init(probe_ffmpeg_version).as_str()
+}
+
+fn probe_ffmpeg_version() -> String {
+    let bin = std::env::var("REELFORGE_FFMPEG").unwrap_or_else(|_| "ffmpeg".into());
+    let output = std::process::Command::new(&bin).arg("-version").output();
+    match output {
+        Ok(o) if o.status.success() => {
+            let text = String::from_utf8_lossy(&o.stdout);
+            text.lines()
+                .next()
+                .unwrap_or("ffmpeg-unknown")
+                .trim()
+                .to_string()
+        }
+        _ => "ffmpeg-missing".into(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,5 +187,14 @@ mod tests {
         assert!(dest.is_file());
         assert_eq!(cache.hit("abc123", "bin").as_deref(), Some(dest.as_path()));
         assert!(cache.hit("missing", "bin").is_none());
+    }
+
+    #[test]
+    fn ffmpeg_prefix_key_stable() {
+        let a = StageCache::ffmpeg_prefix_key("in.mp4", "hflip", &["a", "b"]);
+        let b = StageCache::ffmpeg_prefix_key("in.mp4", "hflip", &["a", "b"]);
+        assert_eq!(a, b);
+        let c = StageCache::ffmpeg_prefix_key("in.mp4", "vflip", &["a", "b"]);
+        assert_ne!(a, c);
     }
 }
