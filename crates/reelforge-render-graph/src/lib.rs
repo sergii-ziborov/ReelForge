@@ -36,7 +36,10 @@ pub use fingerprint::{
 pub use graph::{
     GraphOutput, MediaAsset, MediaAssetId, NodeId, RenderGraph, RenderNode, RenderNodeKind,
 };
-pub use mask::{MaskInterpolation, MaskSample, MaskTimeline, MissingMaskPolicy};
+pub use mask::{
+    MaskInterpolation, MaskLifecycle, MaskProvenance, MaskRegionAt, MaskSample, MaskTimeline,
+    MissingMaskPolicy, SubjectId,
+};
 pub use op::{
     BackendClass, CapabilitySet, MediaContract, OperationDescriptor, OperationId, OperationLimits,
     OperationRegistry, SemVer,

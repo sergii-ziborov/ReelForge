@@ -40,8 +40,8 @@ pub use graph_run::{
 };
 pub use image_clip::ImageClip;
 pub use mask_bridge::{
-    apply_region_redaction, mask_timeline_from_box, mask_timeline_to_track_set,
-    privacy_style_from_redaction, region_redaction_from_value,
+    apply_region_redaction, mask_timeline_from_box, mask_timeline_from_box_subject,
+    mask_timeline_to_track_set, privacy_style_from_redaction, region_redaction_from_value,
 };
 pub use options::{OpenAudioOptions, OpenVideoOptions, WriteGifOptions, WriteVideoOptions};
 pub use pool::RgbFramePool;

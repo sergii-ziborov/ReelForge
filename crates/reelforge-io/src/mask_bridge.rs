@@ -3,30 +3,50 @@
 use crate::error::{IoError, Result};
 use reelforge_core::{MediaTime, VideoClip, VideoEffect};
 use reelforge_fx::{PrivacyStyle, RegionSample, RegionTrack, TrackSet, TrackedPrivacy};
-use reelforge_render_graph::{MaskSample, MaskTimeline, RedactionStyle, RegionRedaction};
+use reelforge_render_graph::{
+    MaskSample, MaskTimeline, RedactionStyle, RegionRedaction, SubjectId,
+};
 use std::sync::Arc;
 
 /// Convert a [`MaskTimeline`] into a [`TrackSet`] for privacy effects.
+///
+/// One [`RegionTrack`] per [`SubjectId`] (anonymous samples share `_anon`).
+/// Occluded / non-contributing samples are skipped so runtime tracks stay clean.
 #[must_use]
 pub fn mask_timeline_to_track_set(masks: &MaskTimeline) -> TrackSet {
     let mut set = TrackSet::new();
-    let mut track = RegionTrack::new("mask_timeline");
-    for s in &masks.samples {
-        let sample =
-            if let (Some(l), Some(t), Some(r), Some(b)) = (s.left, s.top, s.right, s.bottom) {
-                RegionSample::from_bbox(s.t.as_secs(), l, t, r, b, s.conf)
-            } else {
-                RegionSample {
-                    t: s.t.as_secs(),
-                    cx: s.cx,
-                    cy: s.cy,
-                    radius: s.radius,
-                    conf: s.conf,
-                }
-            };
-        track.push(sample);
+    for (subject, samples) in masks.group_by_subject() {
+        let mut track = RegionTrack::new(subject.as_str());
+        if let Some(kind) = samples
+            .iter()
+            .find_map(|s| s.provenance.as_ref().and_then(|p| p.source.clone()))
+        {
+            track = track.with_kind(kind);
+        }
+        for s in samples {
+            if !s.contributes_region() {
+                continue;
+            }
+            let sample =
+                if let (Some(l), Some(t), Some(r), Some(b)) = (s.left, s.top, s.right, s.bottom) {
+                    RegionSample::from_bbox(s.t.as_secs(), l, t, r, b, s.conf)
+                } else {
+                    RegionSample {
+                        t: s.t.as_secs(),
+                        cx: s.cx,
+                        cy: s.cy,
+                        radius: s.radius,
+                        conf: s.conf,
+                    }
+                };
+            track.push(sample);
+        }
+        if !track.samples.is_empty() {
+            set.push(track);
+        }
     }
-    set.push(track);
+    // Stable order by track id (SubjectId already BTree-ordered via group_by_subject).
+    set.tracks.sort_by(|a, b| a.id.cmp(&b.id));
     set
 }
 
@@ -57,6 +77,11 @@ pub fn apply_region_redaction(
         return Err(IoError::message("RegionRedaction masks are empty"));
     }
     let tracks = mask_timeline_to_track_set(&redaction.masks);
+    if tracks.is_empty() {
+        return Err(IoError::message(
+            "RegionRedaction has no contributing samples (all occluded/lost?)",
+        ));
+    }
     let style = privacy_style_from_redaction(&redaction.style);
     TrackedPrivacy::new(tracks, style)
         .apply(clip)
@@ -74,6 +99,23 @@ pub fn mask_timeline_from_box(
 ) -> MaskTimeline {
     let mut tl = MaskTimeline::new();
     tl.push(MaskSample::from_box(t, left, top, right, bottom, 1.0));
+    tl
+}
+
+/// Build a subject-tagged single-sample timeline (vision adapter helper).
+#[must_use]
+pub fn mask_timeline_from_box_subject(
+    subject: SubjectId,
+    t: MediaTime,
+    left: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+) -> MaskTimeline {
+    let mut tl = MaskTimeline::new();
+    tl.push(MaskSample::from_box_subject(
+        subject, t, left, top, right, bottom, 1.0,
+    ));
     tl
 }
 
@@ -126,6 +168,7 @@ pub fn region_redaction_from_value(value: &serde_json::Value) -> Result<RegionRe
 mod tests {
     use super::*;
     use reelforge_core::{ColorClip, Duration, Rgb8, Size, Time};
+    use reelforge_render_graph::{MaskLifecycle, MaskProvenance, SubjectId};
 
     #[test]
     fn parse_and_apply_gaussian() {
@@ -148,6 +191,45 @@ mod tests {
         ));
         let out = apply_region_redaction(clip, &redaction).unwrap();
         let _ = out.frame_at(Time::ZERO).unwrap();
+    }
+
+    #[test]
+    fn multi_subject_tracks() {
+        let mut tl = MaskTimeline::new();
+        tl.push(
+            MaskSample::ellipse_subject(
+                SubjectId::new("face_1"),
+                MediaTime::new(0, 30).unwrap(),
+                8.0,
+                8.0,
+                4.0,
+            )
+            .with_provenance(MaskProvenance::sightloom("face_1")),
+        );
+        tl.push(MaskSample::ellipse_subject(
+            SubjectId::new("face_2"),
+            MediaTime::new(0, 30).unwrap(),
+            24.0,
+            24.0,
+            4.0,
+        ));
+        tl.push(
+            MaskSample::ellipse_subject(
+                SubjectId::new("face_1"),
+                MediaTime::new(15, 30).unwrap(),
+                10.0,
+                10.0,
+                4.0,
+            )
+            .with_lifecycle(MaskLifecycle::Occluded),
+        );
+        let set = mask_timeline_to_track_set(&tl);
+        assert_eq!(set.len(), 2, "occluded sample does not drop the track");
+        assert_eq!(set.tracks[0].id, "face_1");
+        assert_eq!(set.tracks[0].samples.len(), 1, "occluded sample skipped");
+        assert_eq!(set.tracks[1].id, "face_2");
+        let regions = set.regions_at(0.0);
+        assert_eq!(regions.len(), 2);
     }
 
     #[test]
