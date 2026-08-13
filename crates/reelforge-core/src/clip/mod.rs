@@ -52,4 +52,15 @@ mod tests {
         assert_eq!(id.as_str(), "scene-1");
         assert_eq!(id.to_string(), "scene-1");
     }
+
+    #[test]
+    fn surface_at_wraps_frame_with_pts() {
+        let clip =
+            ColorClip::new(Size::new(2, 2), Rgb8::RED, Duration::from_secs(1.0)).with_fps(25.0);
+        let s = clip.surface_at(Time::from_secs(0.04)).unwrap();
+        assert_eq!(s.size(), Size::new(2, 2));
+        assert!((s.timestamp().as_secs() - 0.04).abs() < 1e-6);
+        let dur = s.duration().unwrap();
+        assert!((dur.as_secs() - 0.04).abs() < 1e-6);
+    }
 }

@@ -1,8 +1,9 @@
 //! `RenderPlan` JSON, optimize, extract, hybrid, and (optional) `FFmpeg` execution.
 
 use reelforge_io::{
-    PlanOp, PlanOutput, RenderPlan, extract_ffmpeg, ffmpeg_available, optimize_plan,
-    require_full_ffmpeg, run_render_plan,
+    FfmpegTools, FilterGraph, FilterOp, PlanOp, PlanOutput, RenderPlan, extract_ffmpeg,
+    ffmpeg_available, optimize_plan, probe_audio, probe_has_audio, require_full_ffmpeg,
+    run_filtergraph, run_render_plan,
 };
 use std::path::PathBuf;
 use std::process::Command;
@@ -138,6 +139,71 @@ fn run_fully_ffmpeg_plan_end_to_end() {
     assert!(output.is_file());
     let meta = std::fs::metadata(&output).expect("meta");
     assert!(meta.len() > 0);
+}
+
+fn write_av_source(path: &std::path::Path, secs: &str) -> bool {
+    let status = Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            &format!("color=c=green:s=160x120:d={secs}"),
+            "-f",
+            "lavfi",
+            "-i",
+            &format!("sine=frequency=440:duration={secs}"),
+            "-pix_fmt",
+            "yuv420p",
+            "-c:v",
+            "libx264",
+            "-c:a",
+            "aac",
+            "-shortest",
+        ])
+        .arg(path)
+        .status();
+    matches!(status, Ok(s) if s.success())
+}
+
+#[test]
+fn filtergraph_preserves_and_trims_audio() {
+    if skip_without_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let input = dir.path().join("src_av.mp4");
+    let flipped = dir.path().join("flip.mp4");
+    let trimmed = dir.path().join("trim.mp4");
+    if !write_av_source(&input, "1.0") {
+        eprintln!("skipping: lavfi av source failed");
+        return;
+    }
+    let tools = FfmpegTools::discover().expect("tools");
+    assert!(probe_has_audio(&tools, &input).expect("src audio"));
+
+    run_filtergraph(&input, &flipped, &FilterGraph::new().then(FilterOp::HFlip)).expect("hflip");
+    assert!(probe_has_audio(&tools, &flipped).expect("flipped audio"));
+
+    run_filtergraph(
+        &input,
+        &trimmed,
+        &FilterGraph::new().then(FilterOp::Trim {
+            start: 0.2,
+            duration: 0.4,
+        }),
+    )
+    .expect("trim");
+    assert!(probe_has_audio(&tools, &trimmed).expect("trim audio"));
+    let probe = probe_audio(&tools, &trimmed).expect("probe trim");
+    let secs = probe.duration.as_secs();
+    assert!(
+        (0.25..=0.55).contains(&secs),
+        "expected ~0.4s audio after trim, got {secs}"
+    );
 }
 
 #[test]

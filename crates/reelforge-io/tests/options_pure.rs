@@ -1,5 +1,6 @@
 //! Pure option builders (no ffmpeg).
 
+use reelforge_core::SampleLayout;
 use reelforge_io::{OpenAudioOptions, OpenVideoOptions, WriteVideoOptions};
 
 #[test]
@@ -24,4 +25,9 @@ fn open_options() {
     let a = OpenAudioOptions::new("a.wav");
     assert_eq!(a.sample_rate, 48_000);
     assert!(a.stereo);
+    assert!(!a.native_layout);
+    let native = OpenAudioOptions::new("a.wav").with_native_layout();
+    assert!(native.native_layout);
+    let five = OpenAudioOptions::new("a.wav").with_layout(SampleLayout::Surround51);
+    assert_eq!(five.layout, Some(SampleLayout::Surround51));
 }

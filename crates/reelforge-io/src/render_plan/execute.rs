@@ -6,10 +6,7 @@ use super::ops::PlanSource;
 use super::plan::RenderPlan;
 use crate::control::WriteControl;
 use crate::error::{IoError, Result};
-use crate::ffmpeg::FfmpegTools;
-use crate::{FilterGraph, run_filtergraph};
-use std::path::Path;
-use std::process::Command;
+use crate::{FiltergraphRunOptions, run_filtergraph_with};
 
 /// Run a plan end-to-end.
 ///
@@ -60,17 +57,14 @@ fn run_pure_ffmpeg(plan: &RenderPlan, control: &WriteControl) -> Result<()> {
     };
     control.check_cancel()?;
     let graph = require_full_ffmpeg(plan)?;
-    if output.video_codec.is_none() && output.crf.is_none() {
-        run_filtergraph(input, &output.path, &graph)?;
-    } else {
-        run_filtergraph_with_encode(
-            input,
-            &output.path,
-            &graph,
-            output.video_codec.as_deref(),
-            output.crf,
-        )?;
+    let mut opts = FiltergraphRunOptions::new();
+    if let Some(codec) = &output.video_codec {
+        opts = opts.with_video_codec(codec.clone());
     }
+    if let Some(crf) = output.crf {
+        opts = opts.with_crf(crf);
+    }
+    run_filtergraph_with(input, &output.path, &graph, &opts)?;
     control.report(crate::control::WriteProgress::new(
         crate::control::WriteStage::Done,
         1,
@@ -114,53 +108,6 @@ pub fn explain_plan(plan: &RenderPlan) -> String {
         lines.push(format!("output: {}", out.path));
     }
     lines.join("\n")
-}
-
-fn run_filtergraph_with_encode(
-    input: impl AsRef<Path>,
-    output: impl AsRef<Path>,
-    graph: &FilterGraph,
-    video_codec: Option<&str>,
-    crf: Option<u8>,
-) -> Result<()> {
-    let tools = FfmpegTools::discover()?;
-    let vf = graph.to_vf().map_err(IoError::message)?;
-    let input = input.as_ref();
-    let output = output.as_ref();
-    if !input.is_file() {
-        return Err(IoError::message(format!(
-            "input not found: {}",
-            input.display()
-        )));
-    }
-    if let Some(parent) = output.parent()
-        && !parent.as_os_str().is_empty()
-        && !parent.exists()
-    {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| IoError::message(format!("create output dir: {e}")))?;
-    }
-
-    let codec = video_codec.unwrap_or("libx264");
-    let mut cmd = Command::new(&tools.ffmpeg);
-    cmd.args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
-        .arg(input)
-        .args(["-vf", &vf, "-an", "-c:v", codec, "-pix_fmt", "yuv420p"]);
-    if let Some(crf) = crf {
-        cmd.args(["-crf", &crf.to_string()]);
-    }
-    cmd.arg(output);
-
-    let status = cmd
-        .status()
-        .map_err(|e| IoError::process(format!("ffmpeg render plan spawn failed: {e}")))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(IoError::process(format!(
-            "ffmpeg render plan failed with {status}"
-        )))
-    }
 }
 
 #[cfg(test)]

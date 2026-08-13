@@ -22,6 +22,10 @@ assert!(ffmpeg_available());
 | `OpenVideoOptions::new(path).video_only()` | Skip audio attach |
 | `video.audio()` | Optional `AudioFileClip` if open found a track |
 | `open_audio(&OpenAudioOptions)` | Decode full PCM (f32, default 48 kHz stereo) |
+| `OpenAudioOptions::with_native_layout()` | Keep source 5.1 / 7.1 / N-ch instead of stereo downmix |
+| `SampleLayout` | `Mono` / `Stereo` / `Quad` / `Surround51` / `Surround71` / `Discrete(n)` |
+| `AudioTimeline` | Sample-accurate `MediaTime` ↔ sample-frame index |
+| `AudioBuffer::resample` / `resample_linear` | In-process linear rate conversion (layout unchanged) |
 | `ImageClip::from_path` / `from_frame` | Still as video |
 
 ### Sequential decode
@@ -52,8 +56,10 @@ let control = WriteControl::new()
     .with_cancel(cancel.clone())
     .with_max_in_flight(4) // bounded sample workers + ordered join
     .with_progress(move |p| {
-        if p.stage == WriteStage::Video {
-            frames2.store(p.index, Ordering::Relaxed);
+        match p.stage {
+            WriteStage::Plan => { /* ExecutionPlan stage i / total */ }
+            WriteStage::Video => frames2.store(p.index, Ordering::Relaxed),
+            _ => {}
         }
     });
 
@@ -64,7 +70,7 @@ write_video_with(&clip, &WriteVideoOptions::new("out.mp4", 24.0), &control)?;
 | Control | Meaning |
 |---------|---------|
 | `CancelToken` | Cooperative cancel mid-encode / audio stream |
-| `WriteProgress` | `stage` (Video / Audio / Mux / Done), index, total, fraction |
+| `WriteProgress` | `stage` (`Plan` / `Video` / `Audio` / `Mux` / `Done`), index, total, fraction |
 | `max_in_flight` | `1` sequential; `>1` worker pool with ordered join (cap 32) |
 
 Audio PCM for `write_av` is written in ~1 s chunks (no full-timeline buffer).
@@ -97,6 +103,10 @@ Odd frame sizes are cropped to even for yuv420 encoders. Expand size with `Resiz
 `FilterGraph` + `FilterOp` + `run_filtergraph` build an ffmpeg simple filter chain without importing frames:
 
 - Trim, crop, scale, hflip/vflip, fade, even dims
+- **Audio is kept** by default (`-c:a copy`). Trim also applies `atrim` + AAC. Video-only sources stay silent.
+- `run_filtergraph_with(..., &FiltergraphRunOptions::new().drop_audio())` restores the old `-an` path
+- Pure `RenderPlan` FFmpeg jobs and `run_filtergraph_encode` use the same policy
+- Hybrid remainder remuxes the prefix/source audio onto the Rust-encoded video (`mux_copy_audio`)
 
 Use when the whole job can stay in FFmpeg.
 
@@ -185,6 +195,125 @@ reelforge plan job.json --run        # full FFmpeg plans only
 
 Benches (no encode): `cargo bench -p reelforge-io --bench render_plan`
 
+## RenderGraph
+
+`RenderPlan` stays **one input → linear ops → one output**.  
+`RenderGraph` is the DAG (several assets, fused redaction, hybrid stages). Do not grow Plan v1 into a project file.
+
+`CaptureProject` (`compile_project`) is the OTIO-like **user timeline**. It compiles to `RenderGraph` (trim, speed, fade/dissolve, audio mix). Editor / screen capture stay in ReelForge Capture.
+
+See the walkthrough in [GUIDE.md](GUIDE.md#rendergraph).
+
+### Pipeline
+
+```text
+RenderGraph
+    validate / from_json
+    compile_graph(graph, &OperationRegistry::with_builtins())
+        → CompiledGraph          // NodeIndex, typed ops, MediaContract per node
+    schedule_graph / schedule_compiled
+        → ExecutionPlan
+            stages[]             // FFmpeg / Rust / Adapter / GPU (NodeId adapter)
+            io[]                 // StageIo: numeric inputs/outputs + contracts
+    run_render_graph / run_render_graph_with
+        → files at GraphOutput.uri
+    run_render_graph_with_manifest
+        → ArtifactManifest   // planned ports + output URIs + file_fingerprint
+```
+
+| API | Role |
+|-----|------|
+| `graph.validate()` / `RenderGraph::from_json` | Structure, unique ids, acyclicity |
+| `compile_graph` | Typed params + dense indexes + **media contracts** |
+| `schedule_graph` / `schedule_compiled` | Fuse consecutive backends |
+| `explain_render_graph` / `_with` | Human stage list |
+| `run_render_graph` / `_with` | Schedule + hybrid execute + write |
+| `run_render_graph_with_manifest` / `run_execution_plan_with_manifest` | Same + sealed `ArtifactManifest` (`file_fingerprint`) |
+| `materialize_graph` / `_with_seeds` / `materialize_execution_plan` | In-process clip, no encode (tests / preview) |
+| `compile_op` + `TypedParams::executor_kind` | Unary vs n-ary gather; `execute` lives in the I/O runner |
+
+### Contracts
+
+Each `CompiledNode.output` is a `MediaContract { video, audio, masks }`.
+
+- File source (no role or `role: "video"`) → video + companion audio  
+- `role: "audio"` → audio only  
+- Visual ops / redaction **keep companion audio**  
+- `rf.audio.drop` clears audio; `rf.audio.gain` after that is `RFGRAPH_MEDIA_CONTRACT` at **compile**, not at encode  
+
+### Stage ports
+
+`ExecutionPlan.io` is parallel to `stages` (same length after `schedule_compiled`):
+
+```text
+StageIo {
+  index,
+  nodes: [NodeIndex],   // fused set
+  inputs,               // edges from *outside* the stage
+  outputs,              // consumed by a later stage or a GraphOutput
+}
+```
+
+`WriteControl` on `run_render_graph_with` / `run_execution_plan_with` reports `WriteStage::Plan` while walking those stages (`index` / `total` = stage count), then `Video` / `Audio` / `Mux` / `Done` on encode.
+
+### Redaction
+
+`RenderNodeKind::Redaction { redaction: RegionRedaction { masks, style } }` is one fused ROI pass. Styles: `Gaussian { sigma }`, `Pixelate { block_size }`, `Solid { color }`.
+
+Tracks JSON / `TrackedBlur` remain the **linear** adapter. Prefer `parse_track_timelines` (SightLoom-shaped JSON, no SightLoom crate) → `RegionRedaction::gaussian_tracks`. `MaskTimeline` is the ROI view, not the identity source.
+
+## VideoSurface (P1)
+
+`Frame` is still packed RGB/RGBA for effects. `VideoSurface` is the timed media object:
+
+```text
+VideoSurface {
+  format,          // file surface_at: Yuv420p / Nv12 / packed RGB
+  size,
+  planes[],        // packed RGB = one SurfacePlane; Yuv420p = Y+U+V; Nv12 = Y+UV
+  timestamp,       // MediaTime PTS
+  duration,        // this sample (PTS delta or 1/fps)
+  time_base,       // stream  num/den  from ffprobe
+  location,        // CpuPacked (RGB) / CpuPlanar (YUV)
+  color            // range, space, primaries, transfer
+}
+```
+
+```rust
+let clip = open_video(&OpenVideoOptions::new("in.mp4"))?;
+let s = clip.surface_at(Time::from_secs(1.0))?;
+let pts = s.timestamp();           // stream PTS when the file has a timing index
+let tb = s.time_base();            // 1/90000 etc.
+let range = s.color().range;       // Limited / Full from the file when tagged
+assert_eq!(s.format(), PixelFormat::Yuv420p); // typical H.264/H.265 file
+let y = s.plane(0).unwrap();       // luma, stride >= width
+let frame = clip.frame_at(Time::from_secs(1.0))?; // effects still get packed RGB
+```
+
+File clips override `surface_at` with a **native** rawvideo decode (`-pix_fmt yuv420p` / `nv12`, not RGB). 4:2:2 / 4:4:4 / 10-bit sources are converted in the YUV domain to 8-bit 4:2:0. PTS comes from the VFR/CFR table (`FrameTimingIndex`); color + `time_base` from `ffprobe`.
+
+`frame_at` is still packed RGB (effects / encode stdin). `to_frame()` on a YUV surface fails — use `frame_at`. Synthetic clips stay full-range RGB. GPU `MemoryLocation::External` is reserved.
+
+## Alpha
+
+`FrameFormat::Rgba8` is **straight** (unassociated) unless you call `frame.premultiply()`. `blit_over` reads `Frame::alpha_mode()` so premultiplied and straight sources composite the same. `Rgb8` / YUV surfaces are `AlphaMode::Opaque`.
+
+[`Mask`](GUIDE.md) is per-pixel **coverage** for compose / redaction — it is not a color-alpha channel and has no premultiply tag.
+
+## Audio timeline and resample
+
+```rust
+let wav = open_audio(&OpenAudioOptions::new("music.wav"))?;
+let tl = wav.timeline();
+let t = MediaTime::from_secs(0.25, wav.format().sample_rate)?;
+let start = tl.index_at(t);
+let chunk = wav.samples_at_media(t, 1024)?;
+let at_44k = chunk.resample(44_100)?;
+```
+
+`AudioFileClip` indexes PCM with `AudioTimeline` (tick math, not `floor(seconds × rate)`).  
+`resample` / `resample_linear` change **rate only** (layout unchanged). FFmpeg still does the decode-time rate when you pass `OpenAudioOptions` sample_rate. Default open is stereo; `with_native_layout()` / `with_layout(SampleLayout::Surround51)` keep or request more channels.
+
 ## Formats
 
-Anything your **ffmpeg build** supports for demux/mux. ReelForge’s in-process model is RGB8/RGBA8 frames and f32 PCM; conversion to yuv420p / AAC / GIF happens in the CLI encode step.
+Anything your **ffmpeg build** supports for demux/mux. The in-process clip graph (`frame_at` / effects) is still RGB8/RGBA8 + f32 PCM. File `surface_at` is native YUV/NV12 planes. Encode still converts RGB stdin to yuv420p / AAC / GIF in the CLI step.

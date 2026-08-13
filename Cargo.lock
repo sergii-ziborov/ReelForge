@@ -680,7 +680,9 @@ dependencies = [
  "reelforge-core",
  "reelforge-fx",
  "reelforge-io",
+ "reelforge-project",
  "reelforge-render-graph",
+ "reelforge-sightloom-adapter",
  "reelforge-text",
 ]
 
@@ -736,10 +738,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "reelforge-project"
+version = "0.1.5"
+dependencies = [
+ "reelforge-core",
+ "reelforge-render-graph",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "reelforge-render-graph"
 version = "0.1.5"
 dependencies = [
  "reelforge-core",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "reelforge-sightloom-adapter"
+version = "0.1.5"
+dependencies = [
+ "reelforge-core",
+ "reelforge-render-graph",
  "serde",
  "serde_json",
  "thiserror",

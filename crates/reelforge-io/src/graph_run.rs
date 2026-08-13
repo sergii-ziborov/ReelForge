@@ -1,7 +1,7 @@
-//! Execute [`RenderGraph`] / [`ExecutionPlan`] (M3 hybrid runner).
+﻿//! Execute [`RenderGraph`] / [`ExecutionPlan`] (M3 hybrid runner).
 //!
 //! ```text
-//! RenderGraph ──schedule──► ExecutionPlan ──run──► outputs on disk
+//! RenderGraph --schedule--> ExecutionPlan --run--> outputs on disk
 //! ```
 //!
 //! Linear DAGs and multi-input `rf.compose.layers` are supported. Adapter /
@@ -12,27 +12,17 @@
 use crate::control::{WriteControl, WriteProgress, WriteStage};
 use crate::error::{IoError, Result};
 use crate::filtergraph::{FilterGraph, FilterOp};
-use crate::mask_bridge::{apply_region_redaction, region_redaction_from_value};
+use crate::mask_bridge::apply_region_redaction;
 use crate::options::{OpenVideoOptions, WriteVideoOptions};
 use crate::stage_cache::StageCache;
 use crate::video_file::open_video;
 use crate::{run_filtergraph, write_av_with, write_video_with};
-use reelforge_compose::{
-    CompositeLayer, MixTrack, composite_video, composite_video_with_background, mix_audio,
-};
-use reelforge_core::{
-    AudioClip, AudioEffect, Duration, Position, Rgb8, Size, Time, VideoClip, VideoEffect,
-    subclip_audio, subclip_video,
-};
-use reelforge_fx::{
-    BlackAndWhite, Crop, EvenSize, FadeIn, FadeOut, InvertColors, MirrorX, MirrorY, Painting,
-    Resize, Rotate, VolumeGain,
-};
+use reelforge_core::{AudioClip, VideoClip};
 use reelforge_render_graph::{
     BackendClass, CompiledOp, ExecutionPlan, ExecutionStage, MediaAssetId, NodeId, OperationId,
     OperationRegistry, RENDER_GRAPH_VERSION, RenderGraph, RenderNode, RenderNodeKind,
-    StageCacheKey, TypedParams, compile_op, fingerprint_stage_key, is_executable_op_id,
-    schedule_graph,
+    StageCacheKey, TypedParams, artifact_manifest, compile_graph, compile_op,
+    fingerprint_stage_key, is_executable_op_id, schedule_compiled, schedule_graph,
 };
 use std::collections::{HashMap, HashSet};
 use std::hash::BuildHasher;
@@ -67,9 +57,9 @@ pub struct GraphBundle {
 
 /// One node product while walking the DAG.
 #[derive(Clone)]
-struct NodeMedia {
-    video: Arc<dyn VideoClip>,
-    audio: Option<Arc<dyn AudioClip>>,
+pub(crate) struct NodeMedia {
+    pub(crate) video: Arc<dyn VideoClip>,
+    pub(crate) audio: Option<Arc<dyn AudioClip>>,
 }
 
 /// Options for [`run_render_graph_with`].
@@ -83,7 +73,7 @@ pub struct GraphRunOptions {
     pub video_codec: Option<String>,
     /// Override CRF.
     pub crf: Option<u8>,
-    /// Optional full-run stage cache (fingerprint → artifact).
+    /// Optional full-run stage cache (fingerprint â†’ artifact).
     pub cache: Option<StageCache>,
     /// Open source files with audio and mux when present (default `true`).
     ///
@@ -229,6 +219,19 @@ pub fn run_render_graph_with(
     control: &WriteControl,
     options: &GraphRunOptions,
 ) -> Result<()> {
+    run_render_graph_with_manifest(graph, control, options).map(|_| ())
+}
+
+/// Run a graph and return the sealed [`ArtifactManifest`] (output URIs + file hashes).
+///
+/// # Errors
+///
+/// Same as [`run_render_graph_with`].
+pub fn run_render_graph_with_manifest(
+    graph: &RenderGraph,
+    control: &WriteControl,
+    options: &GraphRunOptions,
+) -> Result<reelforge_render_graph::ArtifactManifest> {
     graph
         .validate()
         .map_err(|e| IoError::message(e.to_string()))?;
@@ -241,9 +244,10 @@ pub fn run_render_graph_with(
     if graph.outputs.is_empty() {
         return Err(IoError::message("RenderGraph has no outputs"));
     }
-    let plan =
-        schedule_graph(graph, &options.registry).map_err(|e| IoError::message(e.to_string()))?;
-    run_execution_plan_with(graph, &plan, control, options)
+    let compiled =
+        compile_graph(graph, &options.registry).map_err(|e| IoError::message(e.to_string()))?;
+    let plan = schedule_compiled(&compiled).map_err(|e| IoError::message(e.to_string()))?;
+    execute_plan_and_seal(graph, &compiled, &plan, control, options)
 }
 
 /// Execute a pre-built [`ExecutionPlan`] against its source graph.
@@ -274,6 +278,32 @@ pub fn run_execution_plan_with(
     control: &WriteControl,
     options: &GraphRunOptions,
 ) -> Result<()> {
+    run_execution_plan_with_manifest(graph, plan, control, options).map(|_| ())
+}
+
+/// Execute a plan and return the sealed [`reelforge_render_graph::ArtifactManifest`].
+///
+/// # Errors
+///
+/// Same as [`run_execution_plan_with`].
+pub fn run_execution_plan_with_manifest(
+    graph: &RenderGraph,
+    plan: &ExecutionPlan,
+    control: &WriteControl,
+    options: &GraphRunOptions,
+) -> Result<reelforge_render_graph::ArtifactManifest> {
+    let compiled =
+        compile_graph(graph, &options.registry).map_err(|e| IoError::message(e.to_string()))?;
+    execute_plan_and_seal(graph, &compiled, plan, control, options)
+}
+
+fn execute_plan_and_seal(
+    graph: &RenderGraph,
+    compiled: &reelforge_render_graph::CompiledGraph,
+    plan: &ExecutionPlan,
+    control: &WriteControl,
+    options: &GraphRunOptions,
+) -> Result<reelforge_render_graph::ArtifactManifest> {
     graph
         .validate()
         .map_err(|e| IoError::message(e.to_string()))?;
@@ -291,7 +321,7 @@ pub fn run_execution_plan_with(
     {
         restore_cached_outputs(graph, &cached)?;
         control.report(WriteProgress::new(WriteStage::Done, 1, 1));
-        return Ok(());
+        return finish_manifest(compiled, plan, None);
     }
 
     // Hybrid FFmpeg prefix is video-only; skip when we want companion audio.
@@ -304,7 +334,7 @@ pub fn run_execution_plan_with(
         {
             let _ = cache.store_copy(fp, "mp4", out);
         }
-        return Ok(());
+        return finish_manifest(compiled, plan, resolve_output_path(graph));
     }
 
     let seeds = HashMap::new();
@@ -327,12 +357,36 @@ pub fn run_execution_plan_with(
         &bundle.hints,
         control,
     )?;
+    let written = resolve_output_path(graph).or(bundle.hints.output_path.clone());
     if let (Some(cache), Some(fp)) = (&options.cache, &run_fp)
-        && let Some(out) = resolve_output_path(graph).or(bundle.hints.output_path.clone())
+        && let Some(out) = &written
     {
         let _ = cache.store_copy(fp, "mp4", out);
     }
-    Ok(())
+    finish_manifest(compiled, plan, written)
+}
+
+fn finish_manifest(
+    compiled: &reelforge_render_graph::CompiledGraph,
+    plan: &ExecutionPlan,
+    extra_uri: Option<String>,
+) -> Result<reelforge_render_graph::ArtifactManifest> {
+    let mut manifest = artifact_manifest(compiled, plan);
+    if let Some(uri) = extra_uri {
+        for art in manifest.outputs.iter_mut().chain(
+            manifest
+                .stages
+                .iter_mut()
+                .flat_map(|s| s.artifacts.iter_mut()),
+        ) {
+            if art.uri.is_none() && matches!(art.kind, reelforge_render_graph::ArtifactKind::Output)
+            {
+                art.uri = Some(uri.clone());
+            }
+        }
+    }
+    crate::manifest_seal::seal_manifest_on_disk(&mut manifest)?;
+    Ok(manifest)
 }
 
 fn reject_unsupported_stages(plan: &ExecutionPlan) -> Result<()> {
@@ -474,7 +528,7 @@ pub fn materialize_execution_plan<S: BuildHasher, A: BuildHasher>(
         if let Some(c) = control {
             c.check_cancel()?;
             #[allow(clippy::cast_possible_truncation)]
-            c.report(WriteProgress::new(WriteStage::Video, si as u64, total_u));
+            c.report(WriteProgress::new(WriteStage::Plan, si as u64, total_u));
         }
 
         let node_ids = stage.node_ids();
@@ -557,22 +611,18 @@ impl<'a> MaterializeCtx<'a> {
                 audio_seeds,
                 self.hints.preserve_audio,
             )?,
-            RenderNodeKind::Op { operation, params }
-                if operation.as_str() == "rf.compose.layers" =>
-            {
-                let inputs = multi_input_media(node, &self.produced)?;
-                let videos: Vec<_> = inputs.iter().map(|m| Arc::clone(&m.video)).collect();
-                let audio = inputs.first().and_then(|m| m.audio.clone());
-                let video = apply_compose_layers(videos, params, self.registry)?;
-                NodeMedia { video, audio }
-            }
-            RenderNodeKind::Op { operation, params } if operation.as_str() == "rf.audio.mix" => {
-                let inputs = multi_input_media(node, &self.produced)?;
-                apply_audio_mix(inputs, params, self.registry)?
-            }
             RenderNodeKind::Op { operation, params } => {
-                let input = single_input_media(node, &self.produced)?;
-                apply_registered_op_media(input, operation, params, self.registry, &mut self.hints)?
+                let compiled = compile_op(self.registry, operation, params)
+                    .map_err(|e| IoError::message(e.to_string()))?;
+                let inputs = match compiled.params.executor_kind() {
+                    reelforge_render_graph::ExecutorKind::Nary => {
+                        multi_input_media(node, &self.produced)?
+                    }
+                    reelforge_render_graph::ExecutorKind::Unary => {
+                        vec![single_input_media(node, &self.produced)?]
+                    }
+                };
+                crate::exec::execute_compiled(&compiled, inputs, &mut self.hints)?
             }
             RenderNodeKind::Redaction { redaction } => {
                 let input = single_input_media(node, &self.produced)?;
@@ -683,17 +733,43 @@ fn resolve_source<S: BuildHasher, A: BuildHasher>(
             asset.0, meta.uri
         )));
     }
+    if meta.role.as_deref() == Some("audio") {
+        return resolve_audio_source(meta);
+    }
     let mut opts = OpenVideoOptions::new(&meta.uri);
     if !with_audio {
         opts = opts.video_only();
     }
-    let opened = open_video(&opts)?;
-    let audio = opened
-        .audio()
-        .map(|a| Arc::new(a.clone()) as Arc<dyn AudioClip>);
+    match open_video(&opts) {
+        Ok(opened) => {
+            let audio = opened
+                .audio()
+                .map(|a| Arc::new(a.clone()) as Arc<dyn AudioClip>);
+            Ok(NodeMedia {
+                video: Arc::new(opened),
+                audio,
+            })
+        }
+        Err(_) => resolve_audio_source(meta),
+    }
+}
+
+fn resolve_audio_source(meta: &reelforge_render_graph::MediaAsset) -> Result<NodeMedia> {
+    use crate::audio_file::open_audio;
+    use crate::options::OpenAudioOptions;
+    use reelforge_core::{ColorClip, Duration, Rgb8, Size};
+
+    let audio = open_audio(&OpenAudioOptions::new(&meta.uri))?;
+    let duration = audio.duration();
+    let duration = if duration.is_positive() {
+        duration
+    } else {
+        Duration::from_secs(0.04)
+    };
+    let video = ColorClip::new(Size::new(2, 2), Rgb8::BLACK, duration);
     Ok(NodeMedia {
-        video: Arc::new(opened),
-        audio,
+        video: Arc::new(video),
+        audio: Some(Arc::new(audio)),
     })
 }
 
@@ -734,311 +810,6 @@ fn multi_input_media(
         clips.push(c);
     }
     Ok(clips)
-}
-
-fn apply_audio_mix(
-    inputs: Vec<NodeMedia>,
-    params: &serde_json::Value,
-    registry: &OperationRegistry,
-) -> Result<NodeMedia> {
-    let compiled = compile_op(registry, &OperationId::new("rf.audio.mix"), params)
-        .map_err(|e| IoError::message(e.to_string()))?;
-    let TypedParams::AudioMix {
-        tracks: track_value,
-    } = compiled.params
-    else {
-        return Err(IoError::message("internal: expected AudioMix params"));
-    };
-    if inputs.is_empty() {
-        return Err(IoError::message("rf.audio.mix needs at least one input"));
-    }
-    let video = Arc::clone(&inputs[0].video);
-    let track_params = track_value.as_array();
-    let mut tracks = Vec::new();
-    for (i, m) in inputs.into_iter().enumerate() {
-        let Some(audio) = m.audio else {
-            continue;
-        };
-        let mut track = MixTrack::new(audio);
-        if let Some(arr) = track_params
-            && let Some(tp) = arr.get(i)
-        {
-            if let Some(g) = tp.get("gain").and_then(serde_json::Value::as_f64) {
-                #[allow(clippy::cast_possible_truncation)]
-                {
-                    track = track.with_gain(g as f32);
-                }
-            }
-            if let Some(s) = tp.get("start").and_then(serde_json::Value::as_f64) {
-                track = track.with_start(Time::from_secs(s));
-            }
-        }
-        tracks.push(track);
-    }
-    if tracks.is_empty() {
-        return Err(IoError::message(
-            "rf.audio.mix: no input carries audio to mix",
-        ));
-    }
-    let mixed = mix_audio(tracks).map_err(|e| IoError::message(e.to_string()))?;
-    Ok(NodeMedia {
-        video,
-        audio: Some(mixed),
-    })
-}
-
-fn apply_compose_layers(
-    inputs: Vec<Arc<dyn VideoClip>>,
-    params: &serde_json::Value,
-    registry: &OperationRegistry,
-) -> Result<Arc<dyn VideoClip>> {
-    let compiled = compile_op(registry, &OperationId::new("rf.compose.layers"), params)
-        .map_err(|e| IoError::message(e.to_string()))?;
-    let TypedParams::ComposeLayers {
-        w,
-        h,
-        layers: layer_value,
-        background,
-    } = compiled.params
-    else {
-        return Err(IoError::message("internal: expected ComposeLayers params"));
-    };
-    if inputs.is_empty() {
-        return Err(IoError::message("rf.compose.layers needs inputs"));
-    }
-
-    let size = if let (Some(w), Some(h)) = (w, h) {
-        Size::new(w, h)
-    } else {
-        inputs[0].size()
-    };
-
-    let layer_params = layer_value.as_array();
-    let mut layers = Vec::with_capacity(inputs.len());
-    for (i, clip) in inputs.into_iter().enumerate() {
-        let mut layer =
-            CompositeLayer::new(clip).with_layer_index(i32::try_from(i).unwrap_or(i32::MAX));
-        if let Some(arr) = layer_params
-            && let Some(lp) = arr.get(i)
-        {
-            let x = lp.get("x").and_then(serde_json::Value::as_i64).unwrap_or(0);
-            let y = lp.get("y").and_then(serde_json::Value::as_i64).unwrap_or(0);
-            #[allow(clippy::cast_possible_truncation)]
-            {
-                layer = layer.with_position(Position::absolute(x as i32, y as i32));
-            }
-            if let Some(op) = lp.get("opacity").and_then(serde_json::Value::as_f64) {
-                #[allow(clippy::cast_possible_truncation)]
-                {
-                    layer = layer.with_opacity(op as f32);
-                }
-            }
-            if let Some(start) = lp.get("start").and_then(serde_json::Value::as_f64) {
-                layer = layer.with_start(Time::from_secs(start));
-            }
-            if let Some(idx) = lp.get("layer_index").and_then(serde_json::Value::as_i64) {
-                #[allow(clippy::cast_possible_truncation)]
-                {
-                    layer = layer.with_layer_index(idx as i32);
-                }
-            }
-        }
-        layers.push(layer);
-    }
-
-    if let Some(bg) = background {
-        let r = bg.get("r").and_then(serde_json::Value::as_u64).unwrap_or(0);
-        let g = bg.get("g").and_then(serde_json::Value::as_u64).unwrap_or(0);
-        let b = bg.get("b").and_then(serde_json::Value::as_u64).unwrap_or(0);
-        #[allow(clippy::cast_possible_truncation)]
-        let color = Rgb8::new(r as u8, g as u8, b as u8);
-        composite_video_with_background(size, color, layers)
-            .map_err(|e| IoError::message(e.to_string()))
-    } else {
-        composite_video(size, layers).map_err(|e| IoError::message(e.to_string()))
-    }
-}
-
-/// Apply a registered op after typed compile (registry + params → [`TypedParams`]).
-#[allow(clippy::too_many_lines, clippy::cast_possible_truncation)]
-fn apply_registered_op_media(
-    input: NodeMedia,
-    operation: &OperationId,
-    params: &serde_json::Value,
-    registry: &OperationRegistry,
-    hints: &mut GraphEncodeHints,
-) -> Result<NodeMedia> {
-    let compiled =
-        compile_op(registry, operation, params).map_err(|e| IoError::message(e.to_string()))?;
-
-    match &compiled.params {
-        TypedParams::AudioGain { factor } => {
-            let audio = match input.audio {
-                Some(a) => Some(VolumeGain::new(*factor).apply(a).map_err(IoError::from)?),
-                None => None,
-            };
-            Ok(NodeMedia {
-                video: input.video,
-                audio,
-            })
-        }
-        TypedParams::AudioDrop => {
-            hints.preserve_audio = false;
-            Ok(NodeMedia {
-                video: input.video,
-                audio: None,
-            })
-        }
-        TypedParams::AudioPreserve => {
-            hints.preserve_audio = true;
-            Ok(input)
-        }
-        TypedParams::AudioMix { .. } => Err(IoError::message(
-            "rf.audio.mix must be applied with multi-input materialize path",
-        )),
-        TypedParams::Trim { start, duration } => {
-            let video = subclip_video(
-                Arc::clone(&input.video),
-                Time::from_secs(*start),
-                Duration::from_secs(*duration),
-            )
-            .map_err(IoError::from)?;
-            let audio = match input.audio {
-                Some(a) => Some(
-                    subclip_audio(a, Time::from_secs(*start), Duration::from_secs(*duration))
-                        .map_err(IoError::from)?,
-                ),
-                None => None,
-            };
-            Ok(NodeMedia { video, audio })
-        }
-        other => {
-            let video = apply_typed_video(Arc::clone(&input.video), other, hints)?;
-            Ok(NodeMedia {
-                video,
-                audio: input.audio,
-            })
-        }
-    }
-}
-
-/// Execute typed video/encode params (no free-form JSON field peeks).
-#[allow(clippy::too_many_lines, clippy::cast_possible_truncation)]
-fn apply_typed_video(
-    clip: Arc<dyn VideoClip>,
-    params: &TypedParams,
-    hints: &mut GraphEncodeHints,
-) -> Result<Arc<dyn VideoClip>> {
-    match params {
-        TypedParams::Trim { start, duration } => subclip_video(
-            clip,
-            Time::from_secs(*start),
-            Duration::from_secs(*duration),
-        )
-        .map_err(IoError::from),
-        TypedParams::HFlip => MirrorX.apply(clip).map_err(IoError::from),
-        TypedParams::VFlip => MirrorY.apply(clip).map_err(IoError::from),
-        TypedParams::EvenDims => EvenSize.apply(clip).map_err(IoError::from),
-        TypedParams::Scale { w, h } => Resize::to(Size::new(*w, *h))
-            .apply(clip)
-            .map_err(IoError::from),
-        TypedParams::Crop { x, y, w, h } => {
-            Crop::new(*x, *y, *w, *h).apply(clip).map_err(IoError::from)
-        }
-        TypedParams::Rotate { mode, degrees } => apply_rotate_typed(clip, mode, *degrees),
-        TypedParams::FadeIn { duration } => FadeIn::new(Duration::from_secs(*duration))
-            .apply(clip)
-            .map_err(IoError::from),
-        TypedParams::FadeOut { duration } => FadeOut::new(Duration::from_secs(*duration))
-            .apply(clip)
-            .map_err(IoError::from),
-        TypedParams::BlackAndWhite => BlackAndWhite.apply(clip).map_err(IoError::from),
-        TypedParams::Invert => InvertColors.apply(clip).map_err(IoError::from),
-        TypedParams::Painting { saturation, black } => {
-            let paint = match (saturation, black) {
-                (Some(s), Some(b)) => Painting::with(*s, *b),
-                (Some(s), None) => Painting {
-                    saturation: *s,
-                    ..Painting::new()
-                },
-                (None, Some(b)) => Painting {
-                    black: *b,
-                    ..Painting::new()
-                },
-                (None, None) => Painting::new(),
-            };
-            paint.apply(clip).map_err(IoError::from)
-        }
-        TypedParams::Redaction { value } => {
-            let empty = value.is_null() || value.as_object().is_some_and(serde_json::Map::is_empty);
-            if empty {
-                return Err(IoError::message(
-                    "rf.redaction.region requires masks params (or use Redaction node)",
-                ));
-            }
-            let redaction = region_redaction_from_value(value)?;
-            apply_region_redaction(clip, &redaction)
-        }
-        TypedParams::ComposeLayers { .. } => Err(IoError::message(
-            "rf.compose.layers must be applied with multi-input materialize path",
-        )),
-        TypedParams::AudioGain { .. }
-        | TypedParams::AudioDrop
-        | TypedParams::AudioPreserve
-        | TypedParams::AudioMix { .. } => {
-            // Audio handled in apply_registered_op_media; video passthrough.
-            Ok(clip)
-        }
-        TypedParams::EncodeH264 {
-            path,
-            crf,
-            codec,
-            fps,
-            preserve_audio,
-        } => {
-            if let Some(p) = path {
-                hints.output_path = Some(p.clone());
-            }
-            if let Some(c) = crf {
-                hints.crf = Some(*c);
-            }
-            if let Some(c) = codec {
-                hints.video_codec = Some(c.clone());
-            } else {
-                hints.video_codec.get_or_insert_with(|| "libx264".into());
-            }
-            if let Some(f) = fps {
-                hints.fps = Some(*f);
-            }
-            if let Some(pa) = preserve_audio {
-                hints.preserve_audio = *pa;
-            }
-            Ok(clip)
-        }
-    }
-}
-
-fn apply_rotate_typed(
-    clip: Arc<dyn VideoClip>,
-    mode: &str,
-    degrees: Option<f64>,
-) -> Result<Arc<dyn VideoClip>> {
-    let rot = match mode {
-        "cw90" | "90" => Rotate::cw90(),
-        "cw180" | "180" => Rotate::half(),
-        "cw270" | "270" | "ccw90" => Rotate::cw270(),
-        "degrees" => {
-            let d = degrees.ok_or_else(|| IoError::message("rotate mode=degrees needs degrees"))?;
-            #[allow(clippy::cast_possible_truncation)]
-            Rotate::degrees(d as f32)
-        }
-        other => {
-            return Err(IoError::message(format!(
-                "unknown rotate mode '{other}' (cw90|cw180|cw270|degrees)"
-            )));
-        }
-    };
-    rot.apply(clip).map_err(IoError::from)
 }
 
 fn merge_option_hints(hints: &mut GraphEncodeHints, options: &GraphRunOptions) {
@@ -1204,6 +975,9 @@ fn try_hybrid_ffmpeg_prefix(
         .ok_or_else(|| IoError::message("hybrid run needs GraphOutput.uri or encode path"))?;
 
     control.check_cancel()?;
+    #[allow(clippy::cast_possible_truncation)]
+    let plan_total = plan.stages.len() as u64;
+    control.report(WriteProgress::new(WriteStage::Plan, 0, plan_total));
     let mid = temp_graph_path(Path::new(&out_path), "rf-g-pfx");
     let vf = filter.to_vf().map_err(IoError::message)?;
     let node_id_strs: Vec<String> = first.nodes.iter().map(|n| n.0.clone()).collect();
@@ -1224,7 +998,9 @@ fn try_hybrid_ffmpeg_prefix(
             let _ = cache.store_copy(&stage_fp, "mp4", &mid);
         }
     }
-    control.report(WriteProgress::new(WriteStage::Video, 0, 1));
+    if plan_total > 1 {
+        control.report(WriteProgress::new(WriteStage::Plan, 1, plan_total));
+    }
 
     let mut reduced = strip_and_rewire(graph, &strip_ids);
     if let Some(asset) = reduced.assets.first_mut() {
@@ -1249,21 +1025,23 @@ fn resolve_output_path(graph: &RenderGraph) -> Option<String> {
     if let Some(uri) = graph.outputs.iter().find_map(|o| o.uri.clone()) {
         return Some(uri);
     }
-    graph.nodes.iter().find_map(|n| match &n.body {
-        RenderNodeKind::Op { operation, params } if operation.as_str() == "rf.encode.h264" => {
-            params
-                .get("path")
-                .and_then(|v| v.as_str())
-                .map(str::to_string)
+    let registry = OperationRegistry::with_builtins();
+    graph.nodes.iter().find_map(|n| {
+        let RenderNodeKind::Op { operation, params } = &n.body else {
+            return None;
+        };
+        let compiled = compile_op(&registry, operation, params).ok()?;
+        match compiled.params {
+            TypedParams::EncodeH264 { path, .. } => path,
+            _ => None,
         }
-        _ => None,
     })
 }
 
 /// Remove applied nodes and rewire consumers to each removed node's single input.
 fn strip_and_rewire(graph: &RenderGraph, strip: &HashSet<String>) -> RenderGraph {
     let mut g = graph.clone();
-    // Map stripped id → its upstream (single input).
+    // Map stripped id â†’ its upstream (single input).
     let mut replace: HashMap<String, String> = HashMap::new();
     for n in &graph.nodes {
         if strip.contains(&n.id.0)
@@ -1327,7 +1105,7 @@ pub fn node_backend(node: &RenderNode, registry: &OperationRegistry) -> Option<B
 #[cfg(test)]
 mod tests {
     use super::*;
-    use reelforge_core::{ColorClip, MediaTime, Rgb8, Size};
+    use reelforge_core::{ColorClip, Duration, MediaTime, Rgb8, Size, Time};
     use reelforge_render_graph::{
         GraphOutput, MaskSample, MaskTimeline, MediaAsset, MediaAssetId, RENDER_GRAPH_VERSION,
         RegionRedaction, RenderNode,
@@ -1464,6 +1242,54 @@ mod tests {
         assert_eq!(full.hints.crf, staged.hints.crf);
         assert_eq!(full.hints.output_path, staged.hints.output_path);
         let _ = staged.video.frame_at(Time::ZERO).unwrap();
+    }
+
+    #[test]
+    fn execution_plan_reports_plan_stage_progress() {
+        let g = linear_redaction_graph();
+        let registry = OperationRegistry::with_builtins();
+        let plan = schedule_graph(&g, &registry).unwrap();
+        let seed: Arc<dyn VideoClip> = Arc::new(ColorClip::new(
+            Size::new(16, 16),
+            Rgb8::WHITE,
+            Duration::from_secs(1.0),
+        ));
+        let mut seeds = HashMap::new();
+        seeds.insert(MediaAssetId("a".into()), seed);
+        let audio: HashMap<MediaAssetId, Arc<dyn AudioClip>> = HashMap::new();
+
+        let hits = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let hits2 = Arc::clone(&hits);
+        let control = WriteControl::new().with_progress(move |p| {
+            hits2.lock().unwrap().push((p.stage, p.index, p.total));
+        });
+
+        materialize_execution_plan(
+            &g,
+            &plan,
+            &registry,
+            &seeds,
+            &audio,
+            true,
+            Some(&control),
+            None,
+        )
+        .unwrap();
+
+        let events = hits.lock().unwrap().clone();
+        let plan_events: Vec<_> = events
+            .iter()
+            .copied()
+            .filter(|(s, _, _)| *s == WriteStage::Plan)
+            .collect();
+        assert_eq!(plan_events.len(), plan.stage_count());
+        assert_eq!(plan_events[0].0, WriteStage::Plan);
+        assert_eq!(plan_events[0].1, 0);
+        assert_eq!(
+            usize::try_from(plan_events[0].2).unwrap(),
+            plan.stage_count()
+        );
+        assert!(events.iter().all(|(s, _, _)| *s != WriteStage::Video));
     }
 
     #[test]

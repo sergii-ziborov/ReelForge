@@ -1,5 +1,6 @@
 //! Raster frames and alpha masks.
 
+use crate::alpha::AlphaMode;
 use crate::color::{Rgb8, Rgba8};
 use crate::error::{CoreError, Result};
 use crate::layout::Size;
@@ -31,6 +32,7 @@ impl FrameFormat {
 pub struct Frame {
     size: Size,
     format: FrameFormat,
+    pub(crate) alpha: AlphaMode,
     data: Arc<Vec<u8>>,
 }
 
@@ -57,6 +59,7 @@ impl Frame {
         Ok(Self {
             size,
             format,
+            alpha: AlphaMode::for_frame_format(format),
             data: Arc::new(data),
         })
     }
@@ -76,6 +79,7 @@ impl Frame {
         Ok(Self {
             size,
             format,
+            alpha: AlphaMode::for_frame_format(format),
             data: Arc::new(vec![0; len]),
         })
     }

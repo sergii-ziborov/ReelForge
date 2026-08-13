@@ -1,11 +1,13 @@
 //! Alpha compositing of child frames onto a canvas.
 
-use reelforge_core::{CoreError, Frame, FrameFormat, Mask, Result, Rgb8, Size};
+use reelforge_core::{AlphaMode, CoreError, Frame, FrameFormat, Mask, Result, Rgb8, Size};
 
 /// Paint `src` onto `dst` (RGB8 canvas) at top-left `(ox, oy)` with coverage.
 ///
 /// `opacity` is a global multiplier in `0.0..=1.0`. When `mask` is present it
 /// must match `src.size()`; values are additional per-pixel coverage.
+/// RGBA sources use [`reelforge_core::Frame::alpha_mode`]: straight (default)
+/// or premultiplied.
 ///
 /// # Errors
 ///
@@ -79,6 +81,7 @@ pub fn blit_over(
             }
         }
         FrameFormat::Rgba8 => {
+            let premul = src.alpha_mode() == AlphaMode::Premultiplied;
             for sy in 0..child.height {
                 let cy = oy + sy.cast_signed();
                 if cy < 0 || cy >= canvas_h {
@@ -94,15 +97,26 @@ pub fn blit_over(
                     let cx_u = cx as usize;
                     let sx_u = sx as usize;
                     let si = (sy_u * sw + sx_u) * 4;
-                    let mut a = opacity * (f32::from(src_data[si + 3]) / 255.0);
+                    let src_a = f32::from(src_data[si + 3]) / 255.0;
+                    let mut extra = opacity;
                     if let Some(md) = mask_data {
-                        a *= md[sy_u * sw + sx_u].clamp(0.0, 1.0);
+                        extra *= md[sy_u * sw + sx_u].clamp(0.0, 1.0);
                     }
-                    if a <= 0.0 {
+                    let coverage = extra * src_a;
+                    if coverage <= 0.0 {
                         continue;
                     }
                     let di = (cy_u * cw + cx_u) * 3;
-                    blend_rgb(&mut dst_data[di..di + 3], &src_data[si..si + 3], a);
+                    if premul {
+                        blend_premul(
+                            &mut dst_data[di..di + 3],
+                            &src_data[si..si + 3],
+                            extra,
+                            coverage,
+                        );
+                    } else {
+                        blend_rgb(&mut dst_data[di..di + 3], &src_data[si..si + 3], coverage);
+                    }
                 }
             }
         }
@@ -128,6 +142,20 @@ fn blend_rgb(dst: &mut [u8], src: &[u8], alpha: f32) {
     let inv = 1.0 - alpha;
     for i in 0..3 {
         let v = f32::from(src[i]) * alpha + f32::from(dst[i]) * inv;
+        dst[i] = v.round().clamp(0.0, 255.0) as u8;
+    }
+}
+
+/// `src` is already scaled by its own alpha; `extra` is opacity × mask.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+fn blend_premul(dst: &mut [u8], src: &[u8], extra: f32, coverage: f32) {
+    let inv = 1.0 - coverage;
+    for i in 0..3 {
+        let v = f32::from(src[i]) * extra + f32::from(dst[i]) * inv;
         dst[i] = v.round().clamp(0.0, 255.0) as u8;
     }
 }
@@ -163,5 +191,17 @@ mod tests {
         let src = Frame::solid_rgba(Size::new(1, 1), Rgba8::new(255, 0, 0, 128)).unwrap();
         blit_over(&mut canvas, &src, 0, 0, 1.0, None).unwrap();
         assert!(canvas.data()[0] > 0);
+    }
+
+    #[test]
+    fn blit_premultiplied_matches_straight() {
+        let straight = Frame::solid_rgba(Size::new(1, 1), Rgba8::new(255, 0, 0, 128)).unwrap();
+        let premul = straight.clone().premultiply().unwrap();
+        let mut a = solid_canvas(Size::new(1, 1), Rgb8::BLACK).unwrap();
+        let mut b = solid_canvas(Size::new(1, 1), Rgb8::BLACK).unwrap();
+        blit_over(&mut a, &straight, 0, 0, 1.0, None).unwrap();
+        blit_over(&mut b, &premul, 0, 0, 1.0, None).unwrap();
+        assert_eq!(a.data()[0], b.data()[0]);
+        assert!((i16::from(a.data()[0]) - 128).abs() <= 1);
     }
 }

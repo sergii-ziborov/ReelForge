@@ -7,7 +7,7 @@
 
 use crate::error::{IoError, Result};
 use crate::ffmpeg::FfmpegTools;
-use crate::filtergraph::FilterGraph;
+use crate::filtergraph::{FilterGraph, FiltergraphRunOptions, run_filtergraph_with};
 use crate::options::WriteVideoOptions;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -118,53 +118,26 @@ pub fn run_filtergraph_encode(
     graph: &FilterGraph,
     options: &WriteVideoOptions,
 ) -> Result<()> {
-    let tools = FfmpegTools::discover()?;
-    let vf = graph.to_vf().map_err(IoError::message)?;
-    let input = input.as_ref();
-    let output_path = output.as_ref();
-    if !input.is_file() {
-        return Err(IoError::message(format!(
-            "input not found: {}",
-            input.display()
-        )));
+    let mut opts = FiltergraphRunOptions::new();
+    if let Some(codec) = &options.video_codec {
+        opts = opts.with_video_codec(codec.clone());
     }
-    if let Some(parent) = output_path.parent()
-        && !parent.as_os_str().is_empty()
-        && !parent.exists()
-    {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| IoError::message(format!("create output dir: {e}")))?;
-    }
-
-    let codec = options.video_codec.as_deref().unwrap_or("libx264");
-    let pix = options.pixel_format.as_deref().unwrap_or("yuv420p");
-
-    let mut cmd = Command::new(&tools.ffmpeg);
-    cmd.args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
-        .arg(input)
-        .args(["-vf", &vf, "-an", "-c:v", codec, "-pix_fmt", pix]);
     if let Some(crf) = options.crf {
-        cmd.args(["-crf", &crf.to_string()]);
+        opts = opts.with_crf(crf);
+    }
+    if let Some(pix) = &options.pixel_format {
+        opts = opts.with_pixel_format(pix.clone());
     }
     if !options.extra_ffmpeg_args.is_empty() {
-        cmd.args(&options.extra_ffmpeg_args);
+        opts = opts.with_extra_args(options.extra_ffmpeg_args.iter().cloned());
     }
-    // Cap duration if requested (seconds).
     if let Some(dur) = options.duration {
-        cmd.args(["-t", &format!("{:.6}", dur.as_secs())]);
+        opts = opts.with_duration_secs(dur.as_secs());
     }
-    cmd.arg(output_path);
-
-    let status = cmd
-        .status()
-        .map_err(|e| IoError::process(format!("ffmpeg realtime encode spawn failed: {e}")))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(IoError::process(format!(
-            "ffmpeg realtime encode failed with {status}"
-        )))
+    if let Some(ac) = &options.audio_codec {
+        opts = opts.with_audio_codec(ac.clone());
     }
+    run_filtergraph_with(input, output, graph, &opts)
 }
 
 /// Fluent builder for file-based realtime exports.

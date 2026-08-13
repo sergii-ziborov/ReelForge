@@ -83,6 +83,11 @@ pub enum TypedParams {
         /// Duration seconds.
         duration: f64,
     },
+    /// `rf.transform.speed`
+    Speed {
+        /// Playback factor (`2.0` = twice as fast).
+        factor: f64,
+    },
     /// `rf.color.black_and_white`
     BlackAndWhite,
     /// `rf.color.invert`
@@ -207,6 +212,7 @@ pub fn is_executable_op_id(id: &str) -> bool {
             | "rf.transform.rotate"
             | "rf.transform.fade_in"
             | "rf.transform.fade_out"
+            | "rf.transform.speed"
             | "rf.color.black_and_white"
             | "rf.color.invert"
             | "rf.color.painting"
@@ -218,6 +224,17 @@ pub fn is_executable_op_id(id: &str) -> bool {
             | "rf.audio.mix"
             | "rf.encode.h264"
     )
+}
+
+impl TypedParams {
+    /// Input arity for the bound I/O executor.
+    #[must_use]
+    pub const fn executor_kind(&self) -> crate::op::ExecutorKind {
+        match self {
+            Self::ComposeLayers { .. } | Self::AudioMix { .. } => crate::op::ExecutorKind::Nary,
+            _ => crate::op::ExecutorKind::Unary,
+        }
+    }
 }
 
 /// Validate that every registered builtin used in graphs has an executor.
@@ -415,6 +432,19 @@ fn parse_typed_params(id: &str, raw: &Value) -> Result<TypedParams> {
         "rf.transform.fade_in" => Ok(TypedParams::FadeIn {
             duration: time_field(raw, "duration").unwrap_or(0.5),
         }),
+        "rf.transform.speed" => {
+            let factor = f64_field(raw, "factor").ok_or_else(|| GraphError::InvalidParams {
+                operation: id.into(),
+                message: "factor required".into(),
+            })?;
+            if !(factor.is_finite() && factor > 0.0) {
+                return Err(GraphError::InvalidParams {
+                    operation: id.into(),
+                    message: format!("speed factor must be > 0, got {factor}"),
+                });
+            }
+            Ok(TypedParams::Speed { factor })
+        }
         "rf.transform.fade_out" => Ok(TypedParams::FadeOut {
             duration: time_field(raw, "duration").unwrap_or(0.5),
         }),
@@ -567,6 +597,7 @@ mod tests {
             capabilities: crate::op::CapabilitySet::default(),
             parameter_schema: Value::Null,
             limits: crate::op::OperationLimits::default(),
+            executor_kind: crate::op::ExecutorKind::Unary,
         });
         let err = compile_op(&r, &OperationId::new("rf.future.thing"), &Value::Null).unwrap_err();
         assert_eq!(err.code_str(), "RFGRAPH_NOT_EXECUTABLE");
@@ -576,6 +607,31 @@ mod tests {
     fn builtins_have_executor_parity() {
         let r = OperationRegistry::with_builtins();
         check_registry_executor_parity(&r).unwrap();
+        let compose = compile_op(
+            &r,
+            &OperationId::new("rf.compose.layers"),
+            &serde_json::json!({}),
+        )
+        .unwrap();
+        assert_eq!(
+            compose.params.executor_kind(),
+            crate::op::ExecutorKind::Nary
+        );
+        assert_eq!(
+            r.get(&OperationId::new("rf.compose.layers"))
+                .unwrap()
+                .executor_kind,
+            compose.params.executor_kind()
+        );
+        let mix = compile_op(&r, &OperationId::new("rf.audio.mix"), &Value::Null).unwrap();
+        assert_eq!(mix.params.executor_kind(), crate::op::ExecutorKind::Nary);
+        let trim = compile_op(
+            &r,
+            &OperationId::new("rf.transform.trim"),
+            &serde_json::json!({ "duration": 1.0 }),
+        )
+        .unwrap();
+        assert_eq!(trim.params.executor_kind(), crate::op::ExecutorKind::Unary);
     }
 
     #[test]

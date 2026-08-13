@@ -1,6 +1,8 @@
 //! Integration tests that require a host `ffmpeg` install.
 
-use reelforge_core::{ColorClip, Duration, Rgb8, Size, Time, VideoClip};
+use reelforge_core::{
+    ColorClip, Duration, MemoryLocation, PixelFormat, Rgb8, Size, Time, VideoClip,
+};
 use reelforge_io::{ImageClip, WriteVideoOptions, ffmpeg_available, open_video, write_video};
 use std::path::PathBuf;
 
@@ -41,6 +43,38 @@ fn write_color_clip_and_reopen() {
     let g = frame.data()[1];
     let b = frame.data()[2];
     assert!(r > g && r > b, "expected reddish frame, got {r},{g},{b}");
+
+    assert_eq!(opened.pixel_format(), PixelFormat::Yuv420p);
+    let surface = opened
+        .surface_at(Time::from_secs(0.05))
+        .expect("surface_at");
+    assert_eq!(surface.format(), PixelFormat::Yuv420p);
+    assert_eq!(surface.location(), MemoryLocation::CpuPlanar);
+    assert_eq!(surface.planes().len(), 3);
+    let luma = surface.plane(0).expect("Y");
+    let chroma_u = surface.plane(1).expect("U");
+    let chroma_v = surface.plane(2).expect("V");
+    assert_eq!((luma.width(), luma.height()), (64, 48));
+    assert_eq!((chroma_u.width(), chroma_u.height()), (32, 24));
+    assert_eq!((chroma_v.width(), chroma_v.height()), (32, 24));
+    let u_mean = mean_u8(chroma_u.data());
+    let v_mean = mean_u8(chroma_v.data());
+    assert!(
+        v_mean > u_mean,
+        "red should have V > U, got U={u_mean} V={v_mean}"
+    );
+    assert!(surface.to_frame().is_err(), "YUV surface is not a Frame");
+}
+
+fn mean_u8(data: &[u8]) -> f32 {
+    if data.is_empty() {
+        return 0.0;
+    }
+    #[allow(clippy::cast_precision_loss)]
+    {
+        let sum: u32 = data.iter().map(|&b| u32::from(b)).sum();
+        sum as f32 / data.len() as f32
+    }
 }
 
 #[test]

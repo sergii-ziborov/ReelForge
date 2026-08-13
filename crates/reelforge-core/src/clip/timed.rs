@@ -2,9 +2,12 @@
 
 use super::traits::{AudioClip, VideoClip};
 use crate::audio::{AudioBuffer, AudioFormat};
+use crate::audio_time::AudioTimeline;
 use crate::error::{CoreError, Result};
 use crate::frame::{Frame, Mask};
 use crate::layout::Size;
+use crate::media_time::MediaTime;
+use crate::surface::VideoSurface;
 use crate::time::{Duration, Time};
 use std::sync::Arc;
 
@@ -80,6 +83,11 @@ impl VideoClip for TimedVideo {
             .frame_at(map_local(self.start, self.duration, t)?)
     }
 
+    fn surface_at(&self, t: Time) -> Result<VideoSurface> {
+        self.inner
+            .surface_at(map_local(self.start, self.duration, t)?)
+    }
+
     fn mask_at(&self, t: Time) -> Result<Option<Mask>> {
         self.inner.mask_at(map_local(self.start, self.duration, t)?)
     }
@@ -121,6 +129,17 @@ impl AudioClip for TimedAudio {
     fn samples_at(&self, t: Time, frame_count: usize) -> Result<AudioBuffer> {
         self.inner
             .samples_at(map_local(self.start, self.duration, t)?, frame_count)
+    }
+
+    fn samples_at_media(&self, t: MediaTime, frame_count: usize) -> Result<AudioBuffer> {
+        let mapped = map_local(self.start, self.duration, t.to_time())?;
+        let rate = self.inner.format().sample_rate.max(1);
+        let mt = MediaTime::from_time(mapped, rate).unwrap_or_else(|_| MediaTime::zero(rate));
+        self.inner.samples_at_media(mt, frame_count)
+    }
+
+    fn audio_timeline(&self) -> Option<AudioTimeline> {
+        self.inner.audio_timeline()
     }
 }
 

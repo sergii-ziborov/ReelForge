@@ -65,6 +65,17 @@ impl core::fmt::Display for SemVer {
     }
 }
 
+/// How the I/O runner gathers inputs for [`crate::compile::compile_op`] + execute.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutorKind {
+    /// One upstream media product.
+    #[default]
+    Unary,
+    /// All upstream products (`compose`, `mix`).
+    Nary,
+}
+
 /// Preferred execution backend class.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -94,6 +105,58 @@ pub struct MediaContract {
     /// Free-form notes / pixel formats later.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
+}
+
+impl MediaContract {
+    /// Video + companion audio (typical file source / transform passthrough).
+    #[must_use]
+    pub const fn video_av() -> Self {
+        Self {
+            video: true,
+            audio: true,
+            masks: false,
+            notes: None,
+        }
+    }
+
+    /// Video only (no audio).
+    #[must_use]
+    pub const fn video_only() -> Self {
+        Self {
+            video: true,
+            audio: false,
+            masks: false,
+            notes: None,
+        }
+    }
+
+    /// Audio only.
+    #[must_use]
+    pub const fn audio_only() -> Self {
+        Self {
+            video: false,
+            audio: true,
+            masks: false,
+            notes: None,
+        }
+    }
+
+    /// Whether `self` supplies every stream `required` asks for.
+    #[must_use]
+    pub fn satisfies(&self, required: &Self) -> bool {
+        (!required.video || self.video)
+            && (!required.audio || self.audio)
+            && (!required.masks || self.masks)
+    }
+
+    /// Drop notes (contracts on the compiled program stay data-only).
+    #[must_use]
+    pub fn without_notes(&self) -> Self {
+        Self {
+            notes: None,
+            ..self.clone()
+        }
+    }
 }
 
 /// Capability flags for feature detection.
@@ -142,6 +205,9 @@ pub struct OperationDescriptor {
     /// Limits.
     #[serde(default)]
     pub limits: OperationLimits,
+    /// Input arity for the bound executor (`execute` in `reelforge-io`).
+    #[serde(default)]
+    pub executor_kind: ExecutorKind,
 }
 
 /// In-memory registry of typed operations.
@@ -188,6 +254,7 @@ impl OperationRegistry {
                 },
                 parameter_schema: schema,
                 limits: OperationLimits::default(),
+                executor_kind: ExecutorKind::Unary,
             });
         };
 
@@ -274,6 +341,16 @@ impl OperationRegistry {
             }),
             &["edit", "fade"],
         );
+        transform(
+            "rf.transform.speed",
+            BackendClass::Rust,
+            serde_json::json!({
+                "type": "object",
+                "properties": { "factor": { "type": "number" } },
+                "required": ["factor"]
+            }),
+            &["edit", "time"],
+        );
 
         r.register(OperationDescriptor {
             id: OperationId::new("rf.color.black_and_white"),
@@ -287,6 +364,7 @@ impl OperationRegistry {
             },
             parameter_schema: serde_json::json!({ "type": "object" }),
             limits: OperationLimits::default(),
+            executor_kind: ExecutorKind::Unary,
         });
         r.register(OperationDescriptor {
             id: OperationId::new("rf.color.invert"),
@@ -300,6 +378,7 @@ impl OperationRegistry {
             },
             parameter_schema: serde_json::json!({ "type": "object" }),
             limits: OperationLimits::default(),
+            executor_kind: ExecutorKind::Unary,
         });
         r.register(OperationDescriptor {
             id: OperationId::new("rf.color.painting"),
@@ -319,6 +398,7 @@ impl OperationRegistry {
                 }
             }),
             limits: OperationLimits::default(),
+            executor_kind: ExecutorKind::Unary,
         });
         r.register(OperationDescriptor {
             id: OperationId::new("rf.compose.layers"),
@@ -349,6 +429,7 @@ impl OperationRegistry {
                 }
             }),
             limits: OperationLimits::default(),
+            executor_kind: ExecutorKind::Nary,
         });
         r.register(OperationDescriptor {
             id: OperationId::new("rf.audio.gain"),
@@ -375,6 +456,7 @@ impl OperationRegistry {
                 "properties": { "factor": { "type": "number" } }
             }),
             limits: OperationLimits::default(),
+            executor_kind: ExecutorKind::Unary,
         });
         r.register(OperationDescriptor {
             id: OperationId::new("rf.audio.drop"),
@@ -388,6 +470,7 @@ impl OperationRegistry {
             },
             parameter_schema: serde_json::json!({ "type": "object" }),
             limits: OperationLimits::default(),
+            executor_kind: ExecutorKind::Unary,
         });
         r.register(OperationDescriptor {
             id: OperationId::new("rf.audio.preserve"),
@@ -401,6 +484,7 @@ impl OperationRegistry {
             },
             parameter_schema: serde_json::json!({ "type": "object" }),
             limits: OperationLimits::default(),
+            executor_kind: ExecutorKind::Unary,
         });
         r.register(OperationDescriptor {
             id: OperationId::new("rf.audio.mix"),
@@ -433,6 +517,7 @@ impl OperationRegistry {
                 }
             }),
             limits: OperationLimits::default(),
+            executor_kind: ExecutorKind::Nary,
         });
         r.register(OperationDescriptor {
             id: OperationId::new("rf.redaction.region"),
@@ -462,6 +547,7 @@ impl OperationRegistry {
                 }
             }),
             limits: OperationLimits::default(),
+            executor_kind: ExecutorKind::Unary,
         });
         r.register(OperationDescriptor {
             id: OperationId::new("rf.encode.h264"),
@@ -483,6 +569,7 @@ impl OperationRegistry {
                 "properties": { "crf": { "type": "integer" }, "path": { "type": "string" } }
             }),
             limits: OperationLimits::default(),
+            executor_kind: ExecutorKind::Unary,
         });
         r
     }

@@ -115,6 +115,18 @@ impl FrameTimingIndex {
         MediaTime::new(ticks, self.timescale).ok()
     }
 
+    /// Frame duration as PTS delta to the next sample, when both exist.
+    #[must_use]
+    pub fn duration_at(&self, index: u64) -> Option<MediaTime> {
+        let a = self.pts_at(index)?;
+        let b = self.pts_at(index.checked_add(1)?)?;
+        let dt = b.ticks.saturating_sub(a.ticks);
+        if dt <= 0 {
+            return None;
+        }
+        MediaTime::new(dt, self.timescale).ok()
+    }
+
     /// Frame ordinal for media time `t` (last frame with PTS ≤ t; 0 if before first).
     #[must_use]
     pub fn frame_index_at(&self, t: MediaTime) -> u64 {
@@ -231,6 +243,8 @@ mod tests {
         assert_eq!(idx.frame_index_at(t(0.5)), 4);
         assert_eq!(idx.frame_range(t(0.04), t(0.11)), (1, 3));
         assert!((idx.pts_at(2).unwrap().as_secs() - 0.10).abs() < 1e-9);
+        assert!((idx.duration_at(1).unwrap().as_secs() - 0.06).abs() < 1e-9);
+        assert!(idx.duration_at(4).is_none());
     }
 
     #[test]

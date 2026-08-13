@@ -5,9 +5,11 @@ use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// Stage of a multi-step write (`write_av` video → audio → mux).
+/// Stage of a multi-step write / plan run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WriteStage {
+    /// Walking [`crate::ExecutionPlan`] stages (index = stage, total = stage count).
+    Plan,
     /// Sampling / encoding video frames.
     Video,
     /// Rendering PCM audio.
@@ -203,5 +205,12 @@ mod tests {
         });
         c.report(WriteProgress::new(WriteStage::Video, 1, 10));
         assert_eq!(*hits.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn plan_stage_fraction_is_stage_index_over_count() {
+        let p = WriteProgress::new(WriteStage::Plan, 1, 4);
+        assert_eq!(p.stage, WriteStage::Plan);
+        assert!((p.fraction - 0.25).abs() < f64::EPSILON);
     }
 }

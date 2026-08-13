@@ -18,7 +18,9 @@ reelforge-compose = { workspace = true }
 reelforge-core = { workspace = true }
 reelforge-fx = { workspace = true }
 reelforge-io = { workspace = true }
+reelforge-project = { workspace = true }
 reelforge-render-graph = { workspace = true }
+reelforge-sightloom-adapter = { workspace = true }
 reelforge-text = { workspace = true }
 
 [lints]

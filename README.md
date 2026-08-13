@@ -28,7 +28,7 @@ cargo install reelforge-cli    # installs the `reelforge` binary
 |--|--|
 | **Lazy graphs** | Wrap clips in `Arc`, apply effects; nothing renders until `frame_at` / write |
 | **Frame cache + streams** | LRU `CachedVideo` for warm/realtime hits; `FrameStream` sequential + prefetch |
-| **In-process pixels** | Parallel raster paths (rayon), fixed-point color, bicubic resize |
+| **In-process pixels** | Parallel raster paths (rayon), fixed-point color, bicubic resize; timed `VideoSurface` (PTS / YUV planes) |
 | **Host FFmpeg** | Decode/encode/mux via CLI — any format your ffmpeg build supports |
 | **UHD-ready** | First-class `Size` presets through 8K; memory is the only hard limit |
 | **Scripted NLE surface** | Geometry, time, color, audio FX, text, subtitles, compose, GIF |
@@ -60,8 +60,11 @@ cargo install reelforge-cli    # installs the `reelforge` binary
 - Streaming PCM for `write_av` (chunked, no full-timeline buffer)
 - Bounded frame pipeline (`WriteControl::max_in_flight`) + RGB buffer pool
 - Hardware encode helpers: **NVENC / QSV / AMF** + free-form `extra_ffmpeg_args`
-- Filtergraph fast path for pure file transforms (trim/crop/scale/flip)
+- Filtergraph fast path for pure file transforms (trim/crop/scale/flip); source audio is copied
 - **RenderPlan** JSON: optimize (fuse/DCE) + FFmpeg prefix extract + **hybrid** run (prefix → Rust remainder → encode)
+- **RenderGraph** DAG: typed ops, hybrid `ExecutionPlan`, **TrackTimeline** → `MaskTimeline` view + fused **RegionRedaction**
+- **CaptureProject**: OTIO-like sequences/tracks/clips/gaps → `compile_project` → `RenderGraph`
+- Optional SightLoom-shaped JSON adapter (`parse_track_timelines`) — no SightLoom crate
 
 ### Quality & tooling
 - `psnr_rgb` / `ssim_rgb` frame metrics
@@ -76,9 +79,9 @@ cargo install reelforge-cli    # installs the `reelforge` binary
 
 | Doc | Contents |
 |-----|----------|
-| **[docs/GUIDE.md](docs/GUIDE.md)** | Concepts, install, open/write, compose, subtitles, metrics |
+| **[docs/GUIDE.md](docs/GUIDE.md)** | Concepts, install, open/write, compose, **RenderGraph**, subtitles, metrics |
 | **[docs/EFFECTS.md](docs/EFFECTS.md)** | Full effect catalog + quality tips |
-| **[docs/IO.md](docs/IO.md)** | FFmpeg discovery, sequential decode, HW encode, GIF, RenderPlan |
+| **[docs/IO.md](docs/IO.md)** | FFmpeg, sequential decode, HW encode, GIF, RenderPlan, RenderGraph I/O |
 | **[docs/CORRECTNESS.md](docs/CORRECTNESS.md)** | Public PSNR/SSIM pipeline gates + CI |
 | [docs.rs/reelforge](https://docs.rs/reelforge) | Generated API docs |
 | [crates.io/reelforge](https://crates.io/crates/reelforge) | Package registry |
@@ -177,19 +180,96 @@ reelforge plan job.json --explain
 reelforge plan job.json --run
 ```
 
+### RenderGraph (DAG → compile → run)
+
+One-shot jobs stay on **RenderPlan**. Multi-node edits (trim + privacy + encode) use **RenderGraph**:
+
+```rust
+use reelforge::{
+    GraphOutput, MaskSample, MaskTimeline, MediaAsset, MediaAssetId, MediaTime, NodeId,
+    OperationId, OperationRegistry, RENDER_GRAPH_VERSION, RegionRedaction, RenderGraph,
+    RenderNode, RenderNodeKind, compile_graph, explain_render_graph, run_render_graph,
+    schedule_graph,
+};
+
+let mut masks = MaskTimeline::new();
+masks.push(MaskSample::ellipse(
+    MediaTime::new(0, 30)?,
+    320.0,
+    180.0,
+    48.0,
+));
+
+let graph = RenderGraph {
+    version: RENDER_GRAPH_VERSION,
+    assets: vec![MediaAsset {
+        id: MediaAssetId("in".into()),
+        uri: "in.mp4".into(),
+        duration: None,
+        role: Some("video".into()),
+    }],
+    nodes: vec![
+        RenderNode {
+            id: NodeId("src".into()),
+            body: RenderNodeKind::Source {
+                asset: MediaAssetId("in".into()),
+            },
+            inputs: vec![],
+        },
+        RenderNode {
+            id: NodeId("trim".into()),
+            body: RenderNodeKind::Op {
+                operation: OperationId::new("rf.transform.trim"),
+                params: serde_json::json!({ "start": 0.0, "duration": 5.0 }),
+            },
+            inputs: vec![NodeId("src".into())],
+        },
+        RenderNode {
+            id: NodeId("blur".into()),
+            body: RenderNodeKind::Redaction {
+                redaction: RegionRedaction::gaussian(masks, 12.0),
+            },
+            inputs: vec![NodeId("trim".into())],
+        },
+        RenderNode {
+            id: NodeId("out".into()),
+            body: RenderNodeKind::Output {
+                name: "main".into(),
+            },
+            inputs: vec![NodeId("blur".into())],
+        },
+    ],
+    outputs: vec![GraphOutput {
+        name: "main".into(),
+        node: NodeId("out".into()),
+        uri: Some("out.mp4".into()),
+    }],
+};
+
+let compiled = compile_graph(&graph, &OperationRegistry::with_builtins())?;
+// compiled.nodes[i].output.{video, audio, masks} — contract after each node
+let plan = schedule_graph(&graph, &OperationRegistry::with_builtins())?;
+// plan.io[k].inputs / .outputs — numeric stage ports
+println!("{}", explain_render_graph(&graph)?);
+run_render_graph(&graph)?; // schedule + hybrid execute + write
+```
+
+`compile_graph` rejects broken edges (`RFGRAPH_MEDIA_CONTRACT`) — e.g. `rf.audio.gain` after `rf.audio.drop`. See [docs/GUIDE.md](docs/GUIDE.md#rendergraph).
+
 ---
 
 ## Crates
 
-| Crate | crates.io | Role |
-|-------|-----------|------|
-| [`reelforge`](https://crates.io/crates/reelforge) | umbrella API + prelude |
-| [`reelforge-core`](https://crates.io/crates/reelforge-core) | time, frames, audio, traits, PSNR/SSIM |
-| [`reelforge-io`](https://crates.io/crates/reelforge-io) | decode / encode / filtergraph |
-| [`reelforge-fx`](https://crates.io/crates/reelforge-fx) | video & audio effects |
-| [`reelforge-compose`](https://crates.io/crates/reelforge-compose) | layers, concat, composite |
-| [`reelforge-text`](https://crates.io/crates/reelforge-text) | titles & subtitles |
-| [`reelforge-cli`](https://crates.io/crates/reelforge-cli) | command-line tool |
+| Crate | Role |
+|-------|------|
+| [`reelforge`](https://crates.io/crates/reelforge) | Umbrella API + prelude |
+| [`reelforge-core`](https://crates.io/crates/reelforge-core) | Time, frames, audio, traits, PSNR/SSIM |
+| [`reelforge-io`](https://crates.io/crates/reelforge-io) | Decode / encode / filtergraph / graph runner |
+| [`reelforge-fx`](https://crates.io/crates/reelforge-fx) | Video & audio effects |
+| [`reelforge-compose`](https://crates.io/crates/reelforge-compose) | Layers, concat, composite |
+| [`reelforge-text`](https://crates.io/crates/reelforge-text) | Titles & subtitles |
+| [`reelforge-render-graph`](https://crates.io/crates/reelforge-render-graph) | RenderGraph, compile, schedule, masks |
+| [`reelforge-cli`](https://crates.io/crates/reelforge-cli) | Command-line tool |
 
 ---
 

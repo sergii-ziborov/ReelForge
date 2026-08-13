@@ -11,15 +11,40 @@ pub enum SampleLayout {
     Mono,
     /// Two channels, interleaved L-R.
     Stereo,
+    /// 4.0 quad: FL FR BL BR.
+    Quad,
+    /// 5.1: FL FR FC LFE BL BR.
+    Surround51,
+    /// 7.1: FL FR FC LFE BL BR SL SR.
+    Surround71,
+    /// N discrete channels in decode order (`N > 0`).
+    Discrete(u16),
 }
 
 impl SampleLayout {
+    /// Map a channel count to a named layout when it is standard.
+    #[must_use]
+    pub const fn from_channels(channels: u16) -> Self {
+        match channels {
+            0 | 1 => Self::Mono,
+            2 => Self::Stereo,
+            4 => Self::Quad,
+            6 => Self::Surround51,
+            8 => Self::Surround71,
+            n => Self::Discrete(n),
+        }
+    }
+
     /// Number of channels.
     #[must_use]
     pub const fn channels(self) -> u16 {
         match self {
             Self::Mono => 1,
             Self::Stereo => 2,
+            Self::Quad => 4,
+            Self::Surround51 => 6,
+            Self::Surround71 => 8,
+            Self::Discrete(n) => n,
         }
     }
 }
@@ -54,6 +79,9 @@ impl AudioFormat {
     pub fn new(sample_rate: u32, layout: SampleLayout) -> Result<Self> {
         if sample_rate == 0 {
             return Err(CoreError::invalid_audio("sample_rate must be > 0"));
+        }
+        if layout.channels() == 0 {
+            return Err(CoreError::invalid_audio("channel count must be > 0"));
         }
         Ok(Self {
             sample_rate,
@@ -170,6 +198,15 @@ impl AudioBuffer {
             *s *= gain;
         }
     }
+
+    /// Linear-resample this buffer to `target_rate` (layout unchanged).
+    ///
+    /// # Errors
+    ///
+    /// Zero rate or length overflow.
+    pub fn resample(&self, target_rate: u32) -> Result<Self> {
+        crate::resample::resample_linear(self, target_rate)
+    }
 }
 
 #[cfg(test)]
@@ -182,5 +219,16 @@ mod tests {
         let buf = AudioBuffer::silence(fmt, 24_000).unwrap();
         assert_eq!(buf.frame_count(), 24_000);
         assert!((buf.duration().as_secs() - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn named_layouts_from_channel_count() {
+        assert_eq!(SampleLayout::from_channels(1), SampleLayout::Mono);
+        assert_eq!(SampleLayout::from_channels(2), SampleLayout::Stereo);
+        assert_eq!(SampleLayout::from_channels(4).channels(), 4);
+        assert_eq!(SampleLayout::from_channels(6), SampleLayout::Surround51);
+        assert_eq!(SampleLayout::from_channels(8), SampleLayout::Surround71);
+        assert_eq!(SampleLayout::from_channels(5), SampleLayout::Discrete(5));
+        assert!(AudioFormat::new(48_000, SampleLayout::Discrete(0)).is_err());
     }
 }

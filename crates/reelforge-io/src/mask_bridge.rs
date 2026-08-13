@@ -4,9 +4,18 @@ use crate::error::{IoError, Result};
 use reelforge_core::{MediaTime, VideoClip, VideoEffect};
 use reelforge_fx::{PrivacyStyle, RegionSample, RegionTrack, TrackSet, TrackedPrivacy};
 use reelforge_render_graph::{
-    MaskSample, MaskTimeline, RedactionStyle, RegionRedaction, SubjectId,
+    MaskSample, MaskTimeline, RedactionStyle, RegionRedaction, SubjectId, TrackTimeline,
+    mask_timeline_from_tracks,
 };
 use std::sync::Arc;
+
+/// Convert tracks to a [`TrackSet`] via the mask view.
+#[must_use]
+pub fn track_timelines_to_track_set<'a>(
+    tracks: impl IntoIterator<Item = &'a TrackTimeline>,
+) -> TrackSet {
+    mask_timeline_to_track_set(&mask_timeline_from_tracks(tracks))
+}
 
 /// Convert a [`MaskTimeline`] into a [`TrackSet`] for privacy effects.
 ///

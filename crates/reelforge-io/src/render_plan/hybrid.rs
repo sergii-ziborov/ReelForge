@@ -6,13 +6,14 @@ use super::ops::{PlanOutput, PlanSource};
 use super::plan::RenderPlan;
 use crate::control::{WriteControl, WriteProgress, WriteStage};
 use crate::error::{IoError, Result};
-use crate::ffmpeg::FfmpegTools;
+use crate::ffmpeg::{FfmpegTools, probe_has_audio};
 use crate::options::{OpenVideoOptions, WriteVideoOptions};
 use crate::video_file::open_video;
-use crate::{FilterGraph, run_filtergraph, write_video_with};
+use crate::{
+    FilterGraph, FiltergraphRunOptions, mux_copy_audio, run_filtergraph_with, write_video_with,
+};
 use reelforge_core::VideoClip;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::Arc;
 
 /// Run a hybrid plan: optional pure-`FFmpeg` prefix, then Rust remainder, then encode.
@@ -67,6 +68,7 @@ pub fn run_hybrid_plan(
         }
 
         write_video_with(clip.as_ref(), &opts, control)?;
+        remux_source_audio(&source, Path::new(&output.path))?;
         control.report(WriteProgress::new(WriteStage::Done, 1, 1));
         Ok(())
     })();
@@ -107,57 +109,31 @@ fn run_prefix_to_file(
             .map_err(|e| IoError::message(format!("create hybrid temp dir: {e}")))?;
     }
 
-    // Intermediate can use default filtergraph encode unless plan forces codec/crf.
-    if output.video_codec.is_none() && output.crf.is_none() {
-        return run_filtergraph(input, mid, graph);
+    let mut opts = FiltergraphRunOptions::new();
+    if let Some(codec) = &output.video_codec {
+        opts = opts.with_video_codec(codec.clone());
     }
-    run_filtergraph_with_encode(
-        input,
-        mid,
-        graph,
-        output.video_codec.as_deref(),
-        output.crf.or(Some(23)),
-    )
+    if let Some(crf) = output.crf.or(Some(23)) {
+        opts = opts.with_crf(crf);
+    }
+    run_filtergraph_with(input, mid, graph, &opts)
 }
 
-fn run_filtergraph_with_encode(
-    input: impl AsRef<Path>,
-    output: impl AsRef<Path>,
-    graph: &FilterGraph,
-    video_codec: Option<&str>,
-    crf: Option<u8>,
-) -> Result<()> {
+fn remux_source_audio(audio_src: &Path, output: &Path) -> Result<()> {
     let tools = FfmpegTools::discover()?;
-    let vf = graph.to_vf().map_err(IoError::message)?;
-    let input = input.as_ref();
-    let output = output.as_ref();
-    if !input.is_file() {
-        return Err(IoError::message(format!(
-            "input not found: {}",
-            input.display()
-        )));
+    if !probe_has_audio(&tools, audio_src).unwrap_or(false) {
+        return Ok(());
     }
-
-    let codec = video_codec.unwrap_or("libx264");
-    let mut cmd = Command::new(&tools.ffmpeg);
-    cmd.args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
-        .arg(input)
-        .args(["-vf", &vf, "-an", "-c:v", codec, "-pix_fmt", "yuv420p"]);
-    if let Some(crf) = crf {
-        cmd.args(["-crf", &crf.to_string()]);
+    let tagged = temp_plan_path(output, "rf-hyb-vid");
+    std::fs::rename(output, &tagged)
+        .map_err(|e| IoError::message(format!("hybrid rename for audio mux failed: {e}")))?;
+    let muxed = mux_copy_audio(&tagged, audio_src, output);
+    if muxed.is_err() {
+        let _ = std::fs::rename(&tagged, output);
+        return muxed;
     }
-    cmd.arg(output);
-
-    let status = cmd
-        .status()
-        .map_err(|e| IoError::process(format!("ffmpeg hybrid prefix spawn failed: {e}")))?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(IoError::process(format!(
-            "ffmpeg hybrid prefix failed with {status}"
-        )))
-    }
+    let _ = std::fs::remove_file(&tagged);
+    Ok(())
 }
 
 fn temp_plan_path(output: &Path, tag: &str) -> PathBuf {

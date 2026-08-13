@@ -3,11 +3,14 @@
 use crate::audio_file::AudioFileClip;
 use crate::error::{IoError, Result};
 use crate::ffmpeg::{
-    FfmpegTools, FrameTimingIndex, SequentialRgbDecoder, decode_frame_rgb, probe_frame_timing,
-    probe_video,
+    FfmpegTools, FrameTimingIndex, SequentialMode, SequentialPlanarDecoder, SequentialRgbDecoder,
+    decode_frame_planes, decode_frame_rgb, probe_frame_timing, probe_video,
 };
 use crate::options::{OpenAudioOptions, OpenVideoOptions};
-use reelforge_core::{CoreError, Duration, Frame, MediaTime, Size, Time, VideoClip};
+use reelforge_core::{
+    ColorInfo, CoreError, Duration, Frame, MediaTime, PixelFormat, Size, StreamTimeBase,
+    SurfacePlane, Time, VideoClip, VideoSurface,
+};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -15,7 +18,8 @@ use std::sync::Mutex;
 ///
 /// Random access uses single-frame seeks. Monotonic sequential access reuses a
 /// long-lived rawvideo pipe (sequential RGB decoder) — the fast path for
-/// ordered writers.
+/// ordered writers. [`VideoClip::surface_at`] decodes native YUV/NV12 planes
+/// (or packed RGB) without an RGB round-trip.
 ///
 /// # VFR
 ///
@@ -31,12 +35,15 @@ pub struct VideoFileClip {
     time_base_den: u32,
     is_vfr: bool,
     nb_frames: Option<u64>,
+    color: ColorInfo,
+    pixel_format: PixelFormat,
     tools: FfmpegTools,
     /// Optional companion audio opened when `with_audio` is true.
     audio: Option<AudioFileClip>,
     /// Multi-frame LRU (index → frame) for random / repeated access.
     cache: Mutex<FrameLru>,
     seq: Mutex<Option<SequentialRgbDecoder>>,
+    seq_planar: Mutex<Option<SequentialPlanarDecoder>>,
     /// Lazy PTS index for VFR mapping (None until first need).
     timing: Mutex<Option<FrameTimingIndex>>,
 }
@@ -101,6 +108,7 @@ impl std::fmt::Debug for VideoFileClip {
                 "time_base",
                 &format!("{}/{}", self.time_base_num, self.time_base_den),
             )
+            .field("pixel_format", &self.pixel_format)
             .field("has_audio", &self.audio.is_some())
             .finish_non_exhaustive()
     }
@@ -150,11 +158,14 @@ impl VideoFileClip {
             time_base_den: probe.time_base_den,
             is_vfr: probe.is_vfr,
             nb_frames: probe.nb_frames,
+            color: probe.color,
+            pixel_format: probe.pixel_format,
             tools,
             audio,
             // ~2s of 30fps by default — warm seeks without huge RAM.
             cache: Mutex::new(FrameLru::new(64)),
             seq: Mutex::new(None),
+            seq_planar: Mutex::new(None),
             timing: Mutex::new(None),
         })
     }
@@ -183,6 +194,25 @@ impl VideoFileClip {
         (self.time_base_num, self.time_base_den)
     }
 
+    /// Stream time base as [`StreamTimeBase`].
+    #[must_use]
+    pub fn stream_time_base(&self) -> StreamTimeBase {
+        StreamTimeBase::new(self.time_base_num.max(1), self.time_base_den.max(1))
+            .unwrap_or(StreamTimeBase::HZ_90K)
+    }
+
+    /// Color tags from `ffprobe`.
+    #[must_use]
+    pub const fn color(&self) -> ColorInfo {
+        self.color
+    }
+
+    /// Native decode format for [`VideoClip::surface_at`] (typically `Yuv420p`).
+    #[must_use]
+    pub const fn pixel_format(&self) -> PixelFormat {
+        self.pixel_format
+    }
+
     /// Stream timescale for [`MediaTime`] (`time_base` denominator).
     #[must_use]
     pub fn timescale(&self) -> u32 {
@@ -204,6 +234,9 @@ impl VideoFileClip {
     /// Drop the sequential decoder (forces fresh stream on next sequential run).
     pub fn reset_sequential(&self) {
         if let Ok(mut g) = self.seq.lock() {
+            *g = None;
+        }
+        if let Ok(mut g) = self.seq_planar.lock() {
             *g = None;
         }
     }
@@ -298,6 +331,44 @@ impl VideoFileClip {
         self.frame_at(t.to_time())
     }
 
+    /// Timed surface at media time (PTS from the index when available).
+    ///
+    /// # Errors
+    ///
+    /// Same as [`VideoClip::frame_at`].
+    pub fn surface_at_media(&self, t: MediaTime) -> reelforge_core::Result<VideoSurface> {
+        self.surface_at(t.to_time())
+    }
+
+    fn pts_for_index(&self, index: u64) -> MediaTime {
+        if let Ok(guard) = self.timing.lock()
+            && let Some(idx) = guard.as_ref()
+            && let Some(pts) = idx.pts_at(index)
+        {
+            return pts;
+        }
+        if self.fps.is_finite() && self.fps > 0.0 {
+            #[allow(clippy::cast_precision_loss)]
+            let secs = index as f64 / self.fps;
+            return MediaTime::from_secs(secs, self.timescale())
+                .unwrap_or_else(|_| MediaTime::zero(self.timescale()));
+        }
+        MediaTime::zero(self.timescale())
+    }
+
+    fn duration_for_index(&self, index: u64) -> Option<MediaTime> {
+        if let Ok(guard) = self.timing.lock()
+            && let Some(idx) = guard.as_ref()
+            && let Some(d) = idx.duration_at(index)
+        {
+            return Some(d);
+        }
+        if self.fps.is_finite() && self.fps > 0.0 {
+            return MediaTime::from_secs(1.0 / self.fps, self.timescale()).ok();
+        }
+        None
+    }
+
     fn decode_sequential(&self, index: u64) -> reelforge_core::Result<Frame> {
         let mut guard = self
             .seq
@@ -318,6 +389,34 @@ impl VideoFileClip {
         dec.frame_at_index(index)
             .map_err(|e| CoreError::invalid_frame(format!("seq decode: {e}")))
     }
+
+    fn decode_sequential_planes(&self, index: u64) -> reelforge_core::Result<Vec<SurfacePlane>> {
+        let mut guard = self
+            .seq_planar
+            .lock()
+            .map_err(|_| CoreError::invalid_frame("sequential planar lock poisoned"))?;
+        if guard.is_none() {
+            let mode = if self.is_vfr {
+                SequentialMode::Native
+            } else {
+                SequentialMode::Cfr { fps: self.fps }
+            };
+            let dec = SequentialPlanarDecoder::open(
+                &self.tools,
+                &self.path,
+                self.size,
+                self.pixel_format,
+                mode,
+            )
+            .map_err(|e| CoreError::invalid_frame(format!("seq planar open: {e}")))?;
+            *guard = Some(dec);
+        }
+        let dec = guard
+            .as_mut()
+            .ok_or_else(|| CoreError::invalid_frame("seq planar decoder missing"))?;
+        dec.planes_at_index(index)
+            .map_err(|e| CoreError::invalid_frame(format!("seq planar decode: {e}")))
+    }
 }
 
 impl VideoClip for VideoFileClip {
@@ -331,6 +430,40 @@ impl VideoClip for VideoFileClip {
 
     fn fps(&self) -> Option<f64> {
         Some(self.fps)
+    }
+
+    fn surface_at(&self, t: Time) -> reelforge_core::Result<VideoSurface> {
+        if !self.contains(t) {
+            return Err(CoreError::TimeOutOfRange {
+                time: t,
+                range: (Time::ZERO, Time::from_secs(self.duration.as_secs())),
+            });
+        }
+        let index = self.frame_index(t);
+        if self.is_vfr {
+            let _ = self.ensure_timing_index();
+        }
+        let ts = self.pts_for_index(index);
+        let dur = self.duration_for_index(index);
+        let planes = if let Ok(p) = self.decode_sequential_planes(index) {
+            p
+        } else {
+            if let Ok(mut g) = self.seq_planar.lock() {
+                *g = None;
+            }
+            decode_frame_planes(&self.tools, &self.path, self.size, t, self.pixel_format).map_err(
+                |e| CoreError::invalid_frame(format!("planar decode failed at {t}: {e}")),
+            )?
+        };
+        VideoSurface::from_planes(
+            self.pixel_format,
+            self.size,
+            planes,
+            ts,
+            dur,
+            self.color,
+            self.stream_time_base(),
+        )
     }
 
     fn frame_at(&self, t: Time) -> reelforge_core::Result<Frame> {
@@ -378,10 +511,13 @@ impl Clone for VideoFileClip {
             time_base_den: self.time_base_den,
             is_vfr: self.is_vfr,
             nb_frames: self.nb_frames,
+            color: self.color,
+            pixel_format: self.pixel_format,
             tools: self.tools.clone(),
             audio: self.audio.clone(),
             cache: Mutex::new(FrameLru::new(64)),
             seq: Mutex::new(None),
+            seq_planar: Mutex::new(None),
             timing: Mutex::new(timing),
         }
     }

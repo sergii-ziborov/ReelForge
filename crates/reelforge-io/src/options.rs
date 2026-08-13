@@ -271,7 +271,13 @@ pub struct OpenAudioOptions {
     /// Target sample rate for decoded PCM (default `48_000`).
     pub sample_rate: u32,
     /// Decode as stereo when true (default), else mono.
+    ///
+    /// Ignored when [`Self::layout`] is set or [`Self::native_layout`] is true.
     pub stereo: bool,
+    /// Explicit decode layout (overrides [`Self::stereo`]).
+    pub layout: Option<reelforge_core::SampleLayout>,
+    /// Keep the file's channel count (`ffprobe`) instead of forcing stereo/mono.
+    pub native_layout: bool,
 }
 
 impl OpenAudioOptions {
@@ -282,6 +288,24 @@ impl OpenAudioOptions {
             path: path.into(),
             sample_rate: 48_000,
             stereo: true,
+            layout: None,
+            native_layout: false,
         }
+    }
+
+    /// Force a decode layout (5.1, 7.1, discrete, …).
+    #[must_use]
+    pub fn with_layout(mut self, layout: reelforge_core::SampleLayout) -> Self {
+        self.layout = Some(layout);
+        self.native_layout = false;
+        self
+    }
+
+    /// Decode with the source channel count (no stereo downmix).
+    #[must_use]
+    pub fn with_native_layout(mut self) -> Self {
+        self.native_layout = true;
+        self.layout = None;
+        self
     }
 }

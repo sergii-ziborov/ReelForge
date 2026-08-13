@@ -1,0 +1,22 @@
+[package]
+name = "reelforge-project"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+description = "CaptureProject schema and compile-to-RenderGraph (not the Capture editor)"
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+reelforge-core = { workspace = true }
+reelforge-render-graph = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

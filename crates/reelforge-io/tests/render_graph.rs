@@ -1,7 +1,10 @@
 //! End-to-end `RenderGraph` runner (optional host `FFmpeg`).
 
 use reelforge_core::MediaTime;
-use reelforge_io::{explain_render_graph, ffmpeg_available, materialize_graph, run_render_graph};
+use reelforge_io::{
+    GraphRunOptions, WriteControl, explain_render_graph, ffmpeg_available, materialize_graph,
+    run_render_graph, run_render_graph_with_manifest,
+};
 use reelforge_render_graph::{
     GraphOutput, MaskSample, MaskTimeline, MediaAsset, MediaAssetId, NodeId, OperationId,
     RENDER_GRAPH_VERSION, RegionRedaction, RenderGraph, RenderNode, RenderNodeKind,
@@ -160,9 +163,21 @@ fn run_graph_trim_redaction_encode() {
         }],
     };
 
-    run_render_graph(&g).expect("run_render_graph");
+    let man =
+        run_render_graph_with_manifest(&g, &WriteControl::default(), &GraphRunOptions::default())
+            .expect("run_render_graph_with_manifest");
     assert!(output.is_file(), "output missing");
     assert!(output.metadata().unwrap().len() > 0);
+    assert_eq!(man.outputs.len(), 1);
+    assert_eq!(
+        man.outputs[0].uri.as_deref(),
+        Some(output.to_string_lossy().as_ref())
+    );
+    assert!(
+        man.outputs[0].file_fingerprint.is_some(),
+        "expected sealed file fingerprint"
+    );
+    assert!(man.run_fingerprint.is_some());
 }
 
 #[test]

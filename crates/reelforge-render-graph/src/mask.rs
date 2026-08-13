@@ -1,66 +1,13 @@
-//! Mask timelines for redaction and vision materialization.
+//! Mask timelines — **materialized ROI view** of [`crate::TrackTimeline`].
 //!
-//! # Identity model
-//!
-//! Samples carry an optional [`SubjectId`]. Interpolation and merge are
-//! **track-safe**: each subject is a separate temporal chain. Flat merges that
-//! interleave unrelated boxes no longer break linear interpolation.
-//!
-//! Lifecycle + provenance let Capture / `SightLoom` adapters express occlusion
-//! and origin without collapsing multi-person tracks into one ROI chain.
+//! Author tracks on [`crate::TrackTimeline`]. Convert with
+//! [`crate::TrackTimeline::to_mask_timeline`] / [`crate::mask_timeline_from_tracks`].
+//! Interpolation is still **track-safe** via [`SubjectId`].
 
+use crate::ids::SubjectId;
 use reelforge_core::MediaTime;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::fmt;
-
-/// Stable subject / track identity within a graph (person, plate, face, …).
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct SubjectId(pub String);
-
-impl SubjectId {
-    /// Construct from any string-like id.
-    #[must_use]
-    pub fn new(id: impl Into<String>) -> Self {
-        Self(id.into())
-    }
-
-    /// Anonymous single-track identity used when samples omit `subject`.
-    #[must_use]
-    pub fn anonymous() -> Self {
-        Self("_anon".into())
-    }
-
-    /// As string.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    /// Whether this is the anonymous bucket.
-    #[must_use]
-    pub fn is_anonymous(&self) -> bool {
-        self.0 == "_anon"
-    }
-}
-
-impl fmt::Display for SubjectId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
-impl From<&str> for SubjectId {
-    fn from(value: &str) -> Self {
-        Self::new(value)
-    }
-}
-
-impl From<String> for SubjectId {
-    fn from(value: String) -> Self {
-        Self::new(value)
-    }
-}
 
 /// Lifecycle of a subject observation at a sample.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]

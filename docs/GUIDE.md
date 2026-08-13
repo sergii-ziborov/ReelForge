@@ -10,13 +10,19 @@ See also: [EFFECTS.md](EFFECTS.md) · [IO.md](IO.md) · [README](../README.md)
 
 | Term | Meaning |
 |------|---------|
-| `VideoClip` | Timed source: `frame_at(t)` → RGB/RGBA frame |
-| `AudioClip` | Timed source: `samples_at(t, n)` → interleaved f32 PCM |
+| `VideoClip` | Timed source: `frame_at(t)` → RGB/RGBA `Frame`; `surface_at(t)` → timed `VideoSurface` |
+| `VideoSurface` | Native planes (YUV/NV12 from files, packed RGB from the clip graph), PTS, color |
+| `AlphaMode` | `Opaque` / `Straight` / `Premultiplied` on RGBA `Frame` (mask is coverage, not color alpha) |
+| `AudioClip` | Timed source: `samples_at` / `samples_at_media` → interleaved f32 PCM |
+| `AudioTimeline` | Sample-accurate `MediaTime` ↔ PCM frame index |
+| `resample_linear` | In-process linear resample to another sample rate |
 | `VideoEffect` / `AudioEffect` | Pure transforms: `apply(clip) → Arc<dyn …>` |
 | `CompositeVideo` | Layered canvas: position, opacity, masks, z-order |
 | Lazy graph | Nothing is rendered until `frame_at` / write |
 | `CachedVideo` / `cache_video` | LRU frame cache for warm / realtime `frame_at` |
 | `FrameStream` / `stream_video` | Sequential stream + optional prefetch |
+| `RenderPlan` | Linear one-shot: one file → ops → one file (CLI / agents) |
+| `RenderGraph` | Typed DAG: assets, ops, redaction, outputs → compile → run |
 
 ### Cache & streams (realtime)
 
@@ -93,6 +99,7 @@ let audio = video.audio();
 
 let only_video = open_video(&OpenVideoOptions::new("in.mp4").video_only())?;
 let wav = open_audio(&OpenAudioOptions::new("music.wav"))?;
+let surround = open_audio(&OpenAudioOptions::new("mix.wav").with_native_layout())?;
 let still = ImageClip::from_path("poster.png", Duration::from_secs(3.0))?;
 ```
 
@@ -170,11 +177,199 @@ run_filtergraph(
     &FilterGraph::new()
         .then(FilterOp::Trim {
             start: 10.0,
-            duration: Some(5.0),
+            duration: 5.0,
         })
         .then(FilterOp::EvenDims),
 )?;
 ```
+
+Source audio is copied (`-c:a copy`). Trim also cuts audio (`atrim`). Use `FiltergraphRunOptions::drop_audio()` to strip it.
+
+---
+
+## RenderGraph
+
+Use the **clip graph** (`Arc<dyn VideoClip>` + effects) for scripted MoviePy-style work.  
+Use **RenderPlan** for a single input chain (JSON / CLI).  
+Use **RenderGraph** when the job is a DAG: several assets, fused privacy, hybrid FFmpeg + Rust, inspectable stages.
+
+```text
+RenderGraph.validate
+    → compile_graph      typed ops + numeric indexes + media contracts
+    → schedule_graph     fuse consecutive backends → ExecutionPlan
+    → run_render_graph   walk stages, write GraphOutput.uri
+    → artifact_manifest  planned products (stage ports, contracts, output URIs)
+```
+
+These types live on the `reelforge` crate root (not all of them are in `prelude`).
+
+### CaptureProject → RenderGraph
+
+`CaptureProject` is an OTIO-like **user timeline** (sequences, tracks, clips, gaps, markers, semantic refs). It compiles to `RenderGraph`. It is **not** the editor, not screen capture, and not a replacement for `RenderPlan` v1.
+
+```rust
+use reelforge::{
+    CaptureProject, Gap, MediaRef, MediaRefId, ProjectId, Sequence, SequenceId, TimelineItem,
+    TimelineTrack, TimelineTrackId, TrackKind, compile_project,
+};
+
+let mut project = CaptureProject::new(ProjectId::new("demo"), "demo");
+project.media.push(MediaRef {
+    id: MediaRefId::new("a"),
+    uri: "in.mp4".into(),
+    duration: None,
+    role: Some("video".into()),
+});
+// … push a video track with clips / gaps …
+let compiled = compile_project(&project)?;
+// compiled.graph → compile_graph / run_render_graph
+```
+
+`version: 0` migrates to v1. Compile v1: trim, `speed`, fade / dissolve, audio-track `mix`. Wipe is stored, not compiled. Markers stay editorial.
+
+### Build, inspect, run
+
+```rust
+use reelforge::{
+    GraphOutput, MaskSample, MaskTimeline, MediaAsset, MediaAssetId, MediaTime, NodeId,
+    OperationId, OperationRegistry, RENDER_GRAPH_VERSION, RegionRedaction, RenderGraph,
+    GraphRunOptions, RenderNode, RenderNodeKind, WriteControl, artifact_manifest, compile_graph,
+    explain_render_graph, run_render_graph_with_manifest, schedule_graph,
+};
+
+let mut masks = MaskTimeline::new();
+masks.push(MaskSample::ellipse(
+    MediaTime::new(0, 30)?,
+    320.0,
+    180.0,
+    48.0,
+));
+
+let graph = RenderGraph {
+    version: RENDER_GRAPH_VERSION,
+    assets: vec![MediaAsset {
+        id: MediaAssetId("in".into()),
+        uri: "in.mp4".into(),
+        duration: None,
+        role: Some("video".into()),
+    }],
+    nodes: vec![
+        RenderNode {
+            id: NodeId("src".into()),
+            body: RenderNodeKind::Source {
+                asset: MediaAssetId("in".into()),
+            },
+            inputs: vec![],
+        },
+        RenderNode {
+            id: NodeId("trim".into()),
+            body: RenderNodeKind::Op {
+                operation: OperationId::new("rf.transform.trim"),
+                params: serde_json::json!({ "start": 1.0, "duration": 4.0 }),
+            },
+            inputs: vec![NodeId("src".into())],
+        },
+        RenderNode {
+            id: NodeId("blur".into()),
+            body: RenderNodeKind::Redaction {
+                redaction: RegionRedaction::gaussian(masks, 12.0),
+            },
+            inputs: vec![NodeId("trim".into())],
+        },
+        RenderNode {
+            id: NodeId("out".into()),
+            body: RenderNodeKind::Output {
+                name: "main".into(),
+            },
+            inputs: vec![NodeId("blur".into())],
+        },
+    ],
+    outputs: vec![GraphOutput {
+        name: "main".into(),
+        node: NodeId("out".into()),
+        uri: Some("out.mp4".into()),
+    }],
+};
+
+graph.validate()?;
+let compiled = compile_graph(&graph, &OperationRegistry::with_builtins())?;
+assert!(compiled.lookup(&NodeId("trim".into()))?.as_usize() < compiled.nodes.len());
+// Each node has an inferred output contract:
+assert!(compiled.nodes.iter().any(|n| n.output.video));
+
+let plan = schedule_graph(&graph, &OperationRegistry::with_builtins())?;
+let manifest = artifact_manifest(&compiled, &plan);
+assert_eq!(manifest.outputs[0].uri.as_deref(), Some("out.mp4"));
+for (i, io) in plan.io.iter().enumerate() {
+    println!(
+        "stage {i} ({}) in={} out={}",
+        plan.stages[i].backend_tag(),
+        io.inputs.len(),
+        io.outputs.len()
+    );
+}
+
+println!("{}", explain_render_graph(&graph)?);
+let sealed = run_render_graph_with_manifest(&graph, &WriteControl::default(), &GraphRunOptions::default())?;
+assert!(sealed.outputs[0].file_fingerprint.is_some());
+```
+
+`run_render_graph` / `run_render_graph_with` still just write files.  
+`run_render_graph_with_manifest` returns the planned `ArtifactManifest` with `file_fingerprint` filled for outputs that exist on disk.
+
+`run_render_graph_with` accepts `WriteControl` (progress / cancel). Walking `ExecutionPlan` stages reports `WriteStage::Plan`; encode still uses `Video` / `Audio` / `Mux` / `Done`.
+
+### What compile checks
+
+| Check | Error |
+|-------|--------|
+| Duplicate node / asset / output names | `RFGRAPH_DUPLICATE_*` |
+| Cycles | `RFGRAPH_CYCLE` |
+| Unknown op or bad params | `RFGRAPH_UNKNOWN_OPERATION` / `RFGRAPH_INVALID_PARAMS` |
+| Missing stream on an edge (e.g. gain after `rf.audio.drop`) | `RFGRAPH_MEDIA_CONTRACT` |
+
+Asset `role`: omit or `"video"` → video + companion audio; `"audio"` → audio only.
+
+### Builtin ops (ids)
+
+| Id | Typical use |
+|----|-------------|
+| `rf.transform.trim` / `hflip` / `vflip` / `scale` / `crop` / `even_dims` / `rotate` / `fade_in` / `fade_out` | Geometry / time |
+| `rf.color.black_and_white` / `invert` / `painting` | Look |
+| `rf.redaction.region` or `RenderNodeKind::Redaction` | Fused privacy (`MaskTimeline`) |
+| `rf.compose.layers` | Multi-input composite |
+| `rf.audio.gain` / `drop` / `preserve` / `mix` | Audio |
+| `rf.encode.h264` | Encode hints (`crf`, `path`, `preserve_audio`) |
+
+Authoring ids (`NodeId`) are aliases. After compile, execution identity is a dense `NodeIndex` (canonical topo). Permuting the JSON `nodes` array compiles to the same program.
+
+### Masks / tracks
+
+`TrackTimeline` is the identity source (`TrackId` + optional `SubjectId` / `AppearanceId` / `ObservationId` / `Geometry` / `OcclusionState` / `MaskRef`).  
+`MaskTimeline` is a **materialized ROI view** of one or more tracks — not a vision index. ReelForge does not query subjects.
+
+```rust
+use reelforge::{
+    MediaTime, RegionRedaction, SubjectId, TrackId, TrackSample, TrackTimeline,
+    mask_timeline_from_tracks, parse_track_timelines,
+};
+
+let mut track = TrackTimeline::new(TrackId::new("tr_1")).with_subject(SubjectId::new("person_a"));
+track.push(TrackSample::ellipse(TrackId::new("tr_1"), MediaTime::new(0, 30)?, 320.0, 180.0, 40.0));
+let masks = mask_timeline_from_tracks([&track]);
+let redaction = RegionRedaction::gaussian_tracks([&track], 12.0);
+```
+
+Or ingest a SightLoom-shaped JSON export (**no SightLoom crate**):
+
+```rust
+let tracks = parse_track_timelines(&json)?;
+let redaction = RegionRedaction::gaussian_tracks(&tracks, 12.0);
+```
+
+One fused `RegionRedaction` — not one blur node per face. `reelforge-sightloom-adapter` only maps JSON → `TrackTimeline`.
+
+More I/O detail: [IO.md](IO.md#rendergraph).
 
 ---
 
@@ -228,6 +423,8 @@ reelforge version
 reelforge probe input.mp4
 reelforge cut --start 10 --duration 5 in.mp4 out.mp4
 reelforge filter --hflip in.mp4 out.mp4
+reelforge plan job.json --explain
+reelforge plan job.json --run
 ```
 
 From a workspace checkout:
@@ -254,4 +451,5 @@ cargo run -p reelforge-cli -- probe input.mp4
 use reelforge::prelude::*;
 ```
 
-Imports the common clip, effect, compose, I/O, and text types used in the examples above.
+Imports the common clip, effect, compose, I/O, and text types used in the clip-graph examples.  
+`RenderGraph`, `compile_graph`, `schedule_graph`, and `run_render_graph` are on the crate root (`use reelforge::…`).

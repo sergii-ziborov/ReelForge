@@ -1,6 +1,7 @@
 //! Stable fingerprints for stage cache keys (engine hooks for Capture policy).
 
 use crate::compile::CompiledOp;
+use crate::compiled::CompiledGraph;
 use crate::error::{GraphError, Result};
 use crate::graph::RenderGraph;
 use crate::stage::ExecutionPlan;
@@ -14,6 +15,16 @@ use std::hash::{Hash, Hasher};
 /// Serde failure.
 pub fn fingerprint_render_graph(graph: &RenderGraph) -> Result<String> {
     let json = serde_json::to_string(graph).map_err(|e| GraphError::message(e.to_string()))?;
+    Ok(hash_hex(json.as_bytes()))
+}
+
+/// Hex fingerprint of a [`CompiledGraph`] (indexes + typed ops, authoring-order independent).
+///
+/// # Errors
+///
+/// Serde failure.
+pub fn fingerprint_compiled_graph(graph: &CompiledGraph) -> Result<String> {
+    let json = graph.to_json_canonical()?;
     Ok(hash_hex(json.as_bytes()))
 }
 
@@ -215,5 +226,22 @@ mod tests {
         // Sanity: typed params round-trip for scale.
         assert!(matches!(scale.params, TypedParams::Scale { w: 64, h: 32 }));
         assert_eq!(scale.backend, BackendClass::Ffmpeg);
+    }
+
+    #[test]
+    fn compiled_fingerprint_ignores_authoring_order() {
+        let r = OperationRegistry::with_builtins();
+        let mut g = tiny_graph();
+        let a = crate::compile_graph(&g, &r).unwrap();
+        g.nodes.reverse();
+        let b = crate::compile_graph(&g, &r).unwrap();
+        assert_eq!(
+            fingerprint_compiled_graph(&a).unwrap(),
+            fingerprint_compiled_graph(&b).unwrap()
+        );
+        assert_ne!(
+            fingerprint_render_graph(&tiny_graph()).unwrap(),
+            fingerprint_render_graph(&g).unwrap()
+        );
     }
 }

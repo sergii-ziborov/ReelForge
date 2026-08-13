@@ -94,6 +94,20 @@ impl FilterGraph {
         let parts: Vec<String> = self.ops.iter().map(FilterOp::to_filter).collect();
         Ok(parts.join(","))
     }
+
+    /// Audio filter matching video [`FilterOp::Trim`] ops (`atrim` + `asetpts`).
+    ///
+    /// `None` when the graph does not change the timeline — then `-c:a copy`
+    /// can keep the source bitstream.
+    #[must_use]
+    pub fn to_af(&self) -> Option<String> {
+        let parts: Vec<String> = self.ops.iter().filter_map(FilterOp::to_afilter).collect();
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join(","))
+        }
+    }
 }
 
 impl FilterOp {
@@ -116,6 +130,15 @@ impl FilterOp {
             Self::BlackAndWhite => "hue=s=0".into(),
         }
     }
+
+    fn to_afilter(&self) -> Option<String> {
+        match self {
+            Self::Trim { start, duration } => Some(format!(
+                "atrim=start={start}:duration={duration},asetpts=PTS-STARTPTS"
+            )),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -135,5 +158,14 @@ mod tests {
         assert!(vf.contains("trim="));
         assert!(vf.contains("hflip"));
         assert!(vf.contains("scale=320:180"));
+        let af = g.to_af().unwrap();
+        assert!(af.contains("atrim=start=1"));
+        assert!(af.contains("asetpts"));
+    }
+
+    #[test]
+    fn no_audio_filter_without_trim() {
+        let g = FilterGraph::new().then(FilterOp::HFlip);
+        assert!(g.to_af().is_none());
     }
 }
