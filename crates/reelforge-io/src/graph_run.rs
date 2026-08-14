@@ -46,6 +46,8 @@ pub struct GraphEncodeHints {
     pub preserve_audio: bool,
     /// Optional vision adapter host (`SightLoom` / tests).
     pub adapter_host: Option<std::sync::Arc<dyn crate::AdapterHost>>,
+    /// Adapter executors (`SightLoom` JSON by default).
+    pub adapter_registry: crate::AdapterRegistry,
 }
 
 impl core::fmt::Debug for GraphEncodeHints {
@@ -57,6 +59,7 @@ impl core::fmt::Debug for GraphEncodeHints {
             .field("output_path", &self.output_path)
             .field("preserve_audio", &self.preserve_audio)
             .field("adapter_host", &self.adapter_host.is_some())
+            .field("adapter_registry", &self.adapter_registry.len())
             .finish()
     }
 }
@@ -110,6 +113,8 @@ pub struct GraphRunOptions {
     pub with_audio: bool,
     /// Optional `SightLoom` / test adapter host.
     pub adapter_host: Option<Arc<dyn crate::AdapterHost>>,
+    /// Adapter executors (builtins by default).
+    pub adapter_registry: crate::AdapterRegistry,
 }
 
 impl Default for GraphRunOptions {
@@ -122,6 +127,7 @@ impl Default for GraphRunOptions {
             cache: None,
             with_audio: true,
             adapter_host: None,
+            adapter_registry: crate::AdapterRegistry::with_builtins(),
         }
     }
 }
@@ -160,6 +166,13 @@ impl GraphRunOptions {
         self.adapter_host = Some(host);
         self
     }
+
+    /// Replace the adapter executor registry.
+    #[must_use]
+    pub fn with_adapter_registry(mut self, registry: crate::AdapterRegistry) -> Self {
+        self.adapter_registry = registry;
+        self
+    }
 }
 
 impl core::fmt::Debug for GraphRunOptions {
@@ -172,6 +185,7 @@ impl core::fmt::Debug for GraphRunOptions {
             .field("cache", &self.cache.is_some())
             .field("with_audio", &self.with_audio)
             .field("adapter_host", &self.adapter_host.is_some())
+            .field("adapter_registry", &self.adapter_registry.len())
             .finish()
     }
 }
@@ -391,7 +405,7 @@ fn execute_plan_and_seal(
 
     let seeds = HashMap::new();
     let audio_seeds = HashMap::new();
-    let mut bundle = materialize_execution_plan_with_host(
+    let mut bundle = materialize_execution_plan_with_adapters(
         graph,
         plan,
         &options.registry,
@@ -400,7 +414,10 @@ fn execute_plan_and_seal(
         options.with_audio,
         Some(control),
         options.cache.as_ref(),
-        options.adapter_host.clone(),
+        crate::AdapterContext {
+            host: options.adapter_host.clone(),
+            registry: options.adapter_registry.clone(),
+        },
     )?;
     merge_option_hints(&mut bundle.hints, options);
     write_graph_outputs(
@@ -523,7 +540,7 @@ pub fn materialize_graph_bundle<S: BuildHasher, A: BuildHasher>(
     let order = graph
         .topo_order()
         .map_err(|e| IoError::message(e.to_string()))?;
-    let mut ctx = MaterializeCtx::new(graph, registry, with_audio, None);
+    let mut ctx = MaterializeCtx::new(graph, registry, with_audio, crate::AdapterContext::default());
     for id in &order {
         ctx.eval_node(id, video_seeds, audio_seeds)?;
     }
@@ -552,7 +569,7 @@ pub fn materialize_execution_plan<S: BuildHasher, A: BuildHasher>(
     control: Option<&WriteControl>,
     cache: Option<&StageCache>,
 ) -> Result<GraphBundle> {
-    materialize_execution_plan_with_host(
+    materialize_execution_plan_with_adapters(
         graph,
         plan,
         registry,
@@ -561,12 +578,17 @@ pub fn materialize_execution_plan<S: BuildHasher, A: BuildHasher>(
         with_audio,
         control,
         cache,
-        None,
+        crate::AdapterContext::default(),
     )
 }
 
+/// Like [`materialize_execution_plan`] with an explicit [`crate::AdapterContext`].
+///
+/// # Errors
+///
+/// Same as [`materialize_execution_plan`].
 #[allow(clippy::too_many_arguments)]
-fn materialize_execution_plan_with_host<S: BuildHasher, A: BuildHasher>(
+pub fn materialize_execution_plan_with_adapters<S: BuildHasher, A: BuildHasher>(
     graph: &RenderGraph,
     plan: &ExecutionPlan,
     registry: &OperationRegistry,
@@ -575,7 +597,7 @@ fn materialize_execution_plan_with_host<S: BuildHasher, A: BuildHasher>(
     with_audio: bool,
     control: Option<&WriteControl>,
     cache: Option<&StageCache>,
-    adapter_host: Option<Arc<dyn crate::AdapterHost>>,
+    adapters: crate::AdapterContext,
 ) -> Result<GraphBundle> {
     graph
         .validate()
@@ -587,7 +609,7 @@ fn materialize_execution_plan_with_host<S: BuildHasher, A: BuildHasher>(
         return materialize_graph_bundle(graph, registry, video_seeds, audio_seeds, with_audio);
     }
 
-    let mut ctx = MaterializeCtx::new(graph, registry, with_audio, adapter_host);
+    let mut ctx = MaterializeCtx::new(graph, registry, with_audio, adapters);
     let mut upstream_fp = asset_input_fingerprint(graph);
     let total_stages = plan.stages.len();
     #[allow(clippy::cast_possible_truncation)]
@@ -649,7 +671,7 @@ impl<'a> MaterializeCtx<'a> {
         graph: &'a RenderGraph,
         registry: &'a OperationRegistry,
         with_audio: bool,
-        adapter_host: Option<Arc<dyn crate::AdapterHost>>,
+        adapters: crate::AdapterContext,
     ) -> Self {
         Self {
             graph,
@@ -659,7 +681,8 @@ impl<'a> MaterializeCtx<'a> {
             produced: HashMap::new(),
             hints: GraphEncodeHints {
                 preserve_audio: with_audio,
-                adapter_host,
+                adapter_host: adapters.host,
+                adapter_registry: adapters.registry,
                 ..GraphEncodeHints::default()
             },
             primary_out: None,

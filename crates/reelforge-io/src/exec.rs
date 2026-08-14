@@ -2,7 +2,7 @@
 //!
 //! Dispatch is [`TypedParams`] / [`ExecutorKind`], not operation-id strings.
 
-use crate::adapter::execute_adapter;
+use crate::adapter::{AdapterContext, AdapterRequest, execute_adapter};
 use crate::error::{IoError, Result};
 use crate::graph_run::{GraphEncodeHints, NodeMedia};
 use crate::mask_bridge::{apply_region_redaction, region_redaction_from_value};
@@ -122,7 +122,13 @@ fn execute_unary(
             })
         }
         TypedParams::Adapter { name, params } => {
-            let out = execute_adapter(name, params, hints.adapter_host.as_deref())?;
+            let request = AdapterRequest::new(name.clone(), params.clone())
+                .with_video(Arc::clone(&input.video));
+            let ctx = AdapterContext {
+                host: hints.adapter_host.clone(),
+                registry: hints.adapter_registry.clone(),
+            };
+            let out = execute_adapter(&request, &ctx)?;
             Ok(NodeMedia {
                 video: input.video,
                 audio: input.audio,

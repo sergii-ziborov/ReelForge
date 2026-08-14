@@ -5,6 +5,7 @@
 //! `PATH`.
 
 mod adapter;
+mod adapter_registry;
 mod audio_file;
 mod control;
 mod encode_native;
@@ -28,7 +29,10 @@ mod video_file;
 mod waveform;
 mod write;
 
-pub use adapter::{AdapterHost, AdapterOutput, execute_adapter};
+pub use adapter::{
+    AdapterContext, AdapterExecutor, AdapterHost, AdapterOutput, AdapterRequest, execute_adapter,
+};
+pub use adapter_registry::{AdapterRegistry, SightloomJsonExecutor};
 pub use encode_native::{encode_sampled_rawvideo, is_native_raw_format};
 pub use audio_file::{AudioFileClip, layout_for_channels, open_audio};
 pub use control::{CancelToken, ProgressCallback, WriteControl, WriteProgress, WriteStage};
@@ -43,7 +47,8 @@ pub use filtergraph::{
 };
 pub use graph_run::{
     GraphBundle, GraphEncodeHints, GraphRunOptions, explain_render_graph,
-    explain_render_graph_with, is_executable_op, materialize_execution_plan, materialize_graph,
+    explain_render_graph_with, is_executable_op, materialize_execution_plan,
+    materialize_execution_plan_with_adapters, materialize_graph,
     materialize_graph_bundle, materialize_graph_with_seeds, node_backend, run_execution_plan,
     run_execution_plan_with, run_execution_plan_with_manifest, run_render_graph,
     run_render_graph_with, run_render_graph_with_manifest,

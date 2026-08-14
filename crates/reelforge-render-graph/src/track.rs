@@ -11,6 +11,7 @@ use crate::mask::{
 };
 use reelforge_core::MediaTime;
 use serde::{Deserialize, Serialize};
+use std::hash::{Hash, Hasher};
 
 /// Visibility at a sample (orthogonal to [`MaskLifecycle`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
@@ -131,8 +132,10 @@ impl TrackSample {
         }
         if let Some(mask) = &self.mask {
             sample.asset = Some(crate::mask_asset::MaskAssetRef::external(
-                mask.uri.clone().unwrap_or_default(),
-                0,
+                mask.uri
+                    .clone()
+                    .unwrap_or_else(|| "sightloom".into()),
+                mask_ref_id(mask),
             ));
         }
         let mut prov = self.provenance.clone().unwrap_or_default();
@@ -142,6 +145,18 @@ impl TrackSample {
         sample.provenance = Some(prov);
         sample
     }
+}
+
+fn mask_ref_id(mask: &MaskRef) -> u64 {
+    if let Ok(n) = mask.observation.as_str().parse::<u64>() {
+        return n;
+    }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    mask.observation.as_str().hash(&mut hasher);
+    if let Some(uri) = &mask.uri {
+        uri.hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 /// One tracker trajectory. Identity source for redaction.
