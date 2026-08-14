@@ -33,7 +33,10 @@ impl CoverageMask {
             return 0.0;
         }
         let i = oy * self.width as usize + ox;
-        self.data.get(i).copied().map_or(0.0, |v| f32::from(v) / 255.0)
+        self.data
+            .get(i)
+            .copied()
+            .map_or(0.0, |v| f32::from(v) / 255.0)
     }
 
     /// Inclusive pixel bounds `(x0, y0, x1, y1)` clipped later by the caller.

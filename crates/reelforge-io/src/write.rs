@@ -320,9 +320,8 @@ fn write_native(
         frame_count: n,
         fps,
     } = *prepared;
-    let sample = |i: u64| -> Result<Vec<u8>> {
-        sample_write_surface(clip, i, fps, duration, size, in_fmt)
-    };
+    let sample =
+        |i: u64| -> Result<Vec<u8>> { sample_write_surface(clip, i, fps, duration, size, in_fmt) };
     if let Some(audio) = audio {
         let video_tmp = temp_sibling(path, "rf-vid", "mp4");
         let audio_tmp = temp_sibling(path, "rf-aud", "pcm");

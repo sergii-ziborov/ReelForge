@@ -62,7 +62,11 @@ impl PreviewSpec {
         match self.quality {
             PreviewQuality::Full => src,
             PreviewQuality::Draft | PreviewQuality::Proxy => {
-                let w = if self.max_width == 0 { 640 } else { self.max_width };
+                let w = if self.max_width == 0 {
+                    640
+                } else {
+                    self.max_width
+                };
                 let h = if self.max_height == 0 {
                     360
                 } else {

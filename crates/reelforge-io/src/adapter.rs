@@ -42,7 +42,10 @@ impl AdapterRequest {
     /// Short name (`rf.adapter.sightloom` → `sightloom`).
     #[must_use]
     pub fn short_name(&self) -> &str {
-        self.adapter.rsplit('.').next().unwrap_or(self.adapter.as_str())
+        self.adapter
+            .rsplit('.')
+            .next()
+            .unwrap_or(self.adapter.as_str())
     }
 }
 
@@ -172,9 +175,10 @@ fn attach_frames(masks: &mut MaskTimeline, frames: &[MaskFrame]) {
         if sample.asset.is_some() {
             continue;
         }
-        let Some(hit) = frames.iter().find(|frame| {
-            frame.subject == sample.subject_id() && frame.time == sample.t
-        }) else {
+        let Some(hit) = frames
+            .iter()
+            .find(|frame| frame.subject == sample.subject_id() && frame.time == sample.t)
+        else {
             continue;
         };
         sample.asset = Some(hit.mask.clone());
@@ -225,8 +229,11 @@ mod tests {
                 "samples": [{"t": 0.0, "cx": 10.0, "cy": 10.0, "radius": 5.0}]
             }]
         });
-        let out = execute_adapter(&AdapterRequest::new("sightloom", params), &AdapterContext::new())
-            .unwrap();
+        let out = execute_adapter(
+            &AdapterRequest::new("sightloom", params),
+            &AdapterContext::new(),
+        )
+        .unwrap();
         assert_eq!(out.tracks.len(), 1);
         assert_eq!(out.masks.unwrap().samples.len(), 1);
     }

@@ -132,9 +132,7 @@ impl TrackSample {
         }
         if let Some(mask) = &self.mask {
             sample.asset = Some(crate::mask_asset::MaskAssetRef::external(
-                mask.uri
-                    .clone()
-                    .unwrap_or_else(|| "sightloom".into()),
+                mask.uri.clone().unwrap_or_else(|| "sightloom".into()),
                 mask_ref_id(mask),
             ));
         }

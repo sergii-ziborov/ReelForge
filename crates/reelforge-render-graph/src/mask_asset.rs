@@ -111,12 +111,7 @@ impl MaskAssetRef {
 impl MaskFrame {
     /// Construct a frame.
     #[must_use]
-    pub fn new(
-        time: MediaTime,
-        subject: SubjectId,
-        mask: MaskAssetRef,
-        confidence: f32,
-    ) -> Self {
+    pub fn new(time: MediaTime, subject: SubjectId, mask: MaskAssetRef, confidence: f32) -> Self {
         Self {
             time,
             subject,
@@ -280,8 +275,8 @@ fn point_in_polygon(x: f32, y: f32, pts: &[(f32, f32)]) -> bool {
     for i in 0..pts.len() {
         let (xi, yi) = pts[i];
         let (xj, yj) = pts[j];
-        let intersect = ((yi > y) != (yj > y))
-            && (x < (xj - xi) * (y - yi) / (yj - yi + f32::EPSILON) + xi);
+        let intersect =
+            ((yi > y) != (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi + f32::EPSILON) + xi);
         if intersect {
             inside = !inside;
         }

@@ -27,7 +27,12 @@ impl Roi {
 
 /// Union of region boxes + kernel / feather pad, clipped to the frame.
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-pub(crate) fn union_roi(regions: &[RegionAt], width: usize, height: usize, pad: usize) -> Option<Roi> {
+pub(crate) fn union_roi(
+    regions: &[RegionAt],
+    width: usize,
+    height: usize,
+    pad: usize,
+) -> Option<Roi> {
     if regions.is_empty() || width == 0 || height == 0 {
         return None;
     }

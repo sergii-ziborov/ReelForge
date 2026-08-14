@@ -78,7 +78,10 @@ fn rewrite_package_refs(masks: &mut reelforge_render_graph::MaskTimeline, packag
         let Some(refer) = sample.asset.as_mut() else {
             continue;
         };
-        if let MaskAsset::External { package_id: pid, .. } = &mut refer.asset {
+        if let MaskAsset::External {
+            package_id: pid, ..
+        } = &mut refer.asset
+        {
             let looks_like_path = pid.is_empty()
                 || pid.contains('/')
                 || pid.contains('\\')
@@ -127,10 +130,7 @@ mod tests {
         fs::write(dir.path().join("manifest.json"), manifest.to_string()).unwrap();
         let host = SightloomPackageHost::open(dir.path()).unwrap();
         let out = execute_adapter(
-            &AdapterRequest::new(
-                "sightloom",
-                serde_json::json!({ "package_id": "pkg-demo" }),
-            ),
+            &AdapterRequest::new("sightloom", serde_json::json!({ "package_id": "pkg-demo" })),
             &AdapterContext::new().with_host(Arc::new(host)),
         )
         .unwrap();

@@ -34,9 +34,9 @@ pub use clip::{
 };
 pub use color::{Rgb8, Rgba8};
 pub use convert::surface_to_rgb_frame;
-pub use external::{ExternalBackend, ExternalSurface};
 pub use effect::{AudioEffect, VideoEffect, apply_audio_effects, apply_video_effects};
 pub use error::{CoreError, Result};
+pub use external::{ExternalBackend, ExternalSurface};
 pub use frame::{Frame, FrameFormat, Mask};
 pub use layout::{Anchor, Position, Size};
 pub use media_range::MediaRange;
@@ -60,9 +60,9 @@ pub mod prelude {
         CacheConfig, CacheStats, CachedVideo, ClipId, ColorClip, ColorInfo, ColorPrimaries,
         ColorRange, ColorSpace, ColorTransfer, CoreError, Duration, ExternalBackend,
         ExternalSurface, Frame, FrameFormat, FrameStream, Mask, MemoryLocation, PixelFormat,
-        Position, Result, Rgb8, Rgba8, SilenceClip,
-        Size, StreamTimeBase, SurfacePlane, Time, TimeRange, TimedAudio, TimedVideo, VideoClip,
-        VideoEffect, VideoSurface, cache_video, cache_video_realtime, resample_linear,
-        stream_video, stream_video_raw, subclip_audio, subclip_video,
+        Position, Result, Rgb8, Rgba8, SilenceClip, Size, StreamTimeBase, SurfacePlane, Time,
+        TimeRange, TimedAudio, TimedVideo, VideoClip, VideoEffect, VideoSurface, cache_video,
+        cache_video_realtime, resample_linear, stream_video, stream_video_raw, subclip_audio,
+        subclip_video,
     };
 }

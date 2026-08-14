@@ -82,8 +82,7 @@ impl JobStore {
         let rd = fs::read_dir(&self.root)
             .map_err(|e| IoError::message(format!("job list {}: {e}", self.root.display())))?;
         for ent in rd {
-            let ent =
-                ent.map_err(|e| IoError::message(format!("job list entry: {e}")))?;
+            let ent = ent.map_err(|e| IoError::message(format!("job list entry: {e}")))?;
             if !ent.path().is_dir() {
                 continue;
             }

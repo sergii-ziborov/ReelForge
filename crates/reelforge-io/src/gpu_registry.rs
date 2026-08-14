@@ -1,7 +1,7 @@
 //! Builtin [`GpuExecutor`]s and the GPU registry.
 
-use crate::gpu::{GpuExecutor, GpuOutput, GpuRequest};
 use crate::error::Result;
+use crate::gpu::{GpuExecutor, GpuOutput, GpuRequest};
 use crate::realtime::detect_hw_encoders;
 use std::collections::BTreeMap;
 use std::sync::Arc;

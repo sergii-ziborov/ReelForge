@@ -301,15 +301,15 @@ mod tests {
             data[y * 32 + 8] = 255;
         }
         let mut tr = RegionTrack::new("bar");
-        tr.push(RegionSample::from_bbox(0.0, 8.0, 8.0, 9.0, 24.0, 1.0).with_coverage(
-            CoverageMask {
+        tr.push(
+            RegionSample::from_bbox(0.0, 8.0, 8.0, 9.0, 24.0, 1.0).with_coverage(CoverageMask {
                 left: 0,
                 top: 0,
                 width: 32,
                 height: 32,
                 data: Arc::new(data),
-            },
-        ));
+            }),
+        );
         let mut set = TrackSet::new();
         set.push(tr);
         let out = TrackedPrivacy::solid(set, Rgba8::new(0, 0, 0, 255))

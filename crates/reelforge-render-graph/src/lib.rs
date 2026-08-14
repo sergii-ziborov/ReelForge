@@ -62,9 +62,7 @@ pub use mask::{
     MaskInterpolation, MaskLifecycle, MaskProvenance, MaskRegionAt, MaskSample, MaskTimeline,
     MissingMaskPolicy,
 };
-pub use mask_asset::{
-    DecodedCoverage, MaskAsset, MaskAssetRef, MaskFrame, SubjectKey,
-};
+pub use mask_asset::{DecodedCoverage, MaskAsset, MaskAssetRef, MaskFrame, SubjectKey};
 pub use op::{
     BackendClass, CapabilitySet, ExecutorKind, MediaContract, OperationDescriptor, OperationId,
     OperationLimits, OperationRegistry, SemVer,

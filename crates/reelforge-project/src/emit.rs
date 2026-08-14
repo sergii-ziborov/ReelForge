@@ -6,8 +6,7 @@ use crate::model::{SemanticRef, TimelineItem};
 use crate::project::{CaptureProject, Sequence, TimelineTrack, TrackKind};
 use reelforge_core::MediaTime;
 use reelforge_render_graph::{
-    MaskTimeline, MediaAsset, NodeId, OperationId, RegionRedaction, RenderNode,
-    RenderNodeKind,
+    MaskTimeline, MediaAsset, NodeId, OperationId, RegionRedaction, RenderNode, RenderNodeKind,
 };
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};

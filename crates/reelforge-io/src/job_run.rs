@@ -22,8 +22,8 @@ pub fn submit_render_job(
     graph
         .validate()
         .map_err(|e| IoError::message(e.to_string()))?;
-    let plan = schedule_graph(graph, &options.registry)
-        .map_err(|e| IoError::message(e.to_string()))?;
+    let plan =
+        schedule_graph(graph, &options.registry).map_err(|e| IoError::message(e.to_string()))?;
     let fp = StageCache::run_fingerprint(graph, &plan)?;
     let mut job = RenderJob::new(crate::job::JobId::generate()).with_fingerprint(fp);
     job.checkpoint.total_stages = u32::try_from(plan.stages.len()).unwrap_or(u32::MAX);
@@ -52,8 +52,8 @@ pub fn run_render_job(
     control: &WriteControl,
     options: &GraphRunOptions,
 ) -> Result<ArtifactManifest> {
-    let plan = schedule_graph(graph, &options.registry)
-        .map_err(|e| IoError::message(e.to_string()))?;
+    let plan =
+        schedule_graph(graph, &options.registry).map_err(|e| IoError::message(e.to_string()))?;
     let fp = StageCache::run_fingerprint(graph, &plan)?;
     if job.state == JobState::Done
         && job.run_fingerprint.as_deref() == Some(fp.as_str())
@@ -131,8 +131,8 @@ fn checkpointing_control(
             if let Ok(mut live) = store.load(&id) {
                 #[allow(clippy::cast_possible_truncation)]
                 {
-                    live.checkpoint.next_stage = u32::try_from(p.index.saturating_add(1))
-                        .unwrap_or(u32::MAX);
+                    live.checkpoint.next_stage =
+                        u32::try_from(p.index.saturating_add(1)).unwrap_or(u32::MAX);
                     live.checkpoint.total_stages =
                         u32::try_from(p.total).unwrap_or(live.checkpoint.total_stages);
                 }
@@ -237,7 +237,8 @@ mod tests {
         job.state = JobState::Done;
         job.output_uri = g.outputs[0].uri.clone();
         store.save(&job).unwrap();
-        let manifest = run_render_job(&store, &mut job, &g, &WriteControl::default(), &opts).unwrap();
+        let manifest =
+            run_render_job(&store, &mut job, &g, &WriteControl::default(), &opts).unwrap();
         assert!(!manifest.outputs.is_empty());
         assert_eq!(store.load(&job.id).unwrap().state, JobState::Done);
         let _ = JobId::new("x");

@@ -23,6 +23,7 @@ mod mask_color;
 mod masks_bool;
 mod mirror;
 mod painting;
+mod privacy_roi;
 mod raster;
 mod resize;
 mod rotate;
@@ -34,7 +35,6 @@ mod super_sample;
 mod time_mirror;
 mod time_sym;
 mod tracked_blur;
-mod privacy_roi;
 mod tracked_privacy;
 mod tracks;
 
