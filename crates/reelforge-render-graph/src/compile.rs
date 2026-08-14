@@ -109,6 +109,24 @@ pub enum TypedParams {
         /// Playback factor (`2.0` = twice as fast).
         factor: f64,
     },
+    /// `rf.transform.freeze`
+    Freeze {
+        /// Source time of the held frame.
+        #[serde(deserialize_with = "de_media_time")]
+        at: MediaTime,
+        /// Hold length.
+        #[serde(deserialize_with = "de_media_time")]
+        hold: MediaTime,
+    },
+    /// `rf.transform.loop`
+    Loop {
+        /// Total output length when set.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration: Option<MediaTime>,
+        /// Repeat count when `duration` is unset (default 2).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        times: Option<u32>,
+    },
     /// `rf.color.black_and_white`
     BlackAndWhite,
     /// `rf.color.invert`
@@ -234,6 +252,8 @@ pub fn is_executable_op_id(id: &str) -> bool {
             | "rf.transform.fade_in"
             | "rf.transform.fade_out"
             | "rf.transform.speed"
+            | "rf.transform.freeze"
+            | "rf.transform.loop"
             | "rf.color.black_and_white"
             | "rf.color.invert"
             | "rf.color.painting"
@@ -406,16 +426,18 @@ fn parse_typed_params(id: &str, raw: &Value) -> Result<TypedParams> {
     let empty = raw.is_null() || raw.as_object().is_some_and(serde_json::Map::is_empty);
     match id {
         "rf.transform.trim" => {
-            let start = time_field(raw, "start").unwrap_or_else(|| MediaTime::zero(MediaTime::HZ_1M));
+            let start =
+                time_field(raw, "start").unwrap_or_else(|| MediaTime::zero(MediaTime::HZ_1M));
             let duration =
                 time_field(raw, "duration").ok_or_else(|| GraphError::InvalidParams {
                     operation: id.into(),
                     message: "duration required".into(),
                 })?;
-            let range = MediaRange::new(start, duration).map_err(|e| GraphError::InvalidParams {
-                operation: id.into(),
-                message: e.to_string(),
-            })?;
+            let range =
+                MediaRange::new(start, duration).map_err(|e| GraphError::InvalidParams {
+                    operation: id.into(),
+                    message: e.to_string(),
+                })?;
             Ok(TypedParams::Trim {
                 start: range.start,
                 duration: range.duration,
@@ -479,6 +501,49 @@ fn parse_typed_params(id: &str, raw: &Value) -> Result<TypedParams> {
                 });
             }
             Ok(TypedParams::Speed { factor })
+        }
+        "rf.transform.freeze" => {
+            let hold = time_field(raw, "hold").ok_or_else(|| GraphError::InvalidParams {
+                operation: id.into(),
+                message: "hold required".into(),
+            })?;
+            if hold.as_secs() <= 0.0 {
+                return Err(GraphError::InvalidParams {
+                    operation: id.into(),
+                    message: "freeze hold must be > 0".into(),
+                });
+            }
+            Ok(TypedParams::Freeze {
+                at: time_field(raw, "at").unwrap_or_else(|| MediaTime::zero(hold.timescale)),
+                hold,
+            })
+        }
+        "rf.transform.loop" => {
+            let duration = time_field(raw, "duration");
+            let times = u32_field(raw, "times").or_else(|| u32_field(raw, "n"));
+            if duration.is_none() && times.is_none() {
+                return Err(GraphError::InvalidParams {
+                    operation: id.into(),
+                    message: "loop needs duration or times".into(),
+                });
+            }
+            if let Some(d) = duration
+                && d.as_secs() <= 0.0
+            {
+                return Err(GraphError::InvalidParams {
+                    operation: id.into(),
+                    message: "loop duration must be > 0".into(),
+                });
+            }
+            if let Some(n) = times
+                && n == 0
+            {
+                return Err(GraphError::InvalidParams {
+                    operation: id.into(),
+                    message: "loop times must be > 0".into(),
+                });
+            }
+            Ok(TypedParams::Loop { duration, times })
         }
         "rf.transform.fade_out" => Ok(TypedParams::FadeOut {
             duration: time_field(raw, "duration")
@@ -756,12 +821,7 @@ mod tests {
     #[test]
     fn compiles_gpu_passthrough_and_hw_encode() {
         let r = OperationRegistry::with_builtins();
-        let p = compile_op(
-            &r,
-            &OperationId::new("rf.gpu.passthrough"),
-            &Value::Null,
-        )
-        .unwrap();
+        let p = compile_op(&r, &OperationId::new("rf.gpu.passthrough"), &Value::Null).unwrap();
         assert!(matches!(p.params, TypedParams::Gpu { .. }));
         assert_eq!(p.backend, BackendClass::Gpu);
         let h = compile_op(

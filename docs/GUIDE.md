@@ -225,7 +225,7 @@ let compiled = compile_project(&project)?;
 // compiled.graph → compile_graph / run_render_graph
 ```
 
-`version: 0` migrates to v1. Compile v1: trim (`{ticks, timescale}`), `speed`, fade / dissolve, audio-track `mix`, muted tracks skipped. Project `semantic` refs (`subject` / `event` / `query` / `policy`) compile to `rf.adapter.sightloom` + an empty fused redaction — handles only, no bboxes. Wipe is stored, not compiled. Markers stay editorial. Nested sequences offset their child layers.
+`version: 0` migrates to v1. Compile v1: trim (`{ticks, timescale}`), `speed` / `freeze` / `loop`, fade / dissolve, audio-track `mix`, muted tracks skipped. Project `semantic` refs (`subject` / `event` / `query` / `policy`) compile to `rf.adapter.sightloom` + an empty fused redaction — handles only, no bboxes. Wipe is stored, not compiled. Markers stay editorial. Nested sequences offset their child layers.
 
 ### Build, inspect, run
 
@@ -334,7 +334,7 @@ Asset `role`: omit or `"video"` → video + companion audio; `"audio"` → audio
 
 | Id | Typical use |
 |----|-------------|
-| `rf.transform.trim` / `hflip` / `vflip` / `scale` / `crop` / `even_dims` / `rotate` / `fade_in` / `fade_out` | Geometry / time |
+| `rf.transform.trim` / `hflip` / `vflip` / `scale` / `crop` / `even_dims` / `rotate` / `fade_in` / `fade_out` / `speed` / `freeze` / `loop` | Geometry / time |
 | `rf.color.black_and_white` / `invert` / `painting` | Look |
 | `rf.adapter.sightloom` | Adapter stage: JSON tracks / `AdapterHost` → `MaskTimeline` |
 | `rf.redaction.region` or `RenderNodeKind::Redaction` | Fused privacy (`MaskTimeline` + optional `MaskAsset`) |

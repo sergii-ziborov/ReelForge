@@ -3,8 +3,8 @@
 //! Dispatch is [`TypedParams`] / [`ExecutorKind`], not operation-id strings.
 
 use crate::adapter::{AdapterContext, AdapterRequest, execute_adapter};
-use crate::gpu::{GpuContext, GpuRequest, execute_gpu};
 use crate::error::{IoError, Result};
+use crate::gpu::{GpuContext, GpuRequest, execute_gpu};
 use crate::graph_run::{GraphEncodeHints, NodeMedia};
 use crate::mask_bridge::{apply_region_redaction, region_redaction_from_value};
 use reelforge_compose::{
@@ -14,8 +14,8 @@ use reelforge_core::{
     AudioEffect, Position, Rgb8, Size, Time, VideoClip, VideoEffect, subclip_audio, subclip_video,
 };
 use reelforge_fx::{
-    BlackAndWhite, Crop, EvenSize, FadeIn, FadeOut, InvertColors, MirrorX, MirrorY, Painting,
-    Resize, Rotate, Speed, VolumeGain,
+    BlackAndWhite, Crop, EvenSize, FadeIn, FadeOut, Freeze, InvertColors, Loop, MirrorX, MirrorY,
+    Painting, Resize, Rotate, Speed, VolumeGain,
 };
 use reelforge_render_graph::{CompiledOp, ExecutorKind, TypedParams};
 use std::sync::Arc;
@@ -112,7 +112,8 @@ fn execute_unary(
             .map_err(IoError::from)?;
             let audio = match input.audio {
                 Some(a) => Some(
-                    subclip_audio(a, start.to_time(), duration.to_duration()).map_err(IoError::from)?,
+                    subclip_audio(a, start.to_time(), duration.to_duration())
+                        .map_err(IoError::from)?,
                 ),
                 None => None,
             };
@@ -300,6 +301,17 @@ fn apply_typed_video(
         TypedParams::Adapter { .. } | TypedParams::Gpu { .. } => Ok(clip),
         TypedParams::Speed { factor } => {
             VideoEffect::apply(&Speed::new(*factor), clip).map_err(IoError::from)
+        }
+        TypedParams::Freeze { at, hold } => Freeze::new(at.to_time(), hold.to_duration())
+            .apply(clip)
+            .map_err(IoError::from),
+        TypedParams::Loop { duration, times } => {
+            let fx = if let Some(d) = duration {
+                Loop::until(d.to_duration())
+            } else {
+                Loop::times(times.unwrap_or(2))
+            };
+            fx.apply(clip).map_err(IoError::from)
         }
         TypedParams::BlackAndWhite => BlackAndWhite.apply(clip).map_err(IoError::from),
         TypedParams::Invert => InvertColors.apply(clip).map_err(IoError::from),

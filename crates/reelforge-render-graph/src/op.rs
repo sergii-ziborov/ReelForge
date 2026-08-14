@@ -351,6 +351,32 @@ impl OperationRegistry {
             }),
             &["edit", "time"],
         );
+        transform(
+            "rf.transform.freeze",
+            BackendClass::Rust,
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "at": {},
+                    "hold": {}
+                },
+                "required": ["hold"]
+            }),
+            &["edit", "time"],
+        );
+        transform(
+            "rf.transform.loop",
+            BackendClass::Rust,
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "duration": {},
+                    "times": { "type": "integer" },
+                    "n": { "type": "integer" }
+                }
+            }),
+            &["edit", "time"],
+        );
 
         r.register(OperationDescriptor {
             id: OperationId::new("rf.color.black_and_white"),

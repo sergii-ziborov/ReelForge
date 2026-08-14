@@ -68,6 +68,22 @@ pub enum Retiming {
         /// Factor.
         factor: f64,
     },
+    /// Hold the frame at `at` for `hold` (extends record duration).
+    Freeze {
+        /// Source time of the frozen frame.
+        at: MediaTime,
+        /// Hold length.
+        hold: MediaTime,
+    },
+    /// Repeat the source (`duration` wins over `times`).
+    Loop {
+        /// Total output length.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration: Option<MediaTime>,
+        /// Repeat count when `duration` is unset.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        times: Option<u32>,
+    },
 }
 
 /// Media library entry (file / URI).

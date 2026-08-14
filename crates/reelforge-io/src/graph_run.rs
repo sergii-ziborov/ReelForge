@@ -1,4 +1,4 @@
-﻿//! Execute [`RenderGraph`] / [`ExecutionPlan`] (M3 hybrid runner).
+//! Execute [`RenderGraph`] / [`ExecutionPlan`] (M3 hybrid runner).
 //!
 //! ```text
 //! RenderGraph --schedule--> ExecutionPlan --run--> outputs on disk
@@ -404,7 +404,6 @@ fn execute_plan_and_seal(
         .map_err(|e| IoError::message(e.to_string()))?;
     control.check_cancel()?;
 
-
     let run_fp = options
         .cache
         .as_ref()
@@ -635,19 +634,12 @@ pub fn materialize_execution_plan_with_adapters<S: BuildHasher, A: BuildHasher>(
         .validate()
         .map_err(|e| IoError::message(e.to_string()))?;
 
-
     if plan.stages.is_empty() {
         // Empty plan: fall back to full topo (tests / hand-built plans).
         return materialize_graph_bundle(graph, registry, video_seeds, audio_seeds, with_audio);
     }
 
-    let mut ctx = MaterializeCtx::new(
-        graph,
-        registry,
-        with_audio,
-        adapters,
-        gpu,
-    );
+    let mut ctx = MaterializeCtx::new(graph, registry, with_audio, adapters, gpu);
     let mut upstream_fp = asset_input_fingerprint(graph);
     let total_stages = plan.stages.len();
     #[allow(clippy::cast_possible_truncation)]
@@ -915,10 +907,7 @@ fn resolve_audio_source(meta: &reelforge_render_graph::MediaAsset) -> Result<Nod
         Duration::from_secs(0.04)
     };
     let video = ColorClip::new(Size::new(2, 2), Rgb8::BLACK, duration);
-    Ok(NodeMedia::new(
-        Arc::new(video),
-        Some(Arc::new(audio)),
-    ))
+    Ok(NodeMedia::new(Arc::new(video), Some(Arc::new(audio))))
 }
 
 fn single_input_media(
@@ -1509,6 +1498,8 @@ mod tests {
         assert!(is_executable_op("rf.redaction.region"));
         assert!(is_executable_op("rf.compose.layers"));
         assert!(is_executable_op("rf.transform.fade_in"));
+        assert!(is_executable_op("rf.transform.freeze"));
+        assert!(is_executable_op("rf.transform.loop"));
         assert!(is_executable_op("rf.adapter.sightloom"));
         assert!(is_executable_op("rf.gpu.passthrough"));
         assert!(is_executable_op("rf.encode.hw"));

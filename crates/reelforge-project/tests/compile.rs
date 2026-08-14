@@ -184,6 +184,52 @@ fn audio_track_mixes() {
 }
 
 #[test]
+fn freeze_and_loop_emit_transforms() {
+    let mut p = CaptureProject::new(ProjectId::new("p"), "time");
+    p.media.push(media("a", "a.mp4"));
+    let mut seq = Sequence::new(SequenceId::new("s"), "main");
+    let mut tr = TimelineTrack::new(TimelineTrackId::new("v0"), TrackKind::Video);
+    let TimelineItem::Clip(mut freeze) = clip("c1", "a", 0.0, 2.0) else {
+        panic!("clip");
+    };
+    freeze.retiming = Retiming::Freeze {
+        at: MediaTime::from_secs(0.5, 1_000).unwrap(),
+        hold: MediaTime::from_secs(1.0, 1_000).unwrap(),
+    };
+    tr.items.push(TimelineItem::Clip(freeze));
+    let TimelineItem::Clip(mut lp) = clip("c2", "a", 0.0, 1.0) else {
+        panic!("clip");
+    };
+    lp.retiming = Retiming::Loop {
+        duration: None,
+        times: Some(3),
+    };
+    tr.items.push(TimelineItem::Clip(lp));
+    seq.tracks.push(tr);
+    p.sequences.push(seq);
+    let out = compile_project(&p).unwrap();
+    let names = ops(&out.graph);
+    assert!(names.contains(&"rf.transform.freeze"));
+    assert!(names.contains(&"rf.transform.loop"));
+    let freeze_p = out
+        .graph
+        .nodes
+        .iter()
+        .find_map(|n| match &n.body {
+            RenderNodeKind::Op { operation, params }
+                if operation.as_str() == "rf.transform.freeze" =>
+            {
+                Some(params)
+            }
+            _ => None,
+        })
+        .expect("freeze");
+    assert_eq!(freeze_p["hold"]["ticks"], 1000);
+    assert_eq!(freeze_p["at"]["ticks"], 500);
+    out.graph.validate().unwrap();
+}
+
+#[test]
 fn trim_keeps_media_time_ticks() {
     let mut p = CaptureProject::new(ProjectId::new("p"), "ticks");
     p.media.push(media("a", "a.mp4"));

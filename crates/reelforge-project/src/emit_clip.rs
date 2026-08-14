@@ -37,16 +37,40 @@ impl CompileCtx<'_> {
             }),
             src,
         );
-        if let Retiming::Speed { factor } = clip.retiming {
-            node = self.unary(
+        node = self.apply_retiming(clip, node);
+        let overlap = self.apply_transition_in(clip, &mut node);
+        Ok((node, overlap))
+    }
+
+    fn apply_retiming(&mut self, clip: &TimelineClip, node: NodeId) -> NodeId {
+        match &clip.retiming {
+            Retiming::Identity => node,
+            Retiming::Speed { factor } => self.unary(
                 "speed",
                 "rf.transform.speed",
                 json!({ "factor": factor }),
                 node,
-            );
+            ),
+            Retiming::Freeze { at, hold } => self.unary(
+                "freeze",
+                "rf.transform.freeze",
+                json!({
+                    "at": media_time_json(*at),
+                    "hold": media_time_json(*hold),
+                }),
+                node,
+            ),
+            Retiming::Loop { duration, times } => {
+                let mut params = json!({});
+                if let Some(d) = duration {
+                    params["duration"] = media_time_json(*d);
+                }
+                if let Some(n) = times {
+                    params["times"] = json!(n);
+                }
+                self.unary("loop", "rf.transform.loop", params, node)
+            }
         }
-        let overlap = self.apply_transition_in(clip, &mut node);
-        Ok((node, overlap))
     }
 
     fn apply_transition_in(&mut self, clip: &TimelineClip, node: &mut NodeId) -> f64 {
@@ -97,6 +121,15 @@ pub(crate) fn record_secs(clip: &TimelineClip) -> Result<f64> {
         Retiming::Speed { factor } if factor.is_finite() && factor > 0.0 => Ok(src / factor),
         Retiming::Speed { factor } => Err(ProjectError::message(format!(
             "clip {}: invalid speed factor {factor}",
+            clip.id.as_str()
+        ))),
+        Retiming::Freeze { hold, .. } => Ok(src + hold.as_secs()),
+        Retiming::Loop {
+            duration: Some(d), ..
+        } if d.as_secs() > 0.0 => Ok(d.as_secs()),
+        Retiming::Loop { times: Some(n), .. } if n > 0 => Ok(src * f64::from(n)),
+        Retiming::Loop { .. } => Err(ProjectError::message(format!(
+            "clip {}: loop needs duration or times",
             clip.id.as_str()
         ))),
     }
