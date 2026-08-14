@@ -44,6 +44,18 @@ impl PixelFormat {
     pub const fn is_packed_rgb(self) -> bool {
         matches!(self, Self::Rgb8 | Self::Rgba8)
     }
+
+    /// Packed host pixels (RGB / RGBA / BGRA). Planar YUV is not packed.
+    #[must_use]
+    pub const fn is_packed(self) -> bool {
+        self.packed_bytes_per_pixel().is_some()
+    }
+
+    /// Planar or semi-planar YUV.
+    #[must_use]
+    pub const fn is_yuv(self) -> bool {
+        matches!(self, Self::Yuv420p | Self::Nv12)
+    }
 }
 
 impl From<FrameFormat> for PixelFormat {
@@ -79,7 +91,7 @@ pub enum MemoryLocation {
     CpuPacked,
     /// Host planar planes (`Yuv420p` / `Nv12` via [`VideoSurface::from_planes`]).
     CpuPlanar,
-    /// Device / external surface (future GPU).
+    /// Device / external surface ([`crate::ExternalSurface`] handle, no CPU pixels).
     External,
 }
 
@@ -222,6 +234,7 @@ pub struct VideoSurface {
     color: ColorInfo,
     alpha: AlphaMode,
     planes: Vec<SurfacePlane>,
+    external: Option<crate::external::ExternalSurface>,
 }
 
 impl VideoSurface {
@@ -273,6 +286,7 @@ impl VideoSurface {
             color,
             alpha,
             planes: vec![plane],
+            external: None,
         }
     }
 
@@ -309,7 +323,31 @@ impl VideoSurface {
             color,
             alpha: AlphaMode::for_pixel_format(format),
             planes,
+            external: None,
         })
+    }
+
+    /// Hardware surface: no CPU planes. [`Self::to_rgb_frame`] fails until mapped.
+    #[must_use]
+    pub fn from_external(
+        ext: crate::external::ExternalSurface,
+        timestamp: MediaTime,
+        duration: Option<MediaTime>,
+        color: ColorInfo,
+        time_base: StreamTimeBase,
+    ) -> Self {
+        Self {
+            format: ext.format,
+            size: ext.size,
+            timestamp,
+            duration,
+            time_base,
+            location: MemoryLocation::External,
+            color,
+            alpha: AlphaMode::for_pixel_format(ext.format),
+            planes: Vec::new(),
+            external: Some(ext),
+        }
     }
 
     /// Presentation timestamp.
@@ -376,6 +414,23 @@ impl VideoSurface {
     #[must_use]
     pub const fn time_base(&self) -> StreamTimeBase {
         self.time_base
+    }
+
+    /// External handle when [`MemoryLocation::External`].
+    #[must_use]
+    pub fn external(&self) -> Option<&crate::external::ExternalSurface> {
+        self.external.as_ref()
+    }
+
+    /// Convert to packed RGB8, including BGRA / YUV / NV12 CPU surfaces.
+    ///
+    /// Packed RGB/RGBA stay host-side. External handles error.
+    ///
+    /// # Errors
+    ///
+    /// External surface, missing planes, or geometry errors.
+    pub fn to_rgb_frame(&self) -> Result<Frame> {
+        crate::convert::surface_to_rgb_frame(self)
     }
 
     /// Packed bytes of plane 0 (may include row padding).
@@ -459,5 +514,30 @@ mod tests {
     fn planar_is_not_a_frame() {
         let err = FrameFormat::try_from(PixelFormat::Nv12).unwrap_err();
         assert!(err.to_string().contains("Nv12"));
+    }
+
+    #[test]
+    fn external_surface_has_no_cpu_pixels() {
+        let ext = crate::external::ExternalSurface::new(
+            crate::external::ExternalBackend::D3d11,
+            42,
+            PixelFormat::Nv12,
+            Size::new(16, 16),
+        );
+        let s = VideoSurface::from_external(
+            ext,
+            MediaTime::zero(1_000),
+            None,
+            ColorInfo::default(),
+            StreamTimeBase::HZ_1K,
+        );
+        assert_eq!(s.location(), MemoryLocation::External);
+        assert!(s.planes().is_empty());
+        assert!(s.external().is_some());
+        assert!(s.to_frame().is_err());
+        assert!(s.to_rgb_frame().is_err());
+        assert!(PixelFormat::Bgra8.is_packed());
+        assert!(PixelFormat::Nv12.is_yuv());
+        assert!(!PixelFormat::Bgra8.is_packed_rgb());
     }
 }

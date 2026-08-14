@@ -6,8 +6,10 @@ mod audio_time;
 mod cache;
 mod clip;
 mod color;
+mod convert;
 mod effect;
 mod error;
+mod external;
 mod frame;
 mod layout;
 mod media_range;
@@ -31,6 +33,8 @@ pub use clip::{
     AudioClip, ClipId, TimedAudio, TimedVideo, VideoClip, subclip_audio, subclip_video,
 };
 pub use color::{Rgb8, Rgba8};
+pub use convert::surface_to_rgb_frame;
+pub use external::{ExternalBackend, ExternalSurface};
 pub use effect::{AudioEffect, VideoEffect, apply_audio_effects, apply_video_effects};
 pub use error::{CoreError, Result};
 pub use frame::{Frame, FrameFormat, Mask};
@@ -54,8 +58,9 @@ pub mod prelude {
     pub use crate::{
         AlphaMode, Anchor, AudioBuffer, AudioClip, AudioEffect, AudioFormat, AudioTimeline,
         CacheConfig, CacheStats, CachedVideo, ClipId, ColorClip, ColorInfo, ColorPrimaries,
-        ColorRange, ColorSpace, ColorTransfer, CoreError, Duration, Frame, FrameFormat,
-        FrameStream, Mask, MemoryLocation, PixelFormat, Position, Result, Rgb8, Rgba8, SilenceClip,
+        ColorRange, ColorSpace, ColorTransfer, CoreError, Duration, ExternalBackend,
+        ExternalSurface, Frame, FrameFormat, FrameStream, Mask, MemoryLocation, PixelFormat,
+        Position, Result, Rgb8, Rgba8, SilenceClip,
         Size, StreamTimeBase, SurfacePlane, Time, TimeRange, TimedAudio, TimedVideo, VideoClip,
         VideoEffect, VideoSurface, cache_video, cache_video_realtime, resample_linear,
         stream_video, stream_video_raw, subclip_audio, subclip_video,

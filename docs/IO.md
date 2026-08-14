@@ -292,7 +292,7 @@ let frame = clip.frame_at(Time::from_secs(1.0))?; // effects still get packed RG
 
 File clips override `surface_at` with a **native** rawvideo decode (`-pix_fmt yuv420p` / `nv12`, not RGB). 4:2:2 / 4:4:4 / 10-bit sources are converted in the YUV domain to 8-bit 4:2:0. PTS comes from the VFR/CFR table (`FrameTimingIndex`); color + `time_base` from `ffprobe`.
 
-`frame_at` is still packed RGB (effects / encode stdin). `to_frame()` on a YUV surface fails — use `frame_at`. Synthetic clips stay full-range RGB. GPU `MemoryLocation::External` is reserved.
+`frame_at` is still packed RGB (effects / encode stdin). `to_frame()` is **zero-copy packed RGB/RGBA only** — it fails on YUV / BGRA / external. Call `surface.to_rgb_frame()` (or `surface_to_rgb_frame`) to convert BGRA, YUV420P, or NV12 with the surface color tags. `MemoryLocation::External` is an opaque `ExternalSurface` handle (CUDA / D3D11 / VAAPI / Vulkan / Metal); the GPU executor must map it before conversion. Synthetic clips stay full-range RGB.
 
 ## Alpha
 

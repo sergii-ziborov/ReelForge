@@ -11,7 +11,7 @@ See also: [EFFECTS.md](EFFECTS.md) · [IO.md](IO.md) · [README](../README.md)
 | Term | Meaning |
 |------|---------|
 | `VideoClip` | Timed source: `frame_at(t)` → RGB/RGBA `Frame`; `surface_at(t)` → timed `VideoSurface` |
-| `VideoSurface` | Native planes (YUV/NV12 from files, packed RGB from the clip graph), PTS, color |
+| `VideoSurface` | Native planes (YUV/NV12/BGRA from files, packed RGB from the clip graph), PTS, color, or an `ExternalSurface` GPU handle |
 | `AlphaMode` | `Opaque` / `Straight` / `Premultiplied` on RGBA `Frame` (mask is coverage, not color alpha) |
 | `AudioClip` | Timed source: `samples_at` / `samples_at_media` → interleaved f32 PCM |
 | `AudioTimeline` | Sample-accurate `MediaTime` ↔ PCM frame index |

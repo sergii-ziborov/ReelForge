@@ -19,13 +19,13 @@ pub use reelforge_compose::{
 pub use reelforge_core::{
     AlphaMode, Anchor, AudioBuffer, AudioClip, AudioEffect, AudioFormat, AudioTimeline,
     CacheConfig, CacheStats, CachedVideo, ClipId, ColorClip, ColorInfo, ColorPrimaries, ColorRange,
-    ColorSpace, ColorTransfer, CoreError, Duration, Frame, FrameFormat, FrameStream, Mask,
-    MediaRange, MediaTime, MemoryLocation, PixelFormat, Position, Rgb8, Rgba8, SampleLayout,
-    SilenceClip, Size,
+    ColorSpace, ColorTransfer, CoreError, Duration, ExternalBackend, ExternalSurface, Frame,
+    FrameFormat, FrameStream, Mask, MediaRange, MediaTime, MemoryLocation, PixelFormat, Position,
+    Rgb8, Rgba8, SampleLayout, SilenceClip, Size,
     StreamTimeBase, SurfacePlane, Time, TimeRange, TimedAudio, TimedVideo, VideoClip, VideoEffect,
     VideoSurface, apply_audio_effects, apply_video_effects, cache_video, cache_video_realtime,
     cache_video_with, psnr_rgb, resample_linear, ssim_rgb, stream_video, stream_video_raw,
-    subclip_audio, subclip_video,
+    subclip_audio, subclip_video, surface_to_rgb_frame,
 };
 pub use reelforge_fx::{
     AccelDecel, AudioDelay, AudioFadeIn, AudioFadeOut, AudioNormalize, BlackAndWhite, Blink, Crop,
