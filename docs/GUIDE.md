@@ -358,6 +358,8 @@ GPU stages (`rf.gpu.passthrough`, `rf.encode.hw`) execute instead of failing clo
 
 Durable jobs: `JobStore` persists `{id}/job.json`. `submit_render_job` fingerprints the graph+plan. `run_render_job` / `resume_render_job` write `Running` → `Done`, cancel → `Paused`, other errors → `Failed`. A `Done` job with the same fingerprint and an output file is a no-op. In-process stages re-evaluate on resume; a matching `StageCache` hit still skips encode. Capture owns the queue.
 
+Preview contract: `PreviewRequest` + `PreviewQuality` (`Draft` / `Proxy` / `Full`). `preview_clip` / `preview_graph` sample one RGB frame at `MediaTime` (downscale, no encode). `write_proxy` / thumbnails remain the file-side hooks. Capture owns which spec to cache.
+
 `rf.transform.trim` / `fade_in` / `fade_out` compile to `MediaTime` ticks (`MediaRange` for trim). Float seconds in JSON become 1 MHz ticks; `{ticks, timescale}` is preserved. Conversion to `Time`/`Duration` happens only at the effect / FFmpeg boundary.
 
 ```rust

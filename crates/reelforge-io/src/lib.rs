@@ -26,6 +26,7 @@ mod options;
 mod pipeline;
 mod pool;
 mod preview;
+mod preview_contract;
 mod realtime;
 mod render_plan;
 mod stage_cache;
@@ -73,6 +74,9 @@ pub use mask_bridge::{
 pub use options::{OpenAudioOptions, OpenVideoOptions, WriteGifOptions, WriteVideoOptions};
 pub use pool::RgbFramePool;
 pub use preview::{ProxyOptions, proxy_size, thumbnail_png_bytes, write_proxy, write_thumbnail};
+pub use preview_contract::{
+    PreviewFrame, PreviewQuality, PreviewRequest, PreviewSpec, preview_clip, preview_graph,
+};
 pub use realtime::{
     HwEncoderSupport, RealtimeExport, detect_hw_encoders, nvenc_available, realtime_write_options,
     run_filtergraph_encode,

@@ -58,6 +58,7 @@ pub use reelforge_io::{
     mask_timeline_to_track_set, materialize_execution_plan, materialize_graph,
     materialize_graph_bundle, materialize_graph_with_seeds, mux_copy_audio, node_backend,
     nvenc_available, open_audio, open_video, optimize, optimize_plan, parse_track_set,
+    preview_clip, preview_graph, PreviewFrame, PreviewQuality, PreviewRequest, PreviewSpec,
     privacy_style_from_redaction, probe_audio, probe_frame_timing, probe_has_audio, proxy_size,
     realtime_write_options, region_redaction_from_value, require_full_ffmpeg, run_execution_plan,
     run_execution_plan_with, run_execution_plan_with_manifest, run_filtergraph,
