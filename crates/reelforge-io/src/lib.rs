@@ -22,6 +22,8 @@ mod job_run;
 mod job_store;
 mod manifest_seal;
 mod mask_bridge;
+mod mask_package;
+mod package_host;
 mod options;
 mod pipeline;
 mod pool;
@@ -66,6 +68,8 @@ pub use job::{JobCheckpoint, JobId, JobState, RENDER_JOB_VERSION, RenderJob};
 pub use job_run::{resume_render_job, run_render_job, submit_render_job};
 pub use job_store::JobStore;
 pub use manifest_seal::{fingerprint_file, seal_manifest_on_disk};
+pub use mask_package::{MASK_PACKAGE_VERSION, MaskBlobEntry, MaskPackage, MaskPackageManifest};
+pub use package_host::SightloomPackageHost;
 pub use mask_bridge::{
     apply_region_redaction, mask_timeline_from_box, mask_timeline_from_box_subject,
     mask_timeline_to_track_set, privacy_style_from_redaction, region_redaction_from_value,

@@ -244,20 +244,48 @@ fn blend_roi(
     roi: Roi,
 ) {
     let rw = roi.w();
+    let ch = bpp.min(3);
     for y in 0..roi.h() {
-        for x in 0..rw {
-            let wgt = cov[y * rw + x];
-            if wgt <= 0.0 {
-                continue;
+        let row = y * rw;
+        let mut x = 0;
+        while x + 4 <= rw {
+            let w = [
+                cov[row + x],
+                cov[row + x + 1],
+                cov[row + x + 2],
+                cov[row + x + 3],
+            ];
+            if w[0] > 0.0 || w[1] > 0.0 || w[2] > 0.0 || w[3] > 0.0 {
+                for (lane, &wgt) in w.iter().enumerate() {
+                    if wgt <= 0.0 {
+                        continue;
+                    }
+                    let si = (row + x + lane) * bpp;
+                    let di = ((roi.y0 + y) * frame_w + roi.x0 + x + lane) * bpp;
+                    blend_pixel(&mut out[di..], &src[si..], &blurred[si..], wgt, ch);
+                }
             }
-            let si = (y * rw + x) * bpp;
-            let di = ((roi.y0 + y) * frame_w + roi.x0 + x) * bpp;
-            for c in 0..bpp.min(3) {
-                let a = f32::from(src[si + c]);
-                let b = f32::from(blurred[si + c]);
-                out[di + c] = (a * (1.0 - wgt) + b * wgt).round().clamp(0.0, 255.0) as u8;
-            }
+            x += 4;
         }
+        while x < rw {
+            let wgt = cov[row + x];
+            if wgt > 0.0 {
+                let si = (row + x) * bpp;
+                let di = ((roi.y0 + y) * frame_w + roi.x0 + x) * bpp;
+                blend_pixel(&mut out[di..], &src[si..], &blurred[si..], wgt, ch);
+            }
+            x += 1;
+        }
+    }
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn blend_pixel(out: &mut [u8], src: &[u8], blurred: &[u8], wgt: f32, ch: usize) {
+    let inv = 1.0 - wgt;
+    for c in 0..ch {
+        let a = f32::from(src[c]);
+        let b = f32::from(blurred[c]);
+        out[c] = (a * inv + b * wgt).round().clamp(0.0, 255.0) as u8;
     }
 }
 

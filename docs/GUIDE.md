@@ -352,7 +352,7 @@ Authoring ids (`NodeId`) are aliases. After compile, execution identity is a den
 
 Pixel silhouettes travel as `MaskAsset` (`Dense` / `Cropped` / `Rle` / `Polygon` / `External`) on `MaskSample.asset` / `MaskFrame`. The privacy pass stamps a **union coverage ROI** and blurs only that crop — not the whole frame × N subjects.
 
-`rf.adapter.sightloom` is a real **adapter executor**. `AdapterRegistry` ships a JSON SightLoom executor. A host implements `AdapterHost` to resolve a query / `package_id` and optionally map `MaskAsset::External` to dense pixels. The request carries the upstream `VideoClip` (ReelForge still does not query subjects). Empty-mask `Redaction` nodes consume the adapter's timeline.
+`rf.adapter.sightloom` is a real **adapter executor**. `AdapterRegistry` ships a JSON SightLoom executor. `SightloomPackageHost` opens a folder (`manifest.json` + `masks/*.bin`) and resolves `MaskAsset::External` to dense/cropped coverage — no SightLoom crate. A custom `AdapterHost` can still wrap a live vision process. Empty-mask `Redaction` nodes consume the adapter's timeline.
 
 GPU stages (`rf.gpu.passthrough`, `rf.encode.hw`) execute instead of failing closed. `GpuRegistry` passthrough keeps the clip; `rf.encode.hw` probes host `ffmpeg` for NVENC/QSV/AMF (or uses `backend` / `codec`). A `GpuHost` can replace the clip with an `ExternalSurface` device path. ReelForge does not ship CUDA kernels.
 
