@@ -350,7 +350,7 @@ Authoring ids (`NodeId`) are aliases. After compile, execution identity is a den
 `TrackTimeline` is the identity source (`TrackId` + optional `SubjectId` / `AppearanceId` / `ObservationId` / `Geometry` / `OcclusionState` / `MaskRef`).  
 `MaskTimeline` is a **materialized ROI view** of one or more tracks — not a vision index. ReelForge does not query subjects.
 
-Pixel silhouettes travel as `MaskAsset` (`Dense` / `Cropped` / `Rle` / `Polygon` / `External`) on `MaskSample.asset` / `MaskFrame`. The privacy pass stamps a **union coverage ROI** and blurs only that crop — not the whole frame × N subjects.
+Pixel silhouettes travel as `MaskAsset` (`Dense` / `Cropped` / `Rle` / `Polygon` / `External`) on `MaskSample.asset` / `MaskFrame`. The privacy pass stamps a **union coverage ROI** and blurs only that crop — not the whole frame × N subjects. Load coverage: `privacy_e2e` Criterion bench (decode → redaction → encode) plus `privacy_load` tests (long VFR PTS index, 50-subject fused fill, muxed A/V drift).
 
 `rf.adapter.sightloom` is a real **adapter executor**. `AdapterRegistry` ships a JSON SightLoom executor. `SightloomPackageHost` opens a folder (`manifest.json` + `masks/*.bin`) and resolves `MaskAsset::External` to dense/cropped coverage — no SightLoom crate. A custom `AdapterHost` can still wrap a live vision process. Empty-mask `Redaction` nodes consume the adapter's timeline.
 

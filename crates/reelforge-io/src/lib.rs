@@ -7,6 +7,7 @@
 mod adapter;
 mod adapter_registry;
 mod audio_file;
+mod av_sync;
 mod control;
 mod encode_native;
 mod error;
@@ -23,8 +24,8 @@ mod job_store;
 mod manifest_seal;
 mod mask_bridge;
 mod mask_package;
-mod package_host;
 mod options;
+mod package_host;
 mod pipeline;
 mod pool;
 mod preview;
@@ -41,11 +42,10 @@ pub use adapter::{
     AdapterContext, AdapterExecutor, AdapterHost, AdapterOutput, AdapterRequest, execute_adapter,
 };
 pub use adapter_registry::{AdapterRegistry, SightloomJsonExecutor};
-pub use encode_native::{encode_sampled_rawvideo, is_native_raw_format};
-pub use gpu::{GpuContext, GpuExecutor, GpuHost, GpuOutput, GpuRequest, execute_gpu};
-pub use gpu_registry::{GpuPassthroughExecutor, GpuRegistry, HwEncodeExecutor};
 pub use audio_file::{AudioFileClip, layout_for_channels, open_audio};
+pub use av_sync::{av_duration_drift, av_streams_aligned, max_av_drift_secs};
 pub use control::{CancelToken, ProgressCallback, WriteControl, WriteProgress, WriteStage};
+pub use encode_native::{encode_sampled_rawvideo, is_native_raw_format};
 pub use error::{IoError, Result};
 pub use ffmpeg::{
     AudioProbe, FfmpegTools, FrameTimingIndex, SequentialMode, VideoProbe, encode_rawvideo_h264,
@@ -55,27 +55,29 @@ pub use filtergraph::{
     AudioCopyMode, FilterGraph, FilterOp, FiltergraphRunOptions, mux_copy_audio, run_filtergraph,
     run_filtergraph_with,
 };
+pub use gpu::{GpuContext, GpuExecutor, GpuHost, GpuOutput, GpuRequest, execute_gpu};
+pub use gpu_registry::{GpuPassthroughExecutor, GpuRegistry, HwEncodeExecutor};
 pub use graph_run::{
     GraphBundle, GraphEncodeHints, GraphRunOptions, explain_render_graph,
     explain_render_graph_with, is_executable_op, materialize_execution_plan,
-    materialize_execution_plan_with_adapters, materialize_graph,
-    materialize_graph_bundle, materialize_graph_with_seeds, node_backend, run_execution_plan,
-    run_execution_plan_with, run_execution_plan_with_manifest, run_render_graph,
-    run_render_graph_with, run_render_graph_with_manifest,
+    materialize_execution_plan_with_adapters, materialize_graph, materialize_graph_bundle,
+    materialize_graph_with_seeds, node_backend, run_execution_plan, run_execution_plan_with,
+    run_execution_plan_with_manifest, run_render_graph, run_render_graph_with,
+    run_render_graph_with_manifest,
 };
 pub use image_clip::ImageClip;
 pub use job::{JobCheckpoint, JobId, JobState, RENDER_JOB_VERSION, RenderJob};
 pub use job_run::{resume_render_job, run_render_job, submit_render_job};
 pub use job_store::JobStore;
 pub use manifest_seal::{fingerprint_file, seal_manifest_on_disk};
-pub use mask_package::{MASK_PACKAGE_VERSION, MaskBlobEntry, MaskPackage, MaskPackageManifest};
-pub use package_host::SightloomPackageHost;
 pub use mask_bridge::{
     apply_region_redaction, mask_timeline_from_box, mask_timeline_from_box_subject,
     mask_timeline_to_track_set, privacy_style_from_redaction, region_redaction_from_value,
     track_timelines_to_track_set,
 };
+pub use mask_package::{MASK_PACKAGE_VERSION, MaskBlobEntry, MaskPackage, MaskPackageManifest};
 pub use options::{OpenAudioOptions, OpenVideoOptions, WriteGifOptions, WriteVideoOptions};
+pub use package_host::SightloomPackageHost;
 pub use pool::RgbFramePool;
 pub use preview::{ProxyOptions, proxy_size, thumbnail_png_bytes, write_proxy, write_thumbnail};
 pub use preview_contract::{

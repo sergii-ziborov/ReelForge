@@ -98,6 +98,16 @@ WriteGifOptions::new("loop.gif", 15.0)
 
 Odd frame sizes are cropped to even for yuv420 encoders. Expand size with `Resize` first if needed.
 
+`av_streams_aligned(video_secs, audio_secs, fps)` is the mux budget: one video frame plus ~50 ms AAC priming. `write_av` renders PCM to the **video** duration, then muxes; use this helper (or `av_duration_drift`) after `probe_audio` to reject a drifted container.
+
+### Privacy e2e bench
+
+```bash
+cargo bench -p reelforge-io --bench privacy_e2e
+```
+
+Measures fused 40-subject ROI redaction at 720p, RGB24 pack (encode-ready), and — when host `ffmpeg` is on `PATH` — decode → redaction → `write_video`. Frame-graph micros stay in `reelforge-fx` `frame_ops`.
+
 ## Filtergraph
 
 `FilterGraph` + `FilterOp` + `run_filtergraph` build an ffmpeg simple filter chain without importing frames:
