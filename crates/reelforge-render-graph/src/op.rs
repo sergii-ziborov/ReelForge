@@ -583,6 +583,48 @@ impl OperationRegistry {
             executor_kind: ExecutorKind::Unary,
         });
         r.register(OperationDescriptor {
+            id: OperationId::new("rf.gpu.passthrough"),
+            version: SemVer::V1,
+            input: video_av.clone(),
+            output: video_av.clone(),
+            backend: BackendClass::Gpu,
+            deterministic: true,
+            capabilities: CapabilitySet {
+                tags: vec!["gpu".into()],
+            },
+            parameter_schema: serde_json::json!({
+                "type": "object",
+                "properties": { "backend": { "type": "string" } }
+            }),
+            limits: OperationLimits::default(),
+            executor_kind: ExecutorKind::Unary,
+        });
+        r.register(OperationDescriptor {
+            id: OperationId::new("rf.encode.hw"),
+            version: SemVer::V1,
+            input: video_av.clone(),
+            output: MediaContract {
+                video: true,
+                audio: true,
+                masks: false,
+                notes: Some("hardware encode hint".into()),
+            },
+            backend: BackendClass::Gpu,
+            deterministic: false,
+            capabilities: CapabilitySet {
+                tags: vec!["gpu".into(), "encode".into()],
+            },
+            parameter_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "backend": { "type": "string" },
+                    "codec": { "type": "string" }
+                }
+            }),
+            limits: OperationLimits::default(),
+            executor_kind: ExecutorKind::Unary,
+        });
+        r.register(OperationDescriptor {
             id: OperationId::new("rf.encode.h264"),
             version: SemVer::V1,
             input: video_av.clone(),

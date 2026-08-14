@@ -94,6 +94,16 @@ pub enum TypedParams {
         /// Query / tracks / package params (host-interpreted).
         params: Value,
     },
+    /// `rf.gpu.passthrough` / `rf.encode.hw`.
+    Gpu {
+        /// Executor name (`passthrough`, `hw`, …).
+        name: String,
+        /// Optional backend hint (`nvenc`, `cuda`, …).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        backend: Option<String>,
+        /// Op params.
+        params: Value,
+    },
     /// `rf.transform.speed`
     Speed {
         /// Playback factor (`2.0` = twice as fast).
@@ -235,6 +245,8 @@ pub fn is_executable_op_id(id: &str) -> bool {
             | "rf.audio.mix"
             | "rf.encode.h264"
             | "rf.adapter.sightloom"
+            | "rf.gpu.passthrough"
+            | "rf.encode.hw"
     )
 }
 
@@ -480,6 +492,22 @@ fn parse_typed_params(id: &str, raw: &Value) -> Result<TypedParams> {
                 .to_string(),
             params: raw.clone(),
         }),
+        "rf.gpu.passthrough" => Ok(TypedParams::Gpu {
+            name: "passthrough".into(),
+            backend: raw
+                .get("backend")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            params: raw.clone(),
+        }),
+        "rf.encode.hw" => Ok(TypedParams::Gpu {
+            name: "hw".into(),
+            backend: raw
+                .get("backend")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            params: raw.clone(),
+        }),
         "rf.color.black_and_white" => Ok(TypedParams::BlackAndWhite),
         "rf.color.invert" => Ok(TypedParams::Invert),
         "rf.color.painting" =>
@@ -575,6 +603,12 @@ fn estimate_cost(id: &str, params: &TypedParams) -> CostEstimate {
             memory: 2.0,
             io: 5.0,
             gpu: 0.0,
+        },
+        ("rf.encode.hw" | "rf.gpu.passthrough", _) => CostEstimate {
+            cpu: 1.0,
+            memory: 1.0,
+            io: 2.0,
+            gpu: 4.0,
         },
         ("rf.compose.layers", _) => CostEstimate {
             cpu: 3.0,
@@ -717,5 +751,31 @@ mod tests {
         .unwrap();
         assert!(matches!(c.params, TypedParams::Adapter { .. }));
         assert_eq!(c.backend, BackendClass::Adapter);
+    }
+
+    #[test]
+    fn compiles_gpu_passthrough_and_hw_encode() {
+        let r = OperationRegistry::with_builtins();
+        let p = compile_op(
+            &r,
+            &OperationId::new("rf.gpu.passthrough"),
+            &Value::Null,
+        )
+        .unwrap();
+        assert!(matches!(p.params, TypedParams::Gpu { .. }));
+        assert_eq!(p.backend, BackendClass::Gpu);
+        let h = compile_op(
+            &r,
+            &OperationId::new("rf.encode.hw"),
+            &serde_json::json!({ "backend": "nvenc" }),
+        )
+        .unwrap();
+        match h.params {
+            TypedParams::Gpu { name, backend, .. } => {
+                assert_eq!(name, "hw");
+                assert_eq!(backend.as_deref(), Some("nvenc"));
+            }
+            _ => panic!("expected Gpu"),
+        }
     }
 }

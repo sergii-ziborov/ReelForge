@@ -46,6 +46,7 @@ pub use reelforge_io::{
     StageCache, TRACKS_JSON_VERSION, TrackJson, TracksDocument, VideoFileClip, WaveformOptions,
     WaveformPeak, WriteControl, WriteGifOptions, WriteProgress, WriteStage, WriteVideoOptions,
     AdapterContext, AdapterExecutor, AdapterHost, AdapterOutput, AdapterRegistry, AdapterRequest,
+    GpuContext, GpuExecutor, GpuHost, GpuOutput, GpuRegistry, GpuRequest, execute_gpu,
     apply_plan_ops, apply_region_redaction, compute_waveform,
     compute_waveform_default, execute_adapter, materialize_execution_plan_with_adapters,
     detect_hw_encoders, explain_plan, explain_render_graph, explain_render_graph_with,

@@ -341,6 +341,7 @@ Asset `role`: omit or `"video"` → video + companion audio; `"audio"` → audio
 | `rf.compose.layers` | Multi-input composite |
 | `rf.audio.gain` / `drop` / `preserve` / `mix` | Audio |
 | `rf.encode.h264` | Encode hints (`crf`, `path`, `preserve_audio`) |
+| `rf.gpu.passthrough` / `rf.encode.hw` | GPU stage: passthrough or NVENC/QSV/AMF encode hint |
 
 Authoring ids (`NodeId`) are aliases. After compile, execution identity is a dense `NodeIndex` (canonical topo). Permuting the JSON `nodes` array compiles to the same program.
 
@@ -352,6 +353,8 @@ Authoring ids (`NodeId`) are aliases. After compile, execution identity is a den
 Pixel silhouettes travel as `MaskAsset` (`Dense` / `Cropped` / `Rle` / `Polygon` / `External`) on `MaskSample.asset` / `MaskFrame`. The privacy pass stamps a **union coverage ROI** and blurs only that crop — not the whole frame × N subjects.
 
 `rf.adapter.sightloom` is a real **adapter executor**. `AdapterRegistry` ships a JSON SightLoom executor. A host implements `AdapterHost` to resolve a query / `package_id` and optionally map `MaskAsset::External` to dense pixels. The request carries the upstream `VideoClip` (ReelForge still does not query subjects). Empty-mask `Redaction` nodes consume the adapter's timeline.
+
+GPU stages (`rf.gpu.passthrough`, `rf.encode.hw`) execute instead of failing closed. `GpuRegistry` passthrough keeps the clip; `rf.encode.hw` probes host `ffmpeg` for NVENC/QSV/AMF (or uses `backend` / `codec`). A `GpuHost` can replace the clip with an `ExternalSurface` device path. ReelForge does not ship CUDA kernels.
 
 `rf.transform.trim` / `fade_in` / `fade_out` compile to `MediaTime` ticks (`MediaRange` for trim). Float seconds in JSON become 1 MHz ticks; `{ticks, timescale}` is preserved. Conversion to `Time`/`Duration` happens only at the effect / FFmpeg boundary.
 

@@ -6,7 +6,8 @@
 //!
 //! Linear DAGs and multi-input `rf.compose.layers` are supported. Adapter
 //! stages (`rf.adapter.sightloom`) materialize masks via [`crate::AdapterHost`]
-//! or exported tracks JSON. GPU stages still fail clearly. `FFmpeg` stages that
+//! or exported tracks JSON. GPU stages run via [`crate::GpuHost`] /
+//! [`crate::GpuRegistry`] (`passthrough`, `rf.encode.hw`). `FFmpeg` stages that
 //! only carry encode/output markers finalize via Rust pixel encode
 //! (`write_video`); geometry/`trim` prefixes use host filtergraph when a later
 //! stage needs Rust.
@@ -48,6 +49,10 @@ pub struct GraphEncodeHints {
     pub adapter_host: Option<std::sync::Arc<dyn crate::AdapterHost>>,
     /// Adapter executors (`SightLoom` JSON by default).
     pub adapter_registry: crate::AdapterRegistry,
+    /// Optional GPU device host.
+    pub gpu_host: Option<std::sync::Arc<dyn crate::GpuHost>>,
+    /// GPU executors (passthrough + hw encode by default).
+    pub gpu_registry: crate::GpuRegistry,
 }
 
 impl core::fmt::Debug for GraphEncodeHints {
@@ -60,6 +65,8 @@ impl core::fmt::Debug for GraphEncodeHints {
             .field("preserve_audio", &self.preserve_audio)
             .field("adapter_host", &self.adapter_host.is_some())
             .field("adapter_registry", &self.adapter_registry.len())
+            .field("gpu_host", &self.gpu_host.is_some())
+            .field("gpu_registry", &self.gpu_registry.len())
             .finish()
     }
 }
@@ -115,6 +122,10 @@ pub struct GraphRunOptions {
     pub adapter_host: Option<Arc<dyn crate::AdapterHost>>,
     /// Adapter executors (builtins by default).
     pub adapter_registry: crate::AdapterRegistry,
+    /// Optional GPU device host.
+    pub gpu_host: Option<Arc<dyn crate::GpuHost>>,
+    /// GPU executors (builtins by default).
+    pub gpu_registry: crate::GpuRegistry,
 }
 
 impl Default for GraphRunOptions {
@@ -128,6 +139,8 @@ impl Default for GraphRunOptions {
             with_audio: true,
             adapter_host: None,
             adapter_registry: crate::AdapterRegistry::with_builtins(),
+            gpu_host: None,
+            gpu_registry: crate::GpuRegistry::with_builtins(),
         }
     }
 }
@@ -173,6 +186,20 @@ impl GraphRunOptions {
         self.adapter_registry = registry;
         self
     }
+
+    /// Install a GPU device host.
+    #[must_use]
+    pub fn with_gpu_host(mut self, host: Arc<dyn crate::GpuHost>) -> Self {
+        self.gpu_host = Some(host);
+        self
+    }
+
+    /// Replace the GPU executor registry.
+    #[must_use]
+    pub fn with_gpu_registry(mut self, registry: crate::GpuRegistry) -> Self {
+        self.gpu_registry = registry;
+        self
+    }
 }
 
 impl core::fmt::Debug for GraphRunOptions {
@@ -186,6 +213,8 @@ impl core::fmt::Debug for GraphRunOptions {
             .field("with_audio", &self.with_audio)
             .field("adapter_host", &self.adapter_host.is_some())
             .field("adapter_registry", &self.adapter_registry.len())
+            .field("gpu_host", &self.gpu_host.is_some())
+            .field("gpu_registry", &self.gpu_registry.len())
             .finish()
     }
 }
@@ -374,7 +403,7 @@ fn execute_plan_and_seal(
         .validate()
         .map_err(|e| IoError::message(e.to_string()))?;
     control.check_cancel()?;
-    reject_gpu_stages(plan)?;
+
 
     let run_fp = options
         .cache
@@ -418,6 +447,10 @@ fn execute_plan_and_seal(
             host: options.adapter_host.clone(),
             registry: options.adapter_registry.clone(),
         },
+        crate::GpuContext {
+            host: options.gpu_host.clone(),
+            registry: options.gpu_registry.clone(),
+        },
     )?;
     merge_option_hints(&mut bundle.hints, options);
     write_graph_outputs(
@@ -457,15 +490,6 @@ fn finish_manifest(
     }
     crate::manifest_seal::seal_manifest_on_disk(&mut manifest)?;
     Ok(manifest)
-}
-
-fn reject_gpu_stages(plan: &ExecutionPlan) -> Result<()> {
-    for stage in &plan.stages {
-        if matches!(stage, ExecutionStage::Gpu(_)) {
-            return Err(IoError::message("GPU stages not implemented in M3 runner"));
-        }
-    }
-    Ok(())
 }
 
 fn restore_cached_outputs(graph: &RenderGraph, cached: &Path) -> Result<()> {
@@ -540,7 +564,13 @@ pub fn materialize_graph_bundle<S: BuildHasher, A: BuildHasher>(
     let order = graph
         .topo_order()
         .map_err(|e| IoError::message(e.to_string()))?;
-    let mut ctx = MaterializeCtx::new(graph, registry, with_audio, crate::AdapterContext::default());
+    let mut ctx = MaterializeCtx::new(
+        graph,
+        registry,
+        with_audio,
+        crate::AdapterContext::default(),
+        crate::GpuContext::default(),
+    );
     for id in &order {
         ctx.eval_node(id, video_seeds, audio_seeds)?;
     }
@@ -579,6 +609,7 @@ pub fn materialize_execution_plan<S: BuildHasher, A: BuildHasher>(
         control,
         cache,
         crate::AdapterContext::default(),
+        crate::GpuContext::default(),
     )
 }
 
@@ -598,18 +629,25 @@ pub fn materialize_execution_plan_with_adapters<S: BuildHasher, A: BuildHasher>(
     control: Option<&WriteControl>,
     cache: Option<&StageCache>,
     adapters: crate::AdapterContext,
+    gpu: crate::GpuContext,
 ) -> Result<GraphBundle> {
     graph
         .validate()
         .map_err(|e| IoError::message(e.to_string()))?;
-    reject_gpu_stages(plan)?;
+
 
     if plan.stages.is_empty() {
         // Empty plan: fall back to full topo (tests / hand-built plans).
         return materialize_graph_bundle(graph, registry, video_seeds, audio_seeds, with_audio);
     }
 
-    let mut ctx = MaterializeCtx::new(graph, registry, with_audio, adapters);
+    let mut ctx = MaterializeCtx::new(
+        graph,
+        registry,
+        with_audio,
+        adapters,
+        gpu,
+    );
     let mut upstream_fp = asset_input_fingerprint(graph);
     let total_stages = plan.stages.len();
     #[allow(clippy::cast_possible_truncation)]
@@ -672,6 +710,7 @@ impl<'a> MaterializeCtx<'a> {
         registry: &'a OperationRegistry,
         with_audio: bool,
         adapters: crate::AdapterContext,
+        gpu: crate::GpuContext,
     ) -> Self {
         Self {
             graph,
@@ -683,6 +722,8 @@ impl<'a> MaterializeCtx<'a> {
                 preserve_audio: with_audio,
                 adapter_host: adapters.host,
                 adapter_registry: adapters.registry,
+                gpu_host: gpu.host,
+                gpu_registry: gpu.registry,
                 ..GraphEncodeHints::default()
             },
             primary_out: None,
@@ -1469,7 +1510,77 @@ mod tests {
         assert!(is_executable_op("rf.compose.layers"));
         assert!(is_executable_op("rf.transform.fade_in"));
         assert!(is_executable_op("rf.adapter.sightloom"));
+        assert!(is_executable_op("rf.gpu.passthrough"));
+        assert!(is_executable_op("rf.encode.hw"));
         assert!(!is_executable_op("rf.not.real"));
+    }
+
+    #[test]
+    fn gpu_stage_passthrough_and_hw_hint() {
+        let registry = OperationRegistry::with_builtins();
+        let seed: Arc<dyn VideoClip> = Arc::new(ColorClip::new(
+            Size::new(16, 16),
+            Rgb8::WHITE,
+            Duration::from_secs(1.0),
+        ));
+        let g = RenderGraph {
+            version: RENDER_GRAPH_VERSION,
+            assets: vec![MediaAsset {
+                id: MediaAssetId("a".into()),
+                uri: "seed://color".into(),
+                duration: None,
+                role: Some("video".into()),
+            }],
+            nodes: vec![
+                RenderNode {
+                    id: NodeId("src".into()),
+                    body: RenderNodeKind::Source {
+                        asset: MediaAssetId("a".into()),
+                    },
+                    inputs: vec![],
+                },
+                RenderNode {
+                    id: NodeId("gpu".into()),
+                    body: RenderNodeKind::Op {
+                        operation: OperationId::new("rf.gpu.passthrough"),
+                        params: serde_json::json!({}),
+                    },
+                    inputs: vec![NodeId("src".into())],
+                },
+                RenderNode {
+                    id: NodeId("enc".into()),
+                    body: RenderNodeKind::Op {
+                        operation: OperationId::new("rf.encode.hw"),
+                        params: serde_json::json!({ "codec": "libx264" }),
+                    },
+                    inputs: vec![NodeId("gpu".into())],
+                },
+                RenderNode {
+                    id: NodeId("out".into()),
+                    body: RenderNodeKind::Output {
+                        name: "main".into(),
+                    },
+                    inputs: vec![NodeId("enc".into())],
+                },
+            ],
+            outputs: vec![GraphOutput {
+                name: "main".into(),
+                node: NodeId("out".into()),
+                uri: None,
+            }],
+        };
+        let plan = schedule_graph(&g, &registry).unwrap();
+        assert!(
+            plan.stages
+                .iter()
+                .any(|s| matches!(s, ExecutionStage::Gpu(_))),
+            "gpu ops must schedule as GPU: {plan:?}"
+        );
+        let mut seeds = HashMap::new();
+        seeds.insert(MediaAssetId("a".into()), seed);
+        let (clip, hints) = materialize_graph_with_seeds(&g, &registry, &seeds).unwrap();
+        assert!((clip.duration().as_secs() - 1.0).abs() < 1e-9);
+        assert_eq!(hints.video_codec.as_deref(), Some("libx264"));
     }
 
     #[test]

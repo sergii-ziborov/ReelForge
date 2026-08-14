@@ -13,6 +13,8 @@ mod error;
 mod exec;
 mod ffmpeg;
 mod filtergraph;
+mod gpu;
+mod gpu_registry;
 mod graph_run;
 mod image_clip;
 mod manifest_seal;
@@ -34,6 +36,8 @@ pub use adapter::{
 };
 pub use adapter_registry::{AdapterRegistry, SightloomJsonExecutor};
 pub use encode_native::{encode_sampled_rawvideo, is_native_raw_format};
+pub use gpu::{GpuContext, GpuExecutor, GpuHost, GpuOutput, GpuRequest, execute_gpu};
+pub use gpu_registry::{GpuPassthroughExecutor, GpuRegistry, HwEncodeExecutor};
 pub use audio_file::{AudioFileClip, layout_for_channels, open_audio};
 pub use control::{CancelToken, ProgressCallback, WriteControl, WriteProgress, WriteStage};
 pub use error::{IoError, Result};

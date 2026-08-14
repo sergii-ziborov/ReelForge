@@ -3,6 +3,7 @@
 //! Dispatch is [`TypedParams`] / [`ExecutorKind`], not operation-id strings.
 
 use crate::adapter::{AdapterContext, AdapterRequest, execute_adapter};
+use crate::gpu::{GpuContext, GpuRequest, execute_gpu};
 use crate::error::{IoError, Result};
 use crate::graph_run::{GraphEncodeHints, NodeMedia};
 use crate::mask_bridge::{apply_region_redaction, region_redaction_from_value};
@@ -135,6 +136,11 @@ fn execute_unary(
                 masks: out.masks.or(input.masks),
             })
         }
+        TypedParams::Gpu {
+            name,
+            backend,
+            params,
+        } => execute_gpu_params(name, backend.as_deref(), params, input, hints),
         TypedParams::Speed { factor } => {
             let video = VideoEffect::apply(&Speed::new(*factor), Arc::clone(&input.video))
                 .map_err(IoError::from)?;
@@ -291,7 +297,7 @@ fn apply_typed_video(
         TypedParams::FadeOut { duration } => FadeOut::new(duration.to_duration())
             .apply(clip)
             .map_err(IoError::from),
-        TypedParams::Adapter { .. } => Ok(clip),
+        TypedParams::Adapter { .. } | TypedParams::Gpu { .. } => Ok(clip),
         TypedParams::Speed { factor } => {
             VideoEffect::apply(&Speed::new(*factor), clip).map_err(IoError::from)
         }
@@ -355,6 +361,34 @@ fn apply_typed_video(
             Ok(clip)
         }
     }
+}
+
+fn execute_gpu_params(
+    name: &str,
+    backend: Option<&str>,
+    params: &serde_json::Value,
+    input: NodeMedia,
+    hints: &mut GraphEncodeHints,
+) -> Result<NodeMedia> {
+    let request = GpuRequest::new(
+        name.to_string(),
+        backend.map(str::to_string),
+        params.clone(),
+        Arc::clone(&input.video),
+    );
+    let ctx = GpuContext {
+        host: hints.gpu_host.clone(),
+        registry: hints.gpu_registry.clone(),
+    };
+    let out = execute_gpu(&request, &ctx)?;
+    if let Some(codec) = out.video_codec {
+        hints.video_codec = Some(codec);
+    }
+    Ok(NodeMedia {
+        video: out.video.unwrap_or(input.video),
+        audio: input.audio,
+        masks: input.masks,
+    })
 }
 
 fn apply_rotate_typed(

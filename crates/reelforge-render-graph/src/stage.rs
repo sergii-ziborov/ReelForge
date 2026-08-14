@@ -37,7 +37,7 @@ pub struct AdapterStage {
     pub nodes: Vec<NodeId>,
 }
 
-/// Future GPU stage placeholder.
+/// GPU stage (`rf.gpu.passthrough`, `rf.encode.hw`, host compute).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GpuStage {
     /// Nodes covered.
