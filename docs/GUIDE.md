@@ -356,6 +356,8 @@ Pixel silhouettes travel as `MaskAsset` (`Dense` / `Cropped` / `Rle` / `Polygon`
 
 GPU stages (`rf.gpu.passthrough`, `rf.encode.hw`) execute instead of failing closed. `GpuRegistry` passthrough keeps the clip; `rf.encode.hw` probes host `ffmpeg` for NVENC/QSV/AMF (or uses `backend` / `codec`). A `GpuHost` can replace the clip with an `ExternalSurface` device path. ReelForge does not ship CUDA kernels.
 
+Durable jobs: `JobStore` persists `{id}/job.json`. `submit_render_job` fingerprints the graph+plan. `run_render_job` / `resume_render_job` write `Running` → `Done`, cancel → `Paused`, other errors → `Failed`. A `Done` job with the same fingerprint and an output file is a no-op. In-process stages re-evaluate on resume; a matching `StageCache` hit still skips encode. Capture owns the queue.
+
 `rf.transform.trim` / `fade_in` / `fade_out` compile to `MediaTime` ticks (`MediaRange` for trim). Float seconds in JSON become 1 MHz ticks; `{ticks, timescale}` is preserved. Conversion to `Time`/`Duration` happens only at the effect / FFmpeg boundary.
 
 ```rust

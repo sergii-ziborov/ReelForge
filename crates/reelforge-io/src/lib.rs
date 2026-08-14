@@ -17,6 +17,9 @@ mod gpu;
 mod gpu_registry;
 mod graph_run;
 mod image_clip;
+mod job;
+mod job_run;
+mod job_store;
 mod manifest_seal;
 mod mask_bridge;
 mod options;
@@ -58,6 +61,9 @@ pub use graph_run::{
     run_render_graph_with, run_render_graph_with_manifest,
 };
 pub use image_clip::ImageClip;
+pub use job::{JobCheckpoint, JobId, JobState, RENDER_JOB_VERSION, RenderJob};
+pub use job_run::{resume_render_job, run_render_job, submit_render_job};
+pub use job_store::JobStore;
 pub use manifest_seal::{fingerprint_file, seal_manifest_on_disk};
 pub use mask_bridge::{
     apply_region_redaction, mask_timeline_from_box, mask_timeline_from_box_subject,
