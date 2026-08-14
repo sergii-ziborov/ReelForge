@@ -18,9 +18,11 @@ pub struct ProjectCompile {
 
 /// Compile the active sequence.
 ///
-/// Video clips: `Source` → trim → optional speed / fade → compose.
+/// Video clips: `Source` → trim (ticks) → optional speed / fade → compose.
 /// Audio tracks: same chain, then `rf.audio.mix` onto the picture.
-/// Markers stay editorial. Wipe is stored, not compiled.
+/// Project `semantic` refs compile to `rf.adapter.sightloom` + empty redaction
+/// (subject / event / query / policy handles — not bboxes).
+/// Markers stay editorial. Wipe is stored, not compiled. Muted tracks skip.
 ///
 /// # Errors
 ///
@@ -47,6 +49,9 @@ pub fn compile_project(project: &CaptureProject) -> Result<ProjectCompile> {
     };
     if !ctx.audio.is_empty() {
         picture = ctx.emit_audio_mix(picture);
+    }
+    if !project.semantic.is_empty() {
+        picture = ctx.emit_semantic_privacy(&project.semantic, picture);
     }
 
     let out_id = NodeId("n_out".into());

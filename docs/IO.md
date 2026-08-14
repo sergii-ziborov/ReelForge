@@ -210,7 +210,7 @@ Benches (no encode): `cargo bench -p reelforge-io --bench render_plan`
 `RenderPlan` stays **one input → linear ops → one output**.  
 `RenderGraph` is the DAG (several assets, fused redaction, hybrid stages). Do not grow Plan v1 into a project file.
 
-`CaptureProject` (`compile_project`) is the OTIO-like **user timeline**. It compiles to `RenderGraph` (trim, speed, fade/dissolve, audio mix). Editor / screen capture stay in ReelForge Capture.
+`CaptureProject` (`compile_project`) is the OTIO-like **user timeline**. It compiles to `RenderGraph` (trim ticks, speed, fade/dissolve, audio mix, semantic adapter + redaction). Editor / screen capture stay in ReelForge Capture.
 
 See the walkthrough in [GUIDE.md](GUIDE.md#rendergraph).
 

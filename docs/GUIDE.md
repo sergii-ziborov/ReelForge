@@ -225,7 +225,7 @@ let compiled = compile_project(&project)?;
 // compiled.graph → compile_graph / run_render_graph
 ```
 
-`version: 0` migrates to v1. Compile v1: trim, `speed`, fade / dissolve, audio-track `mix`. Wipe is stored, not compiled. Markers stay editorial.
+`version: 0` migrates to v1. Compile v1: trim (`{ticks, timescale}`), `speed`, fade / dissolve, audio-track `mix`, muted tracks skipped. Project `semantic` refs (`subject` / `event` / `query` / `policy`) compile to `rf.adapter.sightloom` + an empty fused redaction — handles only, no bboxes. Wipe is stored, not compiled. Markers stay editorial. Nested sequences offset their child layers.
 
 ### Build, inspect, run
 

@@ -2,11 +2,12 @@
 
 use crate::error::{ProjectError, Result};
 use crate::ids::{MediaRefId, SequenceId};
-use crate::model::{Retiming, TimelineClip, TimelineItem, TransitionKind};
+use crate::model::{SemanticRef, TimelineItem};
 use crate::project::{CaptureProject, Sequence, TimelineTrack, TrackKind};
 use reelforge_core::MediaTime;
 use reelforge_render_graph::{
-    MediaAsset, MediaAssetId, NodeId, OperationId, RenderNode, RenderNodeKind,
+    MaskTimeline, MediaAsset, NodeId, OperationId, RegionRedaction, RenderNode,
+    RenderNodeKind,
 };
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
@@ -23,7 +24,7 @@ pub(crate) struct AudioRef {
 }
 
 pub(crate) struct CompileCtx<'a> {
-    media: BTreeMap<&'a str, &'a crate::model::MediaRef>,
+    pub(crate) media: BTreeMap<&'a str, &'a crate::model::MediaRef>,
     sequences: &'a [Sequence],
     stack: BTreeSet<String>,
     pub assets: BTreeMap<String, MediaAsset>,
@@ -59,15 +60,14 @@ impl<'a> CompileCtx<'a> {
         }
         for (ti, track) in seq.tracks.iter().enumerate() {
             match track.kind {
+                TrackKind::Video if track.muted => self
+                    .warnings
+                    .push(format!("video track {} is muted", track.id.as_str())),
                 TrackKind::Video => self.emit_picture_track(track, ti, false)?,
-                TrackKind::Audio => {
-                    if track.muted {
-                        self.warnings
-                            .push(format!("audio track {} is muted", track.id.as_str()));
-                    } else {
-                        self.emit_picture_track(track, ti, true)?;
-                    }
-                }
+                TrackKind::Audio if track.muted => self
+                    .warnings
+                    .push(format!("audio track {} is muted", track.id.as_str())),
+                TrackKind::Audio => self.emit_picture_track(track, ti, true)?,
                 TrackKind::Subtitle => self.warnings.push(format!(
                     "subtitle track {} is stored but not compiled",
                     track.id.as_str()
@@ -89,7 +89,7 @@ impl<'a> CompileCtx<'a> {
             match item {
                 TimelineItem::Gap(g) => cursor += g.duration.as_secs(),
                 TimelineItem::Clip(clip) => {
-                    let rec = record_secs(clip)?;
+                    let rec = crate::emit_clip::record_secs(clip)?;
                     let (node, overlap) = self.emit_clip(clip)?;
                     cursor = (cursor - overlap).max(0.0);
                     if audio_only {
@@ -127,92 +127,6 @@ impl<'a> CompileCtx<'a> {
             }
         }
         Ok(())
-    }
-
-    fn emit_clip(&mut self, clip: &TimelineClip) -> Result<(NodeId, f64)> {
-        let media = self.lookup_media(&clip.media)?;
-        let asset_key = format!("m_{}", media.id.as_str());
-        let asset = MediaAsset {
-            id: MediaAssetId(asset_key.clone()),
-            uri: media.uri.clone(),
-            duration: media.duration,
-            role: match media.role.as_deref() {
-                Some("audio") => None,
-                _ => media.role.clone(),
-            },
-        };
-        let asset_id = asset.id.clone();
-        self.assets.entry(asset_key).or_insert(asset);
-        let src = self.fresh("src");
-        self.nodes.push(RenderNode {
-            id: src.clone(),
-            body: RenderNodeKind::Source { asset: asset_id },
-            inputs: Vec::new(),
-        });
-        let mut node = self.unary(
-            "trim",
-            "rf.transform.trim",
-            json!({
-                "start": clip.source.start.as_secs(),
-                "duration": clip.source.duration.as_secs(),
-            }),
-            src,
-        );
-        if let Retiming::Speed { factor } = clip.retiming {
-            node = self.unary(
-                "speed",
-                "rf.transform.speed",
-                json!({ "factor": factor }),
-                node,
-            );
-        }
-        let overlap = self.apply_transition_in(clip, &mut node);
-        Ok((node, overlap))
-    }
-
-    fn apply_transition_in(&mut self, clip: &TimelineClip, node: &mut NodeId) -> f64 {
-        let Some(tr) = &clip.transition_in else {
-            return 0.0;
-        };
-        let dur = tr.duration.as_secs();
-        match tr.kind {
-            TransitionKind::Fade => {
-                *node = self.unary(
-                    "fin",
-                    "rf.transform.fade_in",
-                    json!({ "duration": dur }),
-                    node.clone(),
-                );
-                0.0
-            }
-            TransitionKind::Dissolve => {
-                if let Some(prev) = self.layers.last() {
-                    let faded = self.unary(
-                        "fout",
-                        "rf.transform.fade_out",
-                        json!({ "duration": dur }),
-                        prev.node.clone(),
-                    );
-                    if let Some(last) = self.layers.last_mut() {
-                        last.node = faded;
-                    }
-                }
-                *node = self.unary(
-                    "fin",
-                    "rf.transform.fade_in",
-                    json!({ "duration": dur }),
-                    node.clone(),
-                );
-                dur
-            }
-            TransitionKind::Wipe => {
-                self.warnings.push(format!(
-                    "clip {}: wipe is declared but not compiled",
-                    clip.id.as_str()
-                ));
-                0.0
-            }
-        }
     }
 
     pub(crate) fn emit_compose(&mut self, canvas: Option<(u32, u32)>) -> NodeId {
@@ -266,7 +180,30 @@ impl<'a> CompileCtx<'a> {
         mix
     }
 
-    fn unary(
+    /// Subject/event/query/policy handles → adapter + empty fused redaction.
+    pub(crate) fn emit_semantic_privacy(
+        &mut self,
+        refs: &[SemanticRef],
+        picture: NodeId,
+    ) -> NodeId {
+        let adapter = self.unary(
+            "vision",
+            "rf.adapter.sightloom",
+            semantic_adapter_params(refs),
+            picture,
+        );
+        let id = self.fresh("redact");
+        self.nodes.push(RenderNode {
+            id: id.clone(),
+            body: RenderNodeKind::Redaction {
+                redaction: RegionRedaction::gaussian(MaskTimeline::new(), 12.0),
+            },
+            inputs: vec![adapter],
+        });
+        id
+    }
+
+    pub(crate) fn unary(
         &mut self,
         prefix: &str,
         op: &str,
@@ -285,7 +222,7 @@ impl<'a> CompileCtx<'a> {
         id
     }
 
-    fn lookup_media(&self, id: &MediaRefId) -> Result<&crate::model::MediaRef> {
+    pub(crate) fn lookup_media(&self, id: &MediaRefId) -> Result<&crate::model::MediaRef> {
         self.media
             .get(id.as_str())
             .copied()
@@ -299,23 +236,31 @@ impl<'a> CompileCtx<'a> {
             .ok_or_else(|| ProjectError::message(format!("unknown sequence {}", id.as_str())))
     }
 
-    fn fresh(&mut self, prefix: &str) -> NodeId {
+    pub(crate) fn fresh(&mut self, prefix: &str) -> NodeId {
         let n = self.next;
         self.next += 1;
         NodeId(format!("n_{prefix}_{n}"))
     }
 }
 
-pub(crate) fn record_secs(clip: &TimelineClip) -> Result<f64> {
-    let src = clip.source.duration.as_secs();
-    match clip.retiming {
-        Retiming::Identity => Ok(src),
-        Retiming::Speed { factor } if factor.is_finite() && factor > 0.0 => Ok(src / factor),
-        Retiming::Speed { factor } => Err(ProjectError::message(format!(
-            "clip {}: invalid speed factor {factor}",
-            clip.id.as_str()
-        ))),
+pub(crate) fn semantic_adapter_params(refs: &[SemanticRef]) -> serde_json::Value {
+    let mut params = json!({});
+    for (key, kind) in [
+        ("subjects", "subject"),
+        ("events", "event"),
+        ("query", "query"),
+        ("policy", "policy"),
+    ] {
+        let ids: Vec<&str> = refs
+            .iter()
+            .filter(|r| r.kind == kind)
+            .map(|r| r.id.as_str())
+            .collect();
+        if !ids.is_empty() {
+            params[key] = json!(ids);
+        }
     }
+    params
 }
 
 pub(crate) fn child_span(seq: &Sequence) -> f64 {
@@ -327,7 +272,7 @@ pub(crate) fn child_span(seq: &Sequence) -> f64 {
                 .iter()
                 .map(|i| match i {
                     TimelineItem::Gap(g) => g.duration.as_secs(),
-                    TimelineItem::Clip(c) => record_secs(c).unwrap_or(0.0),
+                    TimelineItem::Clip(c) => crate::emit_clip::record_secs(c).unwrap_or(0.0),
                     TimelineItem::Nested(n) => n.duration.map_or(0.0, MediaTime::as_secs),
                 })
                 .sum::<f64>()
