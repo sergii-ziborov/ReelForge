@@ -2,7 +2,9 @@
 
 use crate::error::{IoError, Result};
 use reelforge_core::{MediaTime, VideoClip, VideoEffect};
-use reelforge_fx::{PrivacyStyle, RegionSample, RegionTrack, TrackSet, TrackedPrivacy};
+use reelforge_fx::{
+    CoverageMask, PrivacyStyle, RegionSample, RegionTrack, TrackSet, TrackedPrivacy,
+};
 use reelforge_render_graph::{
     MaskSample, MaskTimeline, RedactionStyle, RegionRedaction, SubjectId, TrackTimeline,
     mask_timeline_from_tracks,
@@ -36,7 +38,7 @@ pub fn mask_timeline_to_track_set(masks: &MaskTimeline) -> TrackSet {
             if !s.contributes_region() {
                 continue;
             }
-            let sample =
+            let mut sample =
                 if let (Some(l), Some(t), Some(r), Some(b)) = (s.left, s.top, s.right, s.bottom) {
                     RegionSample::from_bbox(s.t.as_secs(), l, t, r, b, s.conf)
                 } else {
@@ -46,8 +48,18 @@ pub fn mask_timeline_to_track_set(masks: &MaskTimeline) -> TrackSet {
                         cy: s.cy,
                         radius: s.radius,
                         conf: s.conf,
+                        coverage: None,
                     }
                 };
+            if let Some(asset) = s.asset.as_ref().and_then(|a| a.asset.to_coverage()) {
+                sample.coverage = Some(CoverageMask {
+                    left: asset.left,
+                    top: asset.top,
+                    width: asset.width,
+                    height: asset.height,
+                    data: std::sync::Arc::new(asset.data),
+                });
+            }
             track.push(sample);
         }
         if !track.samples.is_empty() {

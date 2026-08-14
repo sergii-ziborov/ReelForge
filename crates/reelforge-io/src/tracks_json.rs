@@ -175,6 +175,7 @@ fn sample_from_json(s: &SampleJson) -> Result<RegionSample> {
             cy,
             radius: radius.max(1.0),
             conf: conf.clamp(0.0, 1.0),
+            coverage: None,
         });
     }
     if let (Some(x), Some(y), Some(w), Some(h)) = (s.x, s.y, s.w, s.h) {

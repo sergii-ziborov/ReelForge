@@ -17,6 +17,7 @@ reelforge-compose = { workspace = true }
 reelforge-core = { workspace = true }
 reelforge-fx = { workspace = true }
 reelforge-render-graph = { workspace = true }
+reelforge-sightloom-adapter = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

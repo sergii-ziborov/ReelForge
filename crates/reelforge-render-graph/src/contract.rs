@@ -141,6 +141,16 @@ fn infer_op_contract(
                 notes: None,
             })
         }
+        TypedParams::Adapter { .. } => {
+            let input = single_input(node_id, upstreams)?;
+            require(node_id, op.id.as_str(), input, &desc.input.without_notes())?;
+            Ok(MediaContract {
+                video: input.video,
+                audio: input.audio,
+                masks: true,
+                notes: None,
+            })
+        }
         _ => {
             let input = single_input(node_id, upstreams)?;
             require(node_id, op.id.as_str(), input, &desc.input.without_notes())?;

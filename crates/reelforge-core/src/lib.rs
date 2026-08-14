@@ -10,6 +10,7 @@ mod effect;
 mod error;
 mod frame;
 mod layout;
+mod media_range;
 mod media_time;
 mod plane;
 mod quality;
@@ -34,6 +35,7 @@ pub use effect::{AudioEffect, VideoEffect, apply_audio_effects, apply_video_effe
 pub use error::{CoreError, Result};
 pub use frame::{Frame, FrameFormat, Mask};
 pub use layout::{Anchor, Position, Size};
+pub use media_range::MediaRange;
 pub use media_time::MediaTime;
 pub use plane::{SurfacePlane, validate_planes};
 pub use quality::{psnr_rgb, ssim_rgb};

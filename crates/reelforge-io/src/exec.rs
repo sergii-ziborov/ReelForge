@@ -2,6 +2,7 @@
 //!
 //! Dispatch is [`TypedParams`] / [`ExecutorKind`], not operation-id strings.
 
+use crate::adapter::execute_adapter;
 use crate::error::{IoError, Result};
 use crate::graph_run::{GraphEncodeHints, NodeMedia};
 use crate::mask_bridge::{apply_region_redaction, region_redaction_from_value};
@@ -9,8 +10,7 @@ use reelforge_compose::{
     CompositeLayer, MixTrack, composite_video, composite_video_with_background, mix_audio,
 };
 use reelforge_core::{
-    AudioEffect, Duration, Position, Rgb8, Size, Time, VideoClip, VideoEffect, subclip_audio,
-    subclip_video,
+    AudioEffect, Position, Rgb8, Size, Time, VideoClip, VideoEffect, subclip_audio, subclip_video,
 };
 use reelforge_fx::{
     BlackAndWhite, Crop, EvenSize, FadeIn, FadeOut, InvertColors, MirrorX, MirrorY, Painting,
@@ -59,7 +59,11 @@ fn execute_nary(compiled: &CompiledOp, inputs: Vec<NodeMedia>) -> Result<NodeMed
             let videos: Vec<_> = inputs.iter().map(|m| Arc::clone(&m.video)).collect();
             let audio = inputs.first().and_then(|m| m.audio.clone());
             let video = apply_compose_layers(videos, *w, *h, layers, background.as_ref())?;
-            Ok(NodeMedia { video, audio })
+            Ok(NodeMedia {
+                video,
+                audio,
+                masks: inputs.first().and_then(|m| m.masks.clone()),
+            })
         }
         TypedParams::AudioMix { tracks } => apply_audio_mix(inputs, tracks),
         other => Err(IoError::message(format!(
@@ -83,6 +87,7 @@ fn execute_unary(
             Ok(NodeMedia {
                 video: input.video,
                 audio,
+                masks: input.masks,
             })
         }
         TypedParams::AudioDrop => {
@@ -90,6 +95,7 @@ fn execute_unary(
             Ok(NodeMedia {
                 video: input.video,
                 audio: None,
+                masks: input.masks,
             })
         }
         TypedParams::AudioPreserve => {
@@ -99,18 +105,29 @@ fn execute_unary(
         TypedParams::Trim { start, duration } => {
             let video = subclip_video(
                 Arc::clone(&input.video),
-                Time::from_secs(*start),
-                Duration::from_secs(*duration),
+                start.to_time(),
+                duration.to_duration(),
             )
             .map_err(IoError::from)?;
             let audio = match input.audio {
                 Some(a) => Some(
-                    subclip_audio(a, Time::from_secs(*start), Duration::from_secs(*duration))
-                        .map_err(IoError::from)?,
+                    subclip_audio(a, start.to_time(), duration.to_duration()).map_err(IoError::from)?,
                 ),
                 None => None,
             };
-            Ok(NodeMedia { video, audio })
+            Ok(NodeMedia {
+                video,
+                audio,
+                masks: input.masks,
+            })
+        }
+        TypedParams::Adapter { name, params } => {
+            let out = execute_adapter(name, params, hints.adapter_host.as_deref())?;
+            Ok(NodeMedia {
+                video: input.video,
+                audio: input.audio,
+                masks: out.masks.or(input.masks),
+            })
         }
         TypedParams::Speed { factor } => {
             let video = VideoEffect::apply(&Speed::new(*factor), Arc::clone(&input.video))
@@ -121,7 +138,11 @@ fn execute_unary(
                 }
                 None => None,
             };
-            Ok(NodeMedia { video, audio })
+            Ok(NodeMedia {
+                video,
+                audio,
+                masks: input.masks,
+            })
         }
         TypedParams::ComposeLayers { .. } | TypedParams::AudioMix { .. } => Err(IoError::message(
             format!("{} must be executed as n-ary", compiled.id),
@@ -131,6 +152,7 @@ fn execute_unary(
             Ok(NodeMedia {
                 video,
                 audio: input.audio,
+                masks: input.masks,
             })
         }
     }
@@ -172,6 +194,7 @@ fn apply_audio_mix(inputs: Vec<NodeMedia>, track_value: &serde_json::Value) -> R
     Ok(NodeMedia {
         video,
         audio: Some(mixed),
+        masks: None,
     })
 }
 
@@ -243,12 +266,9 @@ fn apply_typed_video(
     hints: &mut GraphEncodeHints,
 ) -> Result<Arc<dyn VideoClip>> {
     match params {
-        TypedParams::Trim { start, duration } => subclip_video(
-            clip,
-            Time::from_secs(*start),
-            Duration::from_secs(*duration),
-        )
-        .map_err(IoError::from),
+        TypedParams::Trim { start, duration } => {
+            subclip_video(clip, start.to_time(), duration.to_duration()).map_err(IoError::from)
+        }
         TypedParams::HFlip => MirrorX.apply(clip).map_err(IoError::from),
         TypedParams::VFlip => MirrorY.apply(clip).map_err(IoError::from),
         TypedParams::EvenDims => EvenSize.apply(clip).map_err(IoError::from),
@@ -259,12 +279,13 @@ fn apply_typed_video(
             Crop::new(*x, *y, *w, *h).apply(clip).map_err(IoError::from)
         }
         TypedParams::Rotate { mode, degrees } => apply_rotate_typed(clip, mode, *degrees),
-        TypedParams::FadeIn { duration } => FadeIn::new(Duration::from_secs(*duration))
+        TypedParams::FadeIn { duration } => FadeIn::new(duration.to_duration())
             .apply(clip)
             .map_err(IoError::from),
-        TypedParams::FadeOut { duration } => FadeOut::new(Duration::from_secs(*duration))
+        TypedParams::FadeOut { duration } => FadeOut::new(duration.to_duration())
             .apply(clip)
             .map_err(IoError::from),
+        TypedParams::Adapter { .. } => Ok(clip),
         TypedParams::Speed { factor } => {
             VideoEffect::apply(&Speed::new(*factor), clip).map_err(IoError::from)
         }

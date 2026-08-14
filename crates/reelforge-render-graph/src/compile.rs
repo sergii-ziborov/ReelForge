@@ -13,7 +13,7 @@
 
 use crate::error::{GraphError, Result};
 use crate::op::{BackendClass, OperationId, OperationRegistry, SemVer};
-use reelforge_core::MediaTime;
+use reelforge_core::{MediaRange, MediaTime};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -34,12 +34,14 @@ pub struct CostEstimate {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum TypedParams {
-    /// `rf.transform.trim`
+    /// `rf.transform.trim` — exact ticks, not floating seconds.
     Trim {
-        /// Start seconds.
-        start: f64,
-        /// Duration seconds.
-        duration: f64,
+        /// Inclusive start (`MediaTime` ticks).
+        #[serde(deserialize_with = "de_media_time")]
+        start: MediaTime,
+        /// Length (`MediaTime` ticks / timescale).
+        #[serde(deserialize_with = "de_media_time")]
+        duration: MediaTime,
     },
     /// `rf.transform.hflip`
     HFlip,
@@ -75,13 +77,22 @@ pub enum TypedParams {
     },
     /// `rf.transform.fade_in`
     FadeIn {
-        /// Duration seconds.
-        duration: f64,
+        /// Fade length (exact ticks).
+        #[serde(deserialize_with = "de_media_time")]
+        duration: MediaTime,
     },
     /// `rf.transform.fade_out`
     FadeOut {
-        /// Duration seconds.
-        duration: f64,
+        /// Fade length (exact ticks).
+        #[serde(deserialize_with = "de_media_time")]
+        duration: MediaTime,
+    },
+    /// `rf.adapter.sightloom` (or another registered adapter).
+    Adapter {
+        /// Adapter name (`sightloom`, …).
+        name: String,
+        /// Query / tracks / package params (host-interpreted).
+        params: Value,
     },
     /// `rf.transform.speed`
     Speed {
@@ -223,6 +234,7 @@ pub fn is_executable_op_id(id: &str) -> bool {
             | "rf.audio.preserve"
             | "rf.audio.mix"
             | "rf.encode.h264"
+            | "rf.adapter.sightloom"
     )
 }
 
@@ -345,21 +357,30 @@ fn f64_field(v: &Value, key: &str) -> Option<f64> {
     })
 }
 
-/// Number or `MediaTime` object (`{ticks, timescale}`).
-fn time_field(v: &Value, key: &str) -> Option<f64> {
-    let x = v.get(key)?;
+/// Number (seconds at 1 MHz) or `{ticks, timescale}`.
+fn media_time_from_value(x: &Value) -> Option<MediaTime> {
     if let Some(n) = x.as_f64() {
-        return Some(n);
+        return MediaTime::from_secs(n, MediaTime::HZ_1M).ok();
     }
     if let Some(n) = x.as_i64() {
         #[allow(clippy::cast_precision_loss)]
-        return Some(n as f64);
+        return MediaTime::from_secs(n as f64, MediaTime::HZ_1M).ok();
     }
     let ticks = x.get("ticks").and_then(serde_json::Value::as_i64)?;
     let ts = x.get("timescale").and_then(serde_json::Value::as_u64)?;
-    #[allow(clippy::cast_possible_truncation)]
-    let mt = MediaTime::new(ticks, ts as u32).ok()?;
-    Some(mt.as_secs())
+    MediaTime::new(ticks, u32::try_from(ts).ok()?).ok()
+}
+
+fn time_field(v: &Value, key: &str) -> Option<MediaTime> {
+    media_time_from_value(v.get(key)?)
+}
+
+fn de_media_time<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> core::result::Result<MediaTime, D::Error> {
+    let v = Value::deserialize(d)?;
+    media_time_from_value(&v)
+        .ok_or_else(|| serde::de::Error::custom("expected seconds or {ticks,timescale}"))
 }
 
 fn u32_field(v: &Value, key: &str) -> Option<u32> {
@@ -373,19 +394,20 @@ fn parse_typed_params(id: &str, raw: &Value) -> Result<TypedParams> {
     let empty = raw.is_null() || raw.as_object().is_some_and(serde_json::Map::is_empty);
     match id {
         "rf.transform.trim" => {
-            let start = time_field(raw, "start").unwrap_or(0.0);
+            let start = time_field(raw, "start").unwrap_or_else(|| MediaTime::zero(MediaTime::HZ_1M));
             let duration =
                 time_field(raw, "duration").ok_or_else(|| GraphError::InvalidParams {
                     operation: id.into(),
                     message: "duration required".into(),
                 })?;
-            if !(duration.is_finite() && duration > 0.0) {
-                return Err(GraphError::InvalidParams {
-                    operation: id.into(),
-                    message: "duration must be finite > 0".into(),
-                });
-            }
-            Ok(TypedParams::Trim { start, duration })
+            let range = MediaRange::new(start, duration).map_err(|e| GraphError::InvalidParams {
+                operation: id.into(),
+                message: e.to_string(),
+            })?;
+            Ok(TypedParams::Trim {
+                start: range.start,
+                duration: range.duration,
+            })
         }
         "rf.transform.hflip" => Ok(TypedParams::HFlip),
         "rf.transform.vflip" => Ok(TypedParams::VFlip),
@@ -430,7 +452,8 @@ fn parse_typed_params(id: &str, raw: &Value) -> Result<TypedParams> {
             Ok(TypedParams::Rotate { mode, degrees })
         }
         "rf.transform.fade_in" => Ok(TypedParams::FadeIn {
-            duration: time_field(raw, "duration").unwrap_or(0.5),
+            duration: time_field(raw, "duration")
+                .unwrap_or_else(|| MediaTime::from_secs(0.5, MediaTime::HZ_1M).unwrap_or_default()),
         }),
         "rf.transform.speed" => {
             let factor = f64_field(raw, "factor").ok_or_else(|| GraphError::InvalidParams {
@@ -446,7 +469,16 @@ fn parse_typed_params(id: &str, raw: &Value) -> Result<TypedParams> {
             Ok(TypedParams::Speed { factor })
         }
         "rf.transform.fade_out" => Ok(TypedParams::FadeOut {
-            duration: time_field(raw, "duration").unwrap_or(0.5),
+            duration: time_field(raw, "duration")
+                .unwrap_or_else(|| MediaTime::from_secs(0.5, MediaTime::HZ_1M).unwrap_or_default()),
+        }),
+        "rf.adapter.sightloom" => Ok(TypedParams::Adapter {
+            name: raw
+                .get("adapter")
+                .and_then(Value::as_str)
+                .unwrap_or("sightloom")
+                .to_string(),
+            params: raw.clone(),
         }),
         "rf.color.black_and_white" => Ok(TypedParams::BlackAndWhite),
         "rf.color.invert" => Ok(TypedParams::Invert),
@@ -648,10 +680,42 @@ mod tests {
         .unwrap();
         match c.params {
             TypedParams::Trim { start, duration } => {
-                assert!((start - 0.0).abs() < f64::EPSILON);
-                assert!((duration - 1.0).abs() < 1e-9);
+                assert_eq!(start.ticks, 0);
+                assert_eq!(duration.ticks, 1_000_000);
+                assert_eq!(duration.timescale, 1_000_000);
             }
             _ => panic!("expected Trim"),
         }
+    }
+
+    #[test]
+    fn trim_float_seconds_become_microticks() {
+        let r = OperationRegistry::with_builtins();
+        let c = compile_op(
+            &r,
+            &OperationId::new("rf.transform.trim"),
+            &serde_json::json!({ "start": 0.0, "duration": 1.0 }),
+        )
+        .unwrap();
+        match c.params {
+            TypedParams::Trim { start, duration } => {
+                assert_eq!(start.timescale, MediaTime::HZ_1M);
+                assert_eq!(duration.ticks, i64::from(MediaTime::HZ_1M));
+            }
+            _ => panic!("expected Trim"),
+        }
+    }
+
+    #[test]
+    fn compiles_sightloom_adapter() {
+        let r = OperationRegistry::with_builtins();
+        let c = compile_op(
+            &r,
+            &OperationId::new("rf.adapter.sightloom"),
+            &serde_json::json!({ "tracks": [] }),
+        )
+        .unwrap();
+        assert!(matches!(c.params, TypedParams::Adapter { .. }));
+        assert_eq!(c.backend, BackendClass::Adapter);
     }
 }

@@ -32,6 +32,8 @@ impl Default for MediaTime {
 impl MediaTime {
     /// Common 90 kHz media clock.
     pub const HZ_90K: u32 = 90_000;
+    /// 1 MHz (microsecond) clock — default compile timescale for float seconds.
+    pub const HZ_1M: u32 = 1_000_000;
     /// 1 kHz (millisecond) clock.
     pub const HZ_1K: u32 = 1_000;
     /// 1 Hz (whole seconds).
@@ -97,6 +99,12 @@ impl MediaTime {
     #[must_use]
     pub fn to_time(self) -> Time {
         Time::from_secs(self.as_secs())
+    }
+
+    /// Interpret this instant as a **length** (ticks / timescale) → [`Duration`].
+    #[must_use]
+    pub fn to_duration(self) -> Duration {
+        Duration::from_secs(self.as_secs())
     }
 
     /// Nanoseconds since origin (saturating).

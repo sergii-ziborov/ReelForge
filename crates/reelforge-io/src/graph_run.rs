@@ -4,10 +4,12 @@
 //! RenderGraph --schedule--> ExecutionPlan --run--> outputs on disk
 //! ```
 //!
-//! Linear DAGs and multi-input `rf.compose.layers` are supported. Adapter /
-//! GPU stages fail clearly until host adapters land. `FFmpeg` stages that only
-//! carry encode/output markers finalize via Rust pixel encode (`write_video`);
-//! geometry/`trim` prefixes use host filtergraph when a later stage needs Rust.
+//! Linear DAGs and multi-input `rf.compose.layers` are supported. Adapter
+//! stages (`rf.adapter.sightloom`) materialize masks via [`crate::AdapterHost`]
+//! or exported tracks JSON. GPU stages still fail clearly. `FFmpeg` stages that
+//! only carry encode/output markers finalize via Rust pixel encode
+//! (`write_video`); geometry/`trim` prefixes use host filtergraph when a later
+//! stage needs Rust.
 
 use crate::control::{WriteControl, WriteProgress, WriteStage};
 use crate::error::{IoError, Result};
@@ -30,7 +32,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Encode / output hints collected while walking the graph.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct GraphEncodeHints {
     /// Output FPS override.
     pub fps: Option<f64>,
@@ -42,6 +44,21 @@ pub struct GraphEncodeHints {
     pub output_path: Option<String>,
     /// Mux companion audio when present (`true` by default once audio attaches).
     pub preserve_audio: bool,
+    /// Optional vision adapter host (`SightLoom` / tests).
+    pub adapter_host: Option<std::sync::Arc<dyn crate::AdapterHost>>,
+}
+
+impl core::fmt::Debug for GraphEncodeHints {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("GraphEncodeHints")
+            .field("fps", &self.fps)
+            .field("video_codec", &self.video_codec)
+            .field("crf", &self.crf)
+            .field("output_path", &self.output_path)
+            .field("preserve_audio", &self.preserve_audio)
+            .field("adapter_host", &self.adapter_host.is_some())
+            .finish()
+    }
 }
 
 /// Materialized video (+ optional audio) from a [`RenderGraph`].
@@ -60,10 +77,21 @@ pub struct GraphBundle {
 pub(crate) struct NodeMedia {
     pub(crate) video: Arc<dyn VideoClip>,
     pub(crate) audio: Option<Arc<dyn AudioClip>>,
+    pub(crate) masks: Option<reelforge_render_graph::MaskTimeline>,
+}
+
+impl NodeMedia {
+    pub(crate) fn new(video: Arc<dyn VideoClip>, audio: Option<Arc<dyn AudioClip>>) -> Self {
+        Self {
+            video,
+            audio,
+            masks: None,
+        }
+    }
 }
 
 /// Options for [`run_render_graph_with`].
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct GraphRunOptions {
     /// Operation registry (builtins by default).
     pub registry: OperationRegistry,
@@ -80,6 +108,8 @@ pub struct GraphRunOptions {
     /// When `true`, pure in-process materialize is preferred over hybrid
     /// `FFmpeg` prefixes so companion audio stays aligned.
     pub with_audio: bool,
+    /// Optional `SightLoom` / test adapter host.
+    pub adapter_host: Option<Arc<dyn crate::AdapterHost>>,
 }
 
 impl Default for GraphRunOptions {
@@ -91,6 +121,7 @@ impl Default for GraphRunOptions {
             crf: None,
             cache: None,
             with_audio: true,
+            adapter_host: None,
         }
     }
 }
@@ -121,6 +152,27 @@ impl GraphRunOptions {
     pub fn video_only(mut self) -> Self {
         self.with_audio = false;
         self
+    }
+
+    /// Install a vision adapter host (`SightLoom` / tests).
+    #[must_use]
+    pub fn with_adapter_host(mut self, host: Arc<dyn crate::AdapterHost>) -> Self {
+        self.adapter_host = Some(host);
+        self
+    }
+}
+
+impl core::fmt::Debug for GraphRunOptions {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("GraphRunOptions")
+            .field("registry", &self.registry.len())
+            .field("fps", &self.fps)
+            .field("video_codec", &self.video_codec)
+            .field("crf", &self.crf)
+            .field("cache", &self.cache.is_some())
+            .field("with_audio", &self.with_audio)
+            .field("adapter_host", &self.adapter_host.is_some())
+            .finish()
     }
 }
 
@@ -308,7 +360,7 @@ fn execute_plan_and_seal(
         .validate()
         .map_err(|e| IoError::message(e.to_string()))?;
     control.check_cancel()?;
-    reject_unsupported_stages(plan)?;
+    reject_gpu_stages(plan)?;
 
     let run_fp = options
         .cache
@@ -339,7 +391,7 @@ fn execute_plan_and_seal(
 
     let seeds = HashMap::new();
     let audio_seeds = HashMap::new();
-    let mut bundle = materialize_execution_plan(
+    let mut bundle = materialize_execution_plan_with_host(
         graph,
         plan,
         &options.registry,
@@ -348,6 +400,7 @@ fn execute_plan_and_seal(
         options.with_audio,
         Some(control),
         options.cache.as_ref(),
+        options.adapter_host.clone(),
     )?;
     merge_option_hints(&mut bundle.hints, options);
     write_graph_outputs(
@@ -389,19 +442,10 @@ fn finish_manifest(
     Ok(manifest)
 }
 
-fn reject_unsupported_stages(plan: &ExecutionPlan) -> Result<()> {
+fn reject_gpu_stages(plan: &ExecutionPlan) -> Result<()> {
     for stage in &plan.stages {
-        match stage {
-            ExecutionStage::Adapter(s) => {
-                return Err(IoError::message(format!(
-                    "adapter stage '{}' not implemented in M3 runner",
-                    s.adapter
-                )));
-            }
-            ExecutionStage::Gpu(_) => {
-                return Err(IoError::message("GPU stages not implemented in M3 runner"));
-            }
-            ExecutionStage::Ffmpeg(_) | ExecutionStage::Rust(_) => {}
+        if matches!(stage, ExecutionStage::Gpu(_)) {
+            return Err(IoError::message("GPU stages not implemented in M3 runner"));
         }
     }
     Ok(())
@@ -479,7 +523,7 @@ pub fn materialize_graph_bundle<S: BuildHasher, A: BuildHasher>(
     let order = graph
         .topo_order()
         .map_err(|e| IoError::message(e.to_string()))?;
-    let mut ctx = MaterializeCtx::new(graph, registry, with_audio);
+    let mut ctx = MaterializeCtx::new(graph, registry, with_audio, None);
     for id in &order {
         ctx.eval_node(id, video_seeds, audio_seeds)?;
     }
@@ -508,17 +552,42 @@ pub fn materialize_execution_plan<S: BuildHasher, A: BuildHasher>(
     control: Option<&WriteControl>,
     cache: Option<&StageCache>,
 ) -> Result<GraphBundle> {
+    materialize_execution_plan_with_host(
+        graph,
+        plan,
+        registry,
+        video_seeds,
+        audio_seeds,
+        with_audio,
+        control,
+        cache,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn materialize_execution_plan_with_host<S: BuildHasher, A: BuildHasher>(
+    graph: &RenderGraph,
+    plan: &ExecutionPlan,
+    registry: &OperationRegistry,
+    video_seeds: &HashMap<MediaAssetId, Arc<dyn VideoClip>, S>,
+    audio_seeds: &HashMap<MediaAssetId, Arc<dyn AudioClip>, A>,
+    with_audio: bool,
+    control: Option<&WriteControl>,
+    cache: Option<&StageCache>,
+    adapter_host: Option<Arc<dyn crate::AdapterHost>>,
+) -> Result<GraphBundle> {
     graph
         .validate()
         .map_err(|e| IoError::message(e.to_string()))?;
-    reject_unsupported_stages(plan)?;
+    reject_gpu_stages(plan)?;
 
     if plan.stages.is_empty() {
         // Empty plan: fall back to full topo (tests / hand-built plans).
         return materialize_graph_bundle(graph, registry, video_seeds, audio_seeds, with_audio);
     }
 
-    let mut ctx = MaterializeCtx::new(graph, registry, with_audio);
+    let mut ctx = MaterializeCtx::new(graph, registry, with_audio, adapter_host);
     let mut upstream_fp = asset_input_fingerprint(graph);
     let total_stages = plan.stages.len();
     #[allow(clippy::cast_possible_truncation)]
@@ -576,7 +645,12 @@ struct MaterializeCtx<'a> {
 }
 
 impl<'a> MaterializeCtx<'a> {
-    fn new(graph: &'a RenderGraph, registry: &'a OperationRegistry, with_audio: bool) -> Self {
+    fn new(
+        graph: &'a RenderGraph,
+        registry: &'a OperationRegistry,
+        with_audio: bool,
+        adapter_host: Option<Arc<dyn crate::AdapterHost>>,
+    ) -> Self {
         Self {
             graph,
             registry,
@@ -585,6 +659,7 @@ impl<'a> MaterializeCtx<'a> {
             produced: HashMap::new(),
             hints: GraphEncodeHints {
                 preserve_audio: with_audio,
+                adapter_host,
                 ..GraphEncodeHints::default()
             },
             primary_out: None,
@@ -626,10 +701,22 @@ impl<'a> MaterializeCtx<'a> {
             }
             RenderNodeKind::Redaction { redaction } => {
                 let input = single_input_media(node, &self.produced)?;
-                let video = apply_region_redaction(input.video, redaction)?;
+                let resolved = if redaction.masks.samples.is_empty() {
+                    let Some(masks) = input.masks.clone() else {
+                        return Err(IoError::message(
+                            "RegionRedaction masks are empty (adapter did not materialize any)",
+                        ));
+                    };
+                    let mut r = redaction.clone();
+                    r.masks = masks;
+                    apply_region_redaction(input.video, &r)?
+                } else {
+                    apply_region_redaction(input.video, redaction)?
+                };
                 NodeMedia {
-                    video,
+                    video: resolved,
                     audio: input.audio,
+                    masks: input.masks,
                 }
             }
             RenderNodeKind::Output { .. } => {
@@ -718,10 +805,10 @@ fn resolve_source<S: BuildHasher, A: BuildHasher>(
     with_audio: bool,
 ) -> Result<NodeMedia> {
     if let Some(clip) = video_seeds.get(asset) {
-        return Ok(NodeMedia {
-            video: Arc::clone(clip),
-            audio: audio_seeds.get(asset).cloned(),
-        });
+        return Ok(NodeMedia::new(
+            Arc::clone(clip),
+            audio_seeds.get(asset).cloned(),
+        ));
     }
     let meta = asset_map
         .get(asset.0.as_str())
@@ -745,10 +832,7 @@ fn resolve_source<S: BuildHasher, A: BuildHasher>(
             let audio = opened
                 .audio()
                 .map(|a| Arc::new(a.clone()) as Arc<dyn AudioClip>);
-            Ok(NodeMedia {
-                video: Arc::new(opened),
-                audio,
-            })
+            Ok(NodeMedia::new(Arc::new(opened), audio))
         }
         Err(_) => resolve_audio_source(meta),
     }
@@ -767,10 +851,10 @@ fn resolve_audio_source(meta: &reelforge_render_graph::MediaAsset) -> Result<Nod
         Duration::from_secs(0.04)
     };
     let video = ColorClip::new(Size::new(2, 2), Rgb8::BLACK, duration);
-    Ok(NodeMedia {
-        video: Arc::new(video),
-        audio: Some(Arc::new(audio)),
-    })
+    Ok(NodeMedia::new(
+        Arc::new(video),
+        Some(Arc::new(audio)),
+    ))
 }
 
 fn single_input_media(
@@ -924,7 +1008,10 @@ fn try_hybrid_ffmpeg_prefix(
                     .map_err(|e| IoError::message(e.to_string()))?;
                 match compiled.params {
                     TypedParams::Trim { start, duration } => {
-                        filter = filter.then(FilterOp::Trim { start, duration });
+                        filter = filter.then(FilterOp::Trim {
+                            start: start.as_secs(),
+                            duration: duration.as_secs(),
+                        });
                         saw_trim = true;
                         strip_ids.insert(nid.0.clone());
                     }
@@ -1105,10 +1192,10 @@ pub fn node_backend(node: &RenderNode, registry: &OperationRegistry) -> Option<B
 #[cfg(test)]
 mod tests {
     use super::*;
-    use reelforge_core::{ColorClip, Duration, MediaTime, Rgb8, Size, Time};
+    use reelforge_core::{ColorClip, Duration, MediaTime, Rgb8, Rgba8, Size, Time};
     use reelforge_render_graph::{
         GraphOutput, MaskSample, MaskTimeline, MediaAsset, MediaAssetId, RENDER_GRAPH_VERSION,
-        RegionRedaction, RenderNode,
+        RedactionStyle, RegionRedaction, RenderNode,
     };
 
     fn linear_redaction_graph() -> RenderGraph {
@@ -1358,7 +1445,86 @@ mod tests {
         assert!(is_executable_op("rf.redaction.region"));
         assert!(is_executable_op("rf.compose.layers"));
         assert!(is_executable_op("rf.transform.fade_in"));
+        assert!(is_executable_op("rf.adapter.sightloom"));
         assert!(!is_executable_op("rf.not.real"));
+    }
+
+    #[test]
+    fn adapter_materializes_masks_then_redacts() {
+        let registry = OperationRegistry::with_builtins();
+        let seed: Arc<dyn VideoClip> = Arc::new(ColorClip::new(
+            Size::new(32, 32),
+            Rgb8::WHITE,
+            Duration::from_secs(1.0),
+        ));
+        let g = RenderGraph {
+            version: RENDER_GRAPH_VERSION,
+            assets: vec![MediaAsset {
+                id: MediaAssetId("a".into()),
+                uri: "seed://color".into(),
+                duration: None,
+                role: Some("video".into()),
+            }],
+            nodes: vec![
+                RenderNode {
+                    id: NodeId("src".into()),
+                    body: RenderNodeKind::Source {
+                        asset: MediaAssetId("a".into()),
+                    },
+                    inputs: vec![],
+                },
+                RenderNode {
+                    id: NodeId("vision".into()),
+                    body: RenderNodeKind::Op {
+                        operation: OperationId::new("rf.adapter.sightloom"),
+                        params: serde_json::json!({
+                            "tracks": [{
+                                "id": "person_a",
+                                "samples": [{"t": 0.0, "cx": 16.0, "cy": 16.0, "radius": 8.0}]
+                            }]
+                        }),
+                    },
+                    inputs: vec![NodeId("src".into())],
+                },
+                RenderNode {
+                    id: NodeId("blur".into()),
+                    body: RenderNodeKind::Redaction {
+                        redaction: RegionRedaction {
+                            masks: MaskTimeline::new(),
+                            style: RedactionStyle::Solid {
+                                color: Rgba8::new(0, 0, 0, 255),
+                            },
+                        },
+                    },
+                    inputs: vec![NodeId("vision".into())],
+                },
+                RenderNode {
+                    id: NodeId("out".into()),
+                    body: RenderNodeKind::Output {
+                        name: "main".into(),
+                    },
+                    inputs: vec![NodeId("blur".into())],
+                },
+            ],
+            outputs: vec![GraphOutput {
+                name: "main".into(),
+                node: NodeId("out".into()),
+                uri: None,
+            }],
+        };
+        let plan = schedule_graph(&g, &registry).unwrap();
+        assert!(
+            plan.stages
+                .iter()
+                .any(|s| matches!(s, ExecutionStage::Adapter(_))),
+            "sightloom op must schedule as adapter: {plan:?}"
+        );
+        let mut seeds = HashMap::new();
+        seeds.insert(MediaAssetId("a".into()), seed);
+        let (clip, _) = materialize_graph_with_seeds(&g, &registry, &seeds).unwrap();
+        let f = clip.frame_at(Time::ZERO).unwrap();
+        let i = (16 * 32 + 16) * 3;
+        assert!(f.data()[i] < 250, "adapter masks must feed redaction");
     }
 
     #[test]

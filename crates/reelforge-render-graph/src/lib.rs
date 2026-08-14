@@ -27,6 +27,7 @@ mod geometry;
 mod graph;
 mod ids;
 mod mask;
+mod mask_asset;
 mod op;
 mod redaction;
 mod schedule;
@@ -60,6 +61,9 @@ pub use ids::{AppearanceId, ObservationId, SubjectId, TrackId};
 pub use mask::{
     MaskInterpolation, MaskLifecycle, MaskProvenance, MaskRegionAt, MaskSample, MaskTimeline,
     MissingMaskPolicy,
+};
+pub use mask_asset::{
+    DecodedCoverage, MaskAsset, MaskAssetRef, MaskFrame, SubjectKey,
 };
 pub use op::{
     BackendClass, CapabilitySet, ExecutorKind, MediaContract, OperationDescriptor, OperationId,

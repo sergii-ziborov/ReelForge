@@ -34,6 +34,7 @@ mod super_sample;
 mod time_mirror;
 mod time_sym;
 mod tracked_blur;
+mod privacy_roi;
 mod tracked_privacy;
 mod tracks;
 
@@ -71,7 +72,7 @@ pub use time_mirror::TimeMirror;
 pub use time_sym::TimeSymmetrize;
 pub use tracked_blur::TrackedBlur;
 pub use tracked_privacy::{PrivacyStyle, TrackedPrivacy};
-pub use tracks::{RegionSample, RegionTrack, TrackSet};
+pub use tracks::{CoverageMask, RegionAt, RegionSample, RegionTrack, TrackSet};
 
 use reelforge_core::{AudioEffect, VideoEffect};
 use std::sync::Arc;

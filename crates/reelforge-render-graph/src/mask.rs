@@ -5,6 +5,7 @@
 //! Interpolation is still **track-safe** via [`SubjectId`].
 
 use crate::ids::SubjectId;
+use crate::mask_asset::MaskAssetRef;
 use reelforge_core::MediaTime;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -137,6 +138,9 @@ pub struct MaskSample {
     /// Optional axis-aligned box bottom edge.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bottom: Option<f32>,
+    /// Pixel-accurate silhouette when the adapter provided one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asset: Option<MaskAssetRef>,
 }
 
 fn one() -> f32 {
@@ -173,6 +177,7 @@ impl MaskSample {
             top: None,
             right: None,
             bottom: None,
+            asset: None,
         }
     }
 
@@ -209,6 +214,7 @@ impl MaskSample {
             top: Some(top),
             right: Some(right),
             bottom: Some(bottom),
+            asset: None,
         }
     }
 
@@ -249,6 +255,13 @@ impl MaskSample {
     #[must_use]
     pub fn with_provenance(mut self, provenance: MaskProvenance) -> Self {
         self.provenance = Some(provenance);
+        self
+    }
+
+    /// Attach a pixel mask (dense / RLE / polygon / external).
+    #[must_use]
+    pub fn with_asset(mut self, asset: MaskAssetRef) -> Self {
+        self.asset = Some(asset);
         self
     }
 

@@ -336,7 +336,8 @@ Asset `role`: omit or `"video"` → video + companion audio; `"audio"` → audio
 |----|-------------|
 | `rf.transform.trim` / `hflip` / `vflip` / `scale` / `crop` / `even_dims` / `rotate` / `fade_in` / `fade_out` | Geometry / time |
 | `rf.color.black_and_white` / `invert` / `painting` | Look |
-| `rf.redaction.region` or `RenderNodeKind::Redaction` | Fused privacy (`MaskTimeline`) |
+| `rf.adapter.sightloom` | Adapter stage: JSON tracks / `AdapterHost` → `MaskTimeline` |
+| `rf.redaction.region` or `RenderNodeKind::Redaction` | Fused privacy (`MaskTimeline` + optional `MaskAsset`) |
 | `rf.compose.layers` | Multi-input composite |
 | `rf.audio.gain` / `drop` / `preserve` / `mix` | Audio |
 | `rf.encode.h264` | Encode hints (`crf`, `path`, `preserve_audio`) |
@@ -347,6 +348,12 @@ Authoring ids (`NodeId`) are aliases. After compile, execution identity is a den
 
 `TrackTimeline` is the identity source (`TrackId` + optional `SubjectId` / `AppearanceId` / `ObservationId` / `Geometry` / `OcclusionState` / `MaskRef`).  
 `MaskTimeline` is a **materialized ROI view** of one or more tracks — not a vision index. ReelForge does not query subjects.
+
+Pixel silhouettes travel as `MaskAsset` (`Dense` / `Cropped` / `Rle` / `Polygon` / `External`) on `MaskSample.asset` / `MaskFrame`. The privacy pass stamps a **union coverage ROI** and blurs only that crop — not the whole frame × N subjects.
+
+`rf.adapter.sightloom` is a real execution stage (no longer a hard error). Pass exported `tracks` / `masks` JSON, or install an `AdapterHost` that resolves a SightLoom package / query. Empty-mask `Redaction` nodes consume the adapter's timeline.
+
+`rf.transform.trim` / `fade_in` / `fade_out` compile to `MediaTime` ticks (`MediaRange` for trim). Float seconds in JSON become 1 MHz ticks; `{ticks, timescale}` is preserved. Conversion to `Time`/`Duration` happens only at the effect / FFmpeg boundary.
 
 ```rust
 use reelforge::{

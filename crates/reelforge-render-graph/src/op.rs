@@ -550,6 +550,39 @@ impl OperationRegistry {
             executor_kind: ExecutorKind::Unary,
         });
         r.register(OperationDescriptor {
+            id: OperationId::new("rf.adapter.sightloom"),
+            version: SemVer::V1,
+            input: MediaContract {
+                video: true,
+                audio: true,
+                masks: false,
+                notes: Some("SightLoom materialize → MaskTimeline".into()),
+            },
+            output: MediaContract {
+                video: true,
+                audio: true,
+                masks: true,
+                notes: Some("video passthrough + masks".into()),
+            },
+            backend: BackendClass::Adapter,
+            deterministic: true,
+            capabilities: CapabilitySet {
+                tags: vec!["adapter".into(), "vision".into(), "privacy".into()],
+            },
+            parameter_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "tracks": {},
+                    "masks": {},
+                    "document": {},
+                    "package_id": { "type": "string" },
+                    "query": {}
+                }
+            }),
+            limits: OperationLimits::default(),
+            executor_kind: ExecutorKind::Unary,
+        });
+        r.register(OperationDescriptor {
             id: OperationId::new("rf.encode.h264"),
             version: SemVer::V1,
             input: video_av.clone(),

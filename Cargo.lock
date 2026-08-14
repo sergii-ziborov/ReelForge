@@ -731,6 +731,7 @@ dependencies = [
  "reelforge-core",
  "reelforge-fx",
  "reelforge-render-graph",
+ "reelforge-sightloom-adapter",
  "serde",
  "serde_json",
  "tempfile",

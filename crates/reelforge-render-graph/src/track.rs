@@ -129,6 +129,12 @@ impl TrackSample {
         } else {
             sample.subject = Some(SubjectId::new(self.track.as_str()));
         }
+        if let Some(mask) = &self.mask {
+            sample.asset = Some(crate::mask_asset::MaskAssetRef::external(
+                mask.uri.clone().unwrap_or_default(),
+                0,
+            ));
+        }
         let mut prov = self.provenance.clone().unwrap_or_default();
         if prov.track_id.is_none() {
             prov.track_id = Some(self.track.0.clone());

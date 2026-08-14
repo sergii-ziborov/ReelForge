@@ -5,6 +5,49 @@
 
 use std::sync::Arc;
 
+/// Cropped coverage (`0..=255`) for silhouette redaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoverageMask {
+    /// Left origin in the source frame.
+    pub left: u32,
+    /// Top origin in the source frame.
+    pub top: u32,
+    /// Crop width.
+    pub width: u32,
+    /// Crop height.
+    pub height: u32,
+    /// `width * height` coverage bytes.
+    pub data: Arc<Vec<u8>>,
+}
+
+impl CoverageMask {
+    /// Sample coverage at frame pixel `(x, y)` as `0..=1`.
+    #[must_use]
+    pub fn sample(&self, x: usize, y: usize) -> f32 {
+        let ox = x.checked_sub(self.left as usize);
+        let oy = y.checked_sub(self.top as usize);
+        let (Some(ox), Some(oy)) = (ox, oy) else {
+            return 0.0;
+        };
+        if ox >= self.width as usize || oy >= self.height as usize {
+            return 0.0;
+        }
+        let i = oy * self.width as usize + ox;
+        self.data.get(i).copied().map_or(0.0, |v| f32::from(v) / 255.0)
+    }
+
+    /// Inclusive pixel bounds `(x0, y0, x1, y1)` clipped later by the caller.
+    #[must_use]
+    pub fn bounds(&self) -> (u32, u32, u32, u32) {
+        (
+            self.left,
+            self.top,
+            self.left.saturating_add(self.width),
+            self.top.saturating_add(self.height),
+        )
+    }
+}
+
 /// One timed region sample (bbox center + radius).
 #[derive(Debug, Clone, PartialEq)]
 pub struct RegionSample {
@@ -18,6 +61,8 @@ pub struct RegionSample {
     pub radius: f32,
     /// Optional confidence `0..=1` (default 1 when omitted at construction).
     pub conf: f32,
+    /// Optional silhouette coverage (preferred over the ellipse).
+    pub coverage: Option<CoverageMask>,
 }
 
 impl RegionSample {
@@ -30,6 +75,7 @@ impl RegionSample {
             cy,
             radius: radius.max(1.0),
             conf: 1.0,
+            coverage: None,
         }
     }
 
@@ -47,7 +93,15 @@ impl RegionSample {
             cy,
             radius,
             conf: conf.clamp(0.0, 1.0),
+            coverage: None,
         }
+    }
+
+    /// Attach silhouette coverage.
+    #[must_use]
+    pub fn with_coverage(mut self, coverage: CoverageMask) -> Self {
+        self.coverage = Some(coverage);
+        self
     }
 
     /// Half-open rect fields (`x,y,w,h` — `SightLoom` / detector style).
@@ -130,6 +184,22 @@ impl RegionTrack {
         None
     }
 
+    /// Hold the last coverage whose sample time is `<= t` (no pixel interpolation).
+    #[must_use]
+    pub fn coverage_at(&self, t: f64) -> Option<CoverageMask> {
+        let mut last = None;
+        for s in &self.samples {
+            if s.t <= t {
+                if s.coverage.is_some() {
+                    last.clone_from(&s.coverage);
+                }
+            } else {
+                break;
+            }
+        }
+        last.or_else(|| self.samples.iter().find_map(|s| s.coverage.clone()))
+    }
+
     /// Center path for [`crate::HeadBlur`].
     #[must_use]
     pub fn center_fn(&self) -> Arc<dyn Fn(f64) -> (f32, f32) + Send + Sync> {
@@ -187,6 +257,42 @@ impl TrackSet {
             .filter(|(_, _, _, conf)| *conf > 0.0)
             .collect()
     }
+
+    /// Regions plus optional silhouette coverage at `t`.
+    #[must_use]
+    pub fn regions_with_coverage_at(&self, t: f64) -> Vec<RegionAt> {
+        self.tracks
+            .iter()
+            .filter_map(|tr| {
+                let (cx, cy, radius, conf) = tr.region_at(t)?;
+                if conf <= 0.0 {
+                    return None;
+                }
+                Some(RegionAt {
+                    cx,
+                    cy,
+                    radius,
+                    conf,
+                    coverage: tr.coverage_at(t),
+                })
+            })
+            .collect()
+    }
+}
+
+/// Interpolated region plus optional dense coverage.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RegionAt {
+    /// Center X.
+    pub cx: f32,
+    /// Center Y.
+    pub cy: f32,
+    /// Ellipse radius fallback.
+    pub radius: f32,
+    /// Confidence.
+    pub conf: f32,
+    /// Silhouette when the adapter provided pixels.
+    pub coverage: Option<CoverageMask>,
 }
 
 #[cfg(test)]

@@ -1,6 +1,7 @@
 //! Multi-region privacy redaction: gaussian blur, pixelate, or solid fill.
 
-use crate::tracks::TrackSet;
+use crate::privacy_roi::{apply_fused_blur, stamp_coverage, union_roi};
+use crate::tracks::{RegionAt, TrackSet};
 use reelforge_core::{Duration, Frame, Result, Rgba8, Size, Time, VideoClip, VideoEffect};
 use std::sync::Arc;
 
@@ -126,19 +127,22 @@ impl VideoClip for TrackedPrivacyVideo {
 
     fn frame_at(&self, t: Time) -> Result<Frame> {
         let mut frame = self.inner.frame_at(t)?;
-        let regions: Vec<(f32, f32, f32)> = self
+        let regions: Vec<RegionAt> = self
             .tracks
-            .regions_at(t.as_secs())
+            .regions_with_coverage_at(t.as_secs())
             .into_iter()
-            .filter(|(_, _, _, conf)| *conf >= self.min_conf)
-            .map(|(cx, cy, r, _)| (cx, cy, r.max(1.0)))
+            .filter(|r| r.conf >= self.min_conf)
+            .map(|mut r| {
+                r.radius = r.radius.max(1.0);
+                r
+            })
             .collect();
         if regions.is_empty() {
             return Ok(frame);
         }
         match &self.style {
             PrivacyStyle::Gaussian { sigma } => {
-                apply_multi_blur(&mut frame, &regions, sigma.max(0.5), self.feather);
+                apply_fused_blur(&mut frame, &regions, sigma.max(0.5), self.feather);
             }
             PrivacyStyle::Pixelate { block_size } => {
                 apply_multi_pixelate(&mut frame, &regions, (*block_size).max(2), self.feather);
@@ -156,61 +160,32 @@ impl VideoClip for TrackedPrivacyVideo {
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss,
-    clippy::many_single_char_names,
-    clippy::similar_names
-)]
-fn apply_multi_blur(frame: &mut Frame, regions: &[(f32, f32, f32)], intensity: f32, feather: f32) {
-    let size = frame.size();
-    let bpp = frame.format().bytes_per_pixel();
-    let w = size.width as usize;
-    let h = size.height as usize;
-    let src = frame.data().to_vec();
-    let mut blurred = src.clone();
-    let kernel = gaussian_kernel(intensity.max(0.5));
-    blur_separable(&src, &mut blurred, w, h, bpp, &kernel);
-    let out_px = frame.data_mut();
-
-    for y in 0..h {
-        for x in 0..w {
-            let wgt = region_weight(x, y, regions, feather);
-            if wgt <= 0.0 {
-                continue;
-            }
-            let i = (y * w + x) * bpp;
-            for c in 0..bpp.min(3) {
-                let a = f32::from(src[i + c]);
-                let b = f32::from(blurred[i + c]);
-                out_px[i + c] = (a * (1.0 - wgt) + b * wgt).round().clamp(0.0, 255.0) as u8;
-            }
-        }
-    }
-}
-
-#[allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss,
-    clippy::cast_precision_loss,
     clippy::many_single_char_names
 )]
-fn apply_multi_pixelate(frame: &mut Frame, regions: &[(f32, f32, f32)], block: u16, feather: f32) {
+fn apply_multi_pixelate(frame: &mut Frame, regions: &[RegionAt], block: u16, feather: f32) {
     let size = frame.size();
     let bpp = frame.format().bytes_per_pixel();
     let w = size.width as usize;
     let h = size.height as usize;
+    let Some(roi) = union_roi(regions, w, h, 1) else {
+        return;
+    };
+    let rw = roi.x1 - roi.x0;
+    let rh = roi.y1 - roi.y0;
+    let mut cov = vec![0.0_f32; rw * rh];
+    stamp_coverage(&mut cov, roi, regions, feather);
     let block = usize::from(block).max(2);
     let src = frame.data().to_vec();
     let out_px = frame.data_mut();
 
-    for y in 0..h {
-        for x in 0..w {
-            let wgt = region_weight(x, y, regions, feather);
+    for y in roi.y0..roi.y1 {
+        for x in roi.x0..roi.x1 {
+            let wgt = cov[(y - roi.y0) * rw + (x - roi.x0)];
             if wgt <= 0.0 {
                 continue;
             }
             let bx = (x / block) * block;
             let by = (y / block) * block;
-            // Average block for a stable pixelate look.
             let mut acc = [0.0_f32; 3];
             let mut n = 0.0_f32;
             let x1 = (bx + block).min(w);
@@ -244,20 +219,28 @@ fn apply_multi_pixelate(frame: &mut Frame, regions: &[(f32, f32, f32)], block: u
     clippy::cast_precision_loss,
     clippy::many_single_char_names
 )]
-fn apply_multi_solid(frame: &mut Frame, regions: &[(f32, f32, f32)], color: Rgba8, feather: f32) {
+fn apply_multi_solid(frame: &mut Frame, regions: &[RegionAt], color: Rgba8, feather: f32) {
     let size = frame.size();
     let bpp = frame.format().bytes_per_pixel();
     let w = size.width as usize;
     let h = size.height as usize;
+    let Some(roi) = union_roi(regions, w, h, 1) else {
+        return;
+    };
+    let rw = roi.x1 - roi.x0;
+    let rh = roi.y1 - roi.y0;
+    let mut cov = vec![0.0_f32; rw * rh];
+    stamp_coverage(&mut cov, roi, regions, feather);
     let src = frame.data().to_vec();
     let out_px = frame.data_mut();
     let fill = [color.r, color.g, color.b];
     #[allow(clippy::cast_lossless)]
     let alpha = f32::from(color.a) / 255.0;
+    let _ = rh;
 
-    for y in 0..h {
-        for x in 0..w {
-            let wgt = region_weight(x, y, regions, feather) * alpha;
+    for y in roi.y0..roi.y1 {
+        for x in roi.x0..roi.x1 {
+            let wgt = cov[(y - roi.y0) * rw + (x - roi.x0)] * alpha;
             if wgt <= 0.0 {
                 continue;
             }
@@ -266,115 +249,6 @@ fn apply_multi_solid(frame: &mut Frame, regions: &[(f32, f32, f32)], color: Rgba
                 let a = f32::from(src[i + c]);
                 let b = f32::from(fill[c]);
                 out_px[i + c] = (a * (1.0 - wgt) + b * wgt).round().clamp(0.0, 255.0) as u8;
-            }
-        }
-    }
-}
-
-#[allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss,
-    clippy::cast_precision_loss
-)]
-fn region_weight(x: usize, y: usize, regions: &[(f32, f32, f32)], feather: f32) -> f32 {
-    let mut wgt = 0.0_f32;
-    for &(cx, cy, radius) in regions {
-        let r = radius.max(1.0);
-        let feather_px = (feather * r).max(0.5);
-        let inner = (r - feather_px).max(0.0);
-        let dx = x as f32 - cx;
-        let dy = y as f32 - cy;
-        let dist = (dx * dx + dy * dy).sqrt();
-        wgt = wgt.max(soft_mask(dist, inner, r));
-    }
-    wgt
-}
-
-fn soft_mask(dist: f32, inner: f32, outer: f32) -> f32 {
-    if dist <= inner {
-        1.0
-    } else if dist >= outer {
-        0.0
-    } else {
-        let t = ((dist - inner) / (outer - inner).max(1e-6)).clamp(0.0, 1.0);
-        let s = t * t * (3.0 - 2.0 * t);
-        1.0 - s
-    }
-}
-
-#[allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss,
-    clippy::cast_precision_loss
-)]
-fn gaussian_kernel(sigma: f32) -> Vec<f32> {
-    let radius_px = ((sigma * 3.0).ceil().max(1.0) as usize).min(32);
-    let mut k = Vec::with_capacity(radius_px * 2 + 1);
-    let s2 = 2.0 * sigma * sigma;
-    let mut sum = 0.0_f32;
-    for i in 0..=radius_px * 2 {
-        let offset = i as i32 - radius_px as i32;
-        let v = (-(offset * offset) as f32 / s2).exp();
-        k.push(v);
-        sum += v;
-    }
-    for v in &mut k {
-        *v /= sum;
-    }
-    k
-}
-
-#[allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss,
-    clippy::cast_precision_loss,
-    clippy::similar_names
-)]
-fn blur_separable(
-    src: &[u8],
-    dst: &mut [u8],
-    width: usize,
-    height: usize,
-    bpp: usize,
-    kernel: &[f32],
-) {
-    let r = kernel.len() / 2;
-    let mut tmp = vec![0_u8; src.len()];
-    let w_i = width as isize;
-    let h_i = height as isize;
-    let r_i = r as isize;
-    for y in 0..height {
-        for x in 0..width {
-            let mut acc = [0.0_f32; 4];
-            for (ki, &kw) in kernel.iter().enumerate() {
-                let sx = (x as isize + ki as isize - r_i).clamp(0, w_i - 1) as usize;
-                let i = (y * width + sx) * bpp;
-                for c in 0..bpp.min(4) {
-                    acc[c] += f32::from(src[i + c]) * kw;
-                }
-            }
-            let di = (y * width + x) * bpp;
-            for c in 0..bpp.min(4) {
-                tmp[di + c] = acc[c].round().clamp(0.0, 255.0) as u8;
-            }
-        }
-    }
-    for y in 0..height {
-        for x in 0..width {
-            let mut acc = [0.0_f32; 4];
-            for (ki, &kw) in kernel.iter().enumerate() {
-                let sy = (y as isize + ki as isize - r_i).clamp(0, h_i - 1) as usize;
-                let i = (sy * width + x) * bpp;
-                for c in 0..bpp.min(4) {
-                    acc[c] += f32::from(tmp[i + c]) * kw;
-                }
-            }
-            let di = (y * width + x) * bpp;
-            for c in 0..bpp.min(4) {
-                dst[di + c] = acc[c].round().clamp(0.0, 255.0) as u8;
             }
         }
     }
@@ -412,5 +286,40 @@ mod tests {
         // Center of solid black region should not stay pure white.
         let i = (32 * 64 + 32) * 3;
         assert!(f.data()[i] < 250);
+    }
+
+    #[test]
+    fn dense_mask_redacts_silhouette_not_ellipse() {
+        use crate::tracks::CoverageMask;
+        let clip: Arc<dyn VideoClip> = Arc::new(ColorClip::new(
+            Size::new(32, 32),
+            Rgb8::WHITE,
+            Duration::from_secs(1.0),
+        ));
+        let mut data = vec![0_u8; 32 * 32];
+        for y in 8..24 {
+            data[y * 32 + 8] = 255;
+        }
+        let mut tr = RegionTrack::new("bar");
+        tr.push(RegionSample::from_bbox(0.0, 8.0, 8.0, 9.0, 24.0, 1.0).with_coverage(
+            CoverageMask {
+                left: 0,
+                top: 0,
+                width: 32,
+                height: 32,
+                data: Arc::new(data),
+            },
+        ));
+        let mut set = TrackSet::new();
+        set.push(tr);
+        let out = TrackedPrivacy::solid(set, Rgba8::new(0, 0, 0, 255))
+            .apply(clip)
+            .unwrap()
+            .frame_at(Time::ZERO)
+            .unwrap();
+        let bar = (16 * 32 + 8) * 3;
+        let far = (16 * 32 + 24) * 3;
+        assert!(out.data()[bar] < 250, "dense column must be filled");
+        assert_eq!(out.data()[far], 255, "outside silhouette stays white");
     }
 }

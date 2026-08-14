@@ -4,6 +4,7 @@
 //! dependency. Set `REELFORGE_FFMPEG` / `REELFORGE_FFPROBE` or put the tools on
 //! `PATH`.
 
+mod adapter;
 mod audio_file;
 mod control;
 mod error;
@@ -26,6 +27,7 @@ mod video_file;
 mod waveform;
 mod write;
 
+pub use adapter::{AdapterHost, AdapterOutput, execute_adapter};
 pub use audio_file::{AudioFileClip, layout_for_channels, open_audio};
 pub use control::{CancelToken, ProgressCallback, WriteControl, WriteProgress, WriteStage};
 pub use error::{IoError, Result};
