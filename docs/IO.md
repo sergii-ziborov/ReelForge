@@ -294,6 +294,8 @@ File clips override `surface_at` with a **native** rawvideo decode (`-pix_fmt yu
 
 `frame_at` is still packed RGB (effects / encode stdin). `to_frame()` is **zero-copy packed RGB/RGBA only** — it fails on YUV / BGRA / external. Call `surface.to_rgb_frame()` (or `surface_to_rgb_frame`) to convert BGRA, YUV420P, or NV12 with the surface color tags. `MemoryLocation::External` is an opaque `ExternalSurface` handle (CUDA / D3D11 / VAAPI / Vulkan / Metal); the GPU executor must map it before conversion. Synthetic clips stay full-range RGB.
 
+`write_video` prefers a **native YUV/NV12 stdin** when `surface_at` still emits those planes (file decode, trim, speed, loop, freeze, concat). That is decode → remap → encode without an RGB round-trip. Pixel-touching effects (blur, color, compose, resize) keep the RGB encode path. Force RGB with `WriteVideoOptions::with_rgb_encode()`.
+
 ## Alpha
 
 `FrameFormat::Rgba8` is **straight** (unassociated) unless you call `frame.premultiply()`. `blit_over` reads `Frame::alpha_mode()` so premultiplied and straight sources composite the same. `Rgb8` / YUV surfaces are `AlphaMode::Opaque`.

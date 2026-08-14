@@ -1,6 +1,8 @@
 //! Accelerate then decelerate through the source timeline (GIF-style ease).
 
-use reelforge_core::{CoreError, Duration, Frame, Result, Size, Time, VideoClip, VideoEffect};
+use reelforge_core::{
+    CoreError, Duration, Frame, Result, Size, Time, VideoClip, VideoEffect, VideoSurface,
+};
 use std::sync::Arc;
 
 /// Remap playback so the clip eases in and out over `new_duration`.
@@ -68,6 +70,20 @@ impl VideoClip for AccelVideo {
         let src_d = self.inner.duration().as_secs();
         let src_t = (s * src_d).min((src_d - f64::EPSILON).max(0.0));
         self.inner.frame_at(Time::from_secs(src_t))
+    }
+
+    fn surface_at(&self, t: Time) -> Result<VideoSurface> {
+        if t.as_secs() < 0.0 || t.as_secs() >= self.out_dur {
+            return Err(CoreError::TimeOutOfRange {
+                time: t,
+                range: (Time::ZERO, Time::from_secs(self.out_dur)),
+            });
+        }
+        let u = (t.as_secs() / self.out_dur).clamp(0.0, 1.0);
+        let s = u * u * (3.0 - 2.0 * u);
+        let src_d = self.inner.duration().as_secs();
+        let src_t = (s * src_d).min((src_d - f64::EPSILON).max(0.0));
+        self.inner.surface_at(Time::from_secs(src_t))
     }
 }
 

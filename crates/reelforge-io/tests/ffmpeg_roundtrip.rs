@@ -64,6 +64,20 @@ fn write_color_clip_and_reopen() {
         "red should have V > U, got U={u_mean} V={v_mean}"
     );
     assert!(surface.to_frame().is_err(), "YUV surface is not a Frame");
+
+    // Native YUV stdin: reopen → write → reopen, no RGB encode path.
+    let out2 = dir.path().join("native.mp4");
+    write_video(
+        &opened,
+        &WriteVideoOptions::new(out2.to_string_lossy(), 10.0).with_crf(28),
+    )
+    .expect("native yuv write");
+    let again = open_video(&reelforge_io::OpenVideoOptions::new(out2.to_string_lossy()))
+        .expect("reopen native");
+    assert_eq!(again.pixel_format(), PixelFormat::Yuv420p);
+    let s2 = again.surface_at(Time::from_secs(0.05)).expect("surface");
+    assert_eq!(s2.format(), PixelFormat::Yuv420p);
+    assert_eq!(s2.location(), MemoryLocation::CpuPlanar);
 }
 
 fn mean_u8(data: &[u8]) -> f32 {

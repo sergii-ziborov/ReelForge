@@ -1,6 +1,6 @@
 //! Play clip forward then backward (time symmetrize).
 
-use reelforge_core::{Duration, Frame, Result, Size, Time, VideoClip, VideoEffect};
+use reelforge_core::{Duration, Frame, Result, Size, Time, VideoClip, VideoEffect, VideoSurface};
 use std::sync::Arc;
 
 /// Plays the source once forward, then once in reverse (2× duration).
@@ -45,6 +45,22 @@ impl VideoClip for SymVideo {
         };
         self.inner
             .frame_at(Time::from_secs(src.min(d - f64::EPSILON).max(0.0)))
+    }
+
+    fn surface_at(&self, t: Time) -> Result<VideoSurface> {
+        let d = self.inner.duration().as_secs();
+        if d <= 0.0 {
+            return self.inner.surface_at(Time::ZERO);
+        }
+        let tt = t.as_secs();
+        let src = if tt < d {
+            tt
+        } else {
+            let back = tt - d;
+            (d - back - f64::EPSILON).max(0.0)
+        };
+        self.inner
+            .surface_at(Time::from_secs(src.min(d - f64::EPSILON).max(0.0)))
     }
 }
 

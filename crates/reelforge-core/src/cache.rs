@@ -4,6 +4,7 @@ use crate::clip::{ClipId, VideoClip};
 use crate::error::Result;
 use crate::frame::{Frame, Mask};
 use crate::layout::Size;
+use crate::surface::VideoSurface;
 use crate::time::{Duration, Time};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -263,6 +264,11 @@ impl VideoClip for CachedVideo {
 
     fn frame_at(&self, t: Time) -> Result<Frame> {
         self.lookup_or_compute(t)
+    }
+
+    fn surface_at(&self, t: Time) -> Result<VideoSurface> {
+        // Do not collapse native YUV through the RGB frame cache.
+        self.inner.surface_at(t)
     }
 
     fn mask_at(&self, t: Time) -> Result<Option<Mask>> {

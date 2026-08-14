@@ -2,7 +2,7 @@
 
 use reelforge_core::{
     AudioBuffer, AudioClip, AudioEffect, AudioFormat, CoreError, Duration, Frame, Result, Size,
-    Time, VideoClip, VideoEffect,
+    Time, VideoClip, VideoEffect, VideoSurface,
 };
 use std::sync::Arc;
 
@@ -84,6 +84,19 @@ impl VideoClip for SpeedVideo {
         let src_t = Time::from_secs(src_t.as_secs().min(max_t));
         self.inner.frame_at(src_t)
     }
+
+    fn surface_at(&self, t: Time) -> Result<VideoSurface> {
+        if !self.contains(t) {
+            return Err(CoreError::TimeOutOfRange {
+                time: t,
+                range: (Time::ZERO, Time::from_secs(self.duration().as_secs())),
+            });
+        }
+        let src_t = Time::from_secs(t.as_secs() * self.factor);
+        let max_t = (self.inner.duration().as_secs() - f64::EPSILON).max(0.0);
+        let src_t = Time::from_secs(src_t.as_secs().min(max_t));
+        self.inner.surface_at(src_t)
+    }
 }
 
 struct SpeedAudio {
@@ -135,5 +148,51 @@ mod tests {
         let out = VideoEffect::apply(&Speed::new(2.0), clip).unwrap();
         assert!((out.duration().as_secs() - 2.0).abs() < 1e-9);
         let _ = out.frame_at(Time::from_secs(1.0)).unwrap();
+    }
+
+    #[test]
+    fn speed_forwards_native_surface() {
+        use reelforge_core::{
+            ColorInfo, MediaTime, PixelFormat, StreamTimeBase, SurfacePlane, VideoSurface,
+        };
+        struct YuvClip;
+        impl VideoClip for YuvClip {
+            fn duration(&self) -> Duration {
+                Duration::from_secs(2.0)
+            }
+            fn size(&self) -> Size {
+                Size::new(8, 4)
+            }
+            fn fps(&self) -> Option<f64> {
+                Some(10.0)
+            }
+            fn frame_at(&self, t: Time) -> Result<Frame> {
+                self.surface_at(t)?.to_rgb_frame()
+            }
+            fn surface_at(&self, t: Time) -> Result<VideoSurface> {
+                if !self.contains(t) {
+                    return Err(CoreError::TimeOutOfRange {
+                        time: t,
+                        range: (Time::ZERO, Time::from_secs(2.0)),
+                    });
+                }
+                let y = SurfacePlane::new(8, 4, 8, vec![16_u8; 32]).unwrap();
+                let u = SurfacePlane::new(4, 2, 4, vec![80_u8; 8]).unwrap();
+                let v = SurfacePlane::new(4, 2, 4, vec![200_u8; 8]).unwrap();
+                VideoSurface::from_planes(
+                    PixelFormat::Yuv420p,
+                    Size::new(8, 4),
+                    vec![y, u, v],
+                    MediaTime::zero(1_000),
+                    None,
+                    ColorInfo::default(),
+                    StreamTimeBase::HZ_1K,
+                )
+            }
+        }
+        let out = VideoEffect::apply(&Speed::new(2.0), Arc::new(YuvClip)).unwrap();
+        let s = out.surface_at(Time::from_secs(0.2)).unwrap();
+        assert_eq!(s.format(), PixelFormat::Yuv420p);
+        assert_eq!(s.planes().len(), 3);
     }
 }

@@ -1,6 +1,8 @@
 //! Freeze a frame for a stretch of time.
 
-use reelforge_core::{CoreError, Duration, Frame, Result, Size, Time, VideoClip, VideoEffect};
+use reelforge_core::{
+    CoreError, Duration, Frame, Result, Size, Time, VideoClip, VideoEffect, VideoSurface,
+};
 use std::sync::Arc;
 
 /// Hold the frame at `t` for `hold` seconds, inserted at `t` in the timeline.
@@ -78,6 +80,26 @@ impl VideoClip for FrozenVideo {
         };
         let max = (self.inner.duration().as_secs() - 1e-9).max(0.0);
         self.inner.frame_at(Time::from_secs(src_t.min(max)))
+    }
+
+    fn surface_at(&self, t: Time) -> Result<VideoSurface> {
+        if t.as_secs() < 0.0 || t.as_secs() >= self.duration().as_secs() {
+            return Err(CoreError::TimeOutOfRange {
+                time: t,
+                range: (Time::ZERO, Time::from_secs(self.duration().as_secs())),
+            });
+        }
+        let freeze = self.freeze_at.as_secs();
+        let hold = self.hold.as_secs();
+        let src_t = if t.as_secs() < freeze {
+            t.as_secs()
+        } else if t.as_secs() < freeze + hold {
+            freeze
+        } else {
+            t.as_secs() - hold
+        };
+        let max = (self.inner.duration().as_secs() - 1e-9).max(0.0);
+        self.inner.surface_at(Time::from_secs(src_t.min(max)))
     }
 }
 

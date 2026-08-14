@@ -2,7 +2,7 @@
 
 use reelforge_core::{
     AudioBuffer, AudioClip, AudioEffect, AudioFormat, CoreError, Duration, Frame, Result, Size,
-    Time, VideoClip, VideoEffect,
+    Time, VideoClip, VideoEffect, VideoSurface,
 };
 use std::sync::Arc;
 
@@ -61,6 +61,11 @@ impl VideoClip for TimeMirroredVideo {
     fn frame_at(&self, t: Time) -> Result<Frame> {
         let src = map_time(self.inner.duration(), t)?;
         self.inner.frame_at(src)
+    }
+
+    fn surface_at(&self, t: Time) -> Result<VideoSurface> {
+        let src = map_time(self.inner.duration(), t)?;
+        self.inner.surface_at(src)
     }
 }
 

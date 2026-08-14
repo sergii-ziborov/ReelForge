@@ -1,11 +1,14 @@
 //! Write video (and optional audio) clips to container files via `FFmpeg`.
 
 use crate::control::{WriteControl, WriteProgress, WriteStage};
+use crate::encode_native::encode_sampled_rawvideo;
 use crate::error::{IoError, Result};
 use crate::ffmpeg::{FfmpegTools, encode_rawvideo_gif, frame_count_for, mux_video_audio};
 use crate::options::{WriteGifOptions, WriteVideoOptions};
 use crate::pipeline::encode_sampled_h264;
-use reelforge_core::{AudioClip, Duration, Size, Time, VideoClip};
+use reelforge_core::{
+    AudioClip, Duration, MemoryLocation, PixelFormat, Size, Time, VideoClip, surface_to_rawvideo,
+};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -150,6 +153,27 @@ fn write_video_inner(
         fps,
     } = prepared;
 
+    let native = options
+        .prefer_native_encode
+        .then(|| probe_native_format(clip, size))
+        .flatten();
+
+    if let Some(in_fmt) = native {
+        return write_native(
+            clip,
+            options,
+            audio,
+            control,
+            &tools,
+            path,
+            &prepared,
+            video_codec,
+            pixel_format,
+            audio_codec,
+            in_fmt,
+        );
+    }
+
     let sample = |i: u64| -> Result<reelforge_core::Frame> {
         sample_write_frame(clip, i, fps, duration, size)
     };
@@ -224,6 +248,141 @@ fn prepare_write(clip: &dyn VideoClip, options: &WriteVideoOptions) -> Result<Pr
         frame_count,
         fps: options.fps,
     })
+}
+
+fn probe_native_format(clip: &dyn VideoClip, out_size: Size) -> Option<PixelFormat> {
+    if clip.size() != out_size {
+        return None;
+    }
+    let surface = clip.surface_at(Time::ZERO).ok()?;
+    if surface.size() != out_size {
+        return None;
+    }
+    if surface.location() == MemoryLocation::External || surface.external().is_some() {
+        return None;
+    }
+    surface.format().is_yuv().then_some(surface.format())
+}
+
+fn sample_write_surface(
+    clip: &dyn VideoClip,
+    i: u64,
+    fps: f64,
+    duration: Duration,
+    size: Size,
+    expected: PixelFormat,
+) -> Result<Vec<u8>> {
+    let t = sample_time(i, fps, duration);
+    let surface = clip.surface_at(t).map_err(IoError::from)?;
+    if surface.size() != size {
+        return Err(IoError::message(format!(
+            "native surface size {:?} != output {size:?}",
+            surface.size()
+        )));
+    }
+    if surface.format() != expected {
+        return Err(IoError::message(format!(
+            "native surface {:?} drifted to {:?}",
+            expected,
+            surface.format()
+        )));
+    }
+    surface_to_rawvideo(&surface).map_err(IoError::from)
+}
+
+fn sample_time(i: u64, fps: f64, duration: Duration) -> Time {
+    #[allow(clippy::cast_precision_loss)]
+    let t = Time::from_secs(i as f64 / fps);
+    if t.as_secs() >= duration.as_secs() {
+        Time::from_secs((duration.as_secs() - 1.0 / fps).max(0.0))
+    } else {
+        t
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_native(
+    clip: &dyn VideoClip,
+    options: &WriteVideoOptions,
+    audio: Option<&dyn AudioClip>,
+    control: &WriteControl,
+    tools: &FfmpegTools,
+    path: &Path,
+    prepared: &PreparedWrite,
+    video_codec: &str,
+    pixel_format: &str,
+    audio_codec: &str,
+    in_fmt: PixelFormat,
+) -> Result<()> {
+    let PreparedWrite {
+        duration,
+        size,
+        frame_count: n,
+        fps,
+    } = *prepared;
+    let sample = |i: u64| -> Result<Vec<u8>> {
+        sample_write_surface(clip, i, fps, duration, size, in_fmt)
+    };
+    if let Some(audio) = audio {
+        let video_tmp = temp_sibling(path, "rf-vid", "mp4");
+        let audio_tmp = temp_sibling(path, "rf-aud", "pcm");
+        let video_result = encode_sampled_rawvideo(
+            tools,
+            &video_tmp,
+            size,
+            fps,
+            video_codec,
+            options.crf,
+            in_fmt,
+            pixel_format,
+            &options.extra_ffmpeg_args,
+            n,
+            &sample,
+            control,
+        );
+        let result = match video_result {
+            Ok(()) => {
+                let fmt = render_audio_pcm_streaming(audio, duration, &audio_tmp, control)?;
+                control.report(WriteProgress::new(WriteStage::Mux, 0, 1));
+                control.check_cancel()?;
+                let r = mux_video_audio(
+                    tools,
+                    &video_tmp,
+                    &audio_tmp,
+                    path,
+                    audio_codec,
+                    fmt.sample_rate,
+                    fmt.channels(),
+                );
+                if r.is_ok() {
+                    control.report(WriteProgress::new(WriteStage::Mux, 1, 1));
+                }
+                r
+            }
+            Err(e) => Err(e),
+        };
+        let _ = std::fs::remove_file(&video_tmp);
+        let _ = std::fs::remove_file(&audio_tmp);
+        result?;
+        control.report(WriteProgress::new(WriteStage::Done, n, n));
+        return Ok(());
+    }
+    encode_sampled_rawvideo(
+        tools,
+        path,
+        size,
+        fps,
+        video_codec,
+        options.crf,
+        in_fmt,
+        pixel_format,
+        &options.extra_ffmpeg_args,
+        n,
+        &sample,
+        control,
+    )?;
+    control.report(WriteProgress::new(WriteStage::Done, n, n));
+    Ok(())
 }
 
 fn sample_write_frame(

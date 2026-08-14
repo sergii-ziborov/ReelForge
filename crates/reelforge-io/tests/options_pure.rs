@@ -16,6 +16,10 @@ fn write_options_chain() {
     assert_eq!(nv.video_codec.as_deref(), Some("h264_nvenc"));
     assert!(nv.crf.is_none());
     assert!(nv.extra_ffmpeg_args.iter().any(|a| a == "-cq"));
+    assert!(o.prefer_native_encode);
+    assert!(!WriteVideoOptions::new("out.mp4", 24.0)
+        .with_rgb_encode()
+        .prefer_native_encode);
 }
 
 #[test]

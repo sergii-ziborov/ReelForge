@@ -25,6 +25,10 @@ pub struct WriteVideoOptions {
     ///
     /// Example: `["-preset", "p4", "-cq", "23", "-b:v", "0"]` for NVIDIA encode.
     pub extra_ffmpeg_args: Vec<String>,
+    /// Prefer native YUV/NV12 stdin when the clip can emit those surfaces.
+    ///
+    /// Default `true`. Set `false` to force the packed-RGB encode path.
+    pub prefer_native_encode: bool,
 }
 
 impl WriteVideoOptions {
@@ -41,7 +45,15 @@ impl WriteVideoOptions {
             crf: Some(23),
             pixel_format: None,
             extra_ffmpeg_args: Vec::new(),
+            prefer_native_encode: true,
         }
+    }
+
+    /// Force packed-RGB stdin (skip native YUV/NV12 encode).
+    #[must_use]
+    pub fn with_rgb_encode(mut self) -> Self {
+        self.prefer_native_encode = false;
+        self
     }
 
     /// Override video codec (e.g. `libx264`, `h264_nvenc`, `h264_qsv`, `hevc_amf`).

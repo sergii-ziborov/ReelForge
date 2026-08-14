@@ -7,6 +7,7 @@
 mod adapter;
 mod audio_file;
 mod control;
+mod encode_native;
 mod error;
 mod exec;
 mod ffmpeg;
@@ -28,6 +29,7 @@ mod waveform;
 mod write;
 
 pub use adapter::{AdapterHost, AdapterOutput, execute_adapter};
+pub use encode_native::{encode_sampled_rawvideo, is_native_raw_format};
 pub use audio_file::{AudioFileClip, layout_for_channels, open_audio};
 pub use control::{CancelToken, ProgressCallback, WriteControl, WriteProgress, WriteStage};
 pub use error::{IoError, Result};

@@ -2,7 +2,7 @@
 
 use crate::timeline::map_concat_time;
 use crate::{ComposeError, Result};
-use reelforge_core::{Duration, Frame, Size, Time, VideoClip};
+use reelforge_core::{Duration, Frame, Size, Time, VideoClip, VideoSurface};
 use std::sync::Arc;
 
 /// Concatenate video clips end-to-end on a shared timeline.
@@ -84,6 +84,11 @@ impl VideoClip for ConcatVideo {
     fn frame_at(&self, t: Time) -> reelforge_core::Result<Frame> {
         let (i, local) = map_concat_time(&self.ends, self.duration, t)?;
         self.clips[i].frame_at(local)
+    }
+
+    fn surface_at(&self, t: Time) -> reelforge_core::Result<VideoSurface> {
+        let (i, local) = map_concat_time(&self.ends, self.duration, t)?;
+        self.clips[i].surface_at(local)
     }
 }
 

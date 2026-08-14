@@ -25,7 +25,7 @@ pub use reelforge_core::{
     StreamTimeBase, SurfacePlane, Time, TimeRange, TimedAudio, TimedVideo, VideoClip, VideoEffect,
     VideoSurface, apply_audio_effects, apply_video_effects, cache_video, cache_video_realtime,
     cache_video_with, psnr_rgb, resample_linear, ssim_rgb, stream_video, stream_video_raw,
-    subclip_audio, subclip_video, surface_to_rgb_frame,
+    subclip_audio, subclip_video, surface_to_rgb_frame, surface_to_rawvideo,
 };
 pub use reelforge_fx::{
     AccelDecel, AudioDelay, AudioFadeIn, AudioFadeOut, AudioNormalize, BlackAndWhite, Blink, Crop,
@@ -49,6 +49,7 @@ pub use reelforge_io::{
     compute_waveform_default, execute_adapter,
     detect_hw_encoders, explain_plan, explain_render_graph, explain_render_graph_with,
     extract_ffmpeg, extract_from_optimized, ffmpeg_available, fingerprint_file, is_executable_op,
+    is_native_raw_format,
     is_known_custom, load_track_set, mask_timeline_from_box, mask_timeline_from_box_subject,
     mask_timeline_to_track_set, materialize_execution_plan, materialize_graph,
     materialize_graph_bundle, materialize_graph_with_seeds, mux_copy_audio, node_backend,

@@ -1,6 +1,8 @@
 //! Loop a clip for a target duration or count.
 
-use reelforge_core::{CoreError, Duration, Frame, Result, Size, Time, VideoClip, VideoEffect};
+use reelforge_core::{
+    CoreError, Duration, Frame, Result, Size, Time, VideoClip, VideoEffect, VideoSurface,
+};
 use std::sync::Arc;
 
 /// Loop the source clip.
@@ -89,6 +91,21 @@ impl VideoClip for LoopedVideo {
             local = (sd - 1e-9).max(0.0);
         }
         self.inner.frame_at(Time::from_secs(local))
+    }
+
+    fn surface_at(&self, t: Time) -> Result<VideoSurface> {
+        if t.as_secs() < 0.0 || t.as_secs() >= self.duration.as_secs() {
+            return Err(CoreError::TimeOutOfRange {
+                time: t,
+                range: (Time::ZERO, Time::from_secs(self.duration.as_secs())),
+            });
+        }
+        let sd = self.source_duration.as_secs();
+        let mut local = t.as_secs() % sd;
+        if local >= sd {
+            local = (sd - 1e-9).max(0.0);
+        }
+        self.inner.surface_at(Time::from_secs(local))
     }
 }
 

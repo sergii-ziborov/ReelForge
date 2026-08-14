@@ -51,7 +51,7 @@ pub use surface::{
     StreamTimeBase, VideoSurface,
 };
 pub use time::{Duration, Time, TimeRange};
-pub use yuv::split_packed_planes;
+pub use yuv::{join_packed_planes, split_packed_planes, surface_to_rawvideo};
 
 /// Shared prelude for application code built on the core model.
 pub mod prelude {

@@ -89,6 +89,56 @@ pub fn split_packed_planes(
     Ok(planes)
 }
 
+/// Pack planes into a tight `rawvideo` buffer (row padding dropped).
+///
+/// Inverse of [`split_packed_planes`]. Used to feed `ffmpeg -f rawvideo`
+/// without an RGB round-trip.
+///
+/// # Errors
+///
+/// Plane count / size mismatch, or compact overflow.
+pub fn join_packed_planes(
+    format: PixelFormat,
+    frame: Size,
+    planes: &[SurfacePlane],
+) -> Result<Vec<u8>> {
+    validate_planes(format, frame, planes)?;
+    let need = format
+        .packed_frame_bytes(frame)
+        .ok_or_else(|| CoreError::invalid_frame("packed frame size overflow"))?;
+    let mut out = Vec::with_capacity(need);
+    for (i, plane) in planes.iter().enumerate() {
+        let (_, _, row) = format.plane_geometry(frame, i).ok_or_else(|| {
+            CoreError::invalid_frame(format!("{format:?} has no geometry for plane {i}"))
+        })?;
+        let compact = plane.compact(row)?;
+        out.extend_from_slice(&compact);
+    }
+    if out.len() != need {
+        return Err(CoreError::invalid_frame(format!(
+            "joined {format:?} size {}, expected {need}",
+            out.len()
+        )));
+    }
+    Ok(out)
+}
+
+/// Tight rawvideo bytes of a CPU surface (YUV / NV12 / packed RGB / BGRA).
+///
+/// # Errors
+///
+/// External handle, missing planes, or geometry mismatch.
+pub fn surface_to_rawvideo(surface: &crate::surface::VideoSurface) -> Result<Vec<u8>> {
+    if surface.external().is_some()
+        || surface.location() == crate::surface::MemoryLocation::External
+    {
+        return Err(CoreError::invalid_frame(
+            "external surface has no CPU pixels for rawvideo",
+        ));
+    }
+    join_packed_planes(surface.format(), surface.size(), surface.planes())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,5 +188,16 @@ mod tests {
     #[test]
     fn split_rejects_wrong_len() {
         assert!(split_packed_planes(PixelFormat::Yuv420p, Size::new(8, 4), &[0; 10]).is_err());
+    }
+
+    #[test]
+    fn join_split_yuv420p_roundtrip() {
+        let frame = Size::new(8, 4);
+        let mut buf = vec![16_u8; 32];
+        buf.extend(vec![80_u8; 8]);
+        buf.extend(vec![200_u8; 8]);
+        let planes = split_packed_planes(PixelFormat::Yuv420p, frame, &buf).unwrap();
+        let back = join_packed_planes(PixelFormat::Yuv420p, frame, &planes).unwrap();
+        assert_eq!(back, buf);
     }
 }
