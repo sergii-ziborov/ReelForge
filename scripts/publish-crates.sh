@@ -6,14 +6,7 @@ set -euo pipefail
 : "${CARGO_REGISTRY_TOKEN:?set CARGO_REGISTRY_TOKEN}"
 
 workspace_version() {
-  python3 - <<'PY'
-import pathlib, re
-text = pathlib.Path("Cargo.toml").read_text(encoding="utf-8")
-m = re.search(r"\[workspace\.package\][^\[]*version\s*=\s*\"([^\"]+)\"", text, re.S)
-if not m:
-    raise SystemExit("workspace.package.version not found")
-print(m.group(1))
-PY
+  python3 -c 'import pathlib,tomllib,sys; t=tomllib.loads(pathlib.Path("Cargo.toml").read_text(encoding="utf-8")); v=t.get("workspace",{}).get("package",{}).get("version"); sys.exit("workspace.package.version not found") if not v else print(v)'
 }
 
 VER="${1:-$(workspace_version)}"

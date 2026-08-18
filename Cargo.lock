@@ -722,7 +722,7 @@ dependencies = [
 
 [[package]]
 name = "reelforge"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "reelforge-compose",
  "reelforge-core",
@@ -736,7 +736,7 @@ dependencies = [
 
 [[package]]
 name = "reelforge-cli"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "clap",
  "reelforge",
@@ -746,7 +746,7 @@ dependencies = [
 
 [[package]]
 name = "reelforge-compose"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "reelforge-core",
  "thiserror",
@@ -754,7 +754,7 @@ dependencies = [
 
 [[package]]
 name = "reelforge-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde",
  "thiserror",
@@ -762,7 +762,7 @@ dependencies = [
 
 [[package]]
 name = "reelforge-fx"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "criterion",
  "rayon",
@@ -772,7 +772,7 @@ dependencies = [
 
 [[package]]
 name = "reelforge-io"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "criterion",
  "image",
@@ -791,7 +791,7 @@ dependencies = [
 
 [[package]]
 name = "reelforge-project"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "reelforge-core",
  "reelforge-render-graph",
@@ -802,7 +802,7 @@ dependencies = [
 
 [[package]]
 name = "reelforge-render-graph"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "reelforge-core",
  "serde",
@@ -812,7 +812,7 @@ dependencies = [
 
 [[package]]
 name = "reelforge-sightloom-adapter"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "reelforge-core",
  "reelforge-render-graph",
@@ -823,7 +823,7 @@ dependencies = [
 
 [[package]]
 name = "reelforge-text"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "fontdue",
  "reelforge-compose",

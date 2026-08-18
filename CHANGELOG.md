@@ -1,10 +1,12 @@
 # Changelog
 
-## Unreleased
+## 0.2.1 — 2026-08-18
 
 - CLI: `reelforge graph --explain` / `--run` `[--output] [--mask-package]`.
   Host encode path for Intelligence `graph.json` + mask package.
 - `SightloomPackageHost`: `package_id` mismatch is an error, not a silent skip.
+- Publish workflow reads `workspace.package.version` via tomllib
+  (the 0.2.0 job uploaded crates, then failed the check on `rust-version`).
 
 ## 0.2.0 — 2026-08-15
 
