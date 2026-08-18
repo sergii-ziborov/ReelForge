@@ -318,7 +318,7 @@ fn apply_typed_video(
         TypedParams::HFlip => MirrorX.apply(clip).map_err(IoError::from),
         TypedParams::VFlip => MirrorY.apply(clip).map_err(IoError::from),
         TypedParams::EvenDims => EvenSize.apply(clip).map_err(IoError::from),
-        TypedParams::Scale { w, h } => Resize::to(Size::new(*w, *h))
+        TypedParams::Scale { w, h } => Resize::to_bicubic(Size::new(*w, *h))
             .apply(clip)
             .map_err(IoError::from),
         TypedParams::Crop { x, y, w, h } => {

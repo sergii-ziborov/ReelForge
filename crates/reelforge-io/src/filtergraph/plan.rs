@@ -117,7 +117,11 @@ impl FilterOp {
                 format!("trim=start={start}:duration={duration},setpts=PTS-STARTPTS")
             }
             Self::Crop { w, h, x, y } => format!("crop={w}:{h}:{x}:{y}"),
-            Self::Scale { w, h } => format!("scale={w}:{h}"),
+            // Lanczos + accurate chroma: default bilinear looks blocky on
+            // click-zoom upscales (crop ½-frame → full frame).
+            Self::Scale { w, h } => {
+                format!("scale={w}:{h}:flags=lanczos+accurate_rnd+full_chroma_int")
+            }
             Self::HFlip => "hflip".into(),
             Self::VFlip => "vflip".into(),
             Self::TransposeCw => "transpose=1".into(),
@@ -158,6 +162,7 @@ mod tests {
         assert!(vf.contains("trim="));
         assert!(vf.contains("hflip"));
         assert!(vf.contains("scale=320:180"));
+        assert!(vf.contains("flags=lanczos"));
         let af = g.to_af().unwrap();
         assert!(af.contains("atrim=start=1"));
         assert!(af.contains("asetpts"));

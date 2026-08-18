@@ -32,7 +32,7 @@ fn apply_one(clip: Arc<dyn VideoClip>, op: &PlanOp) -> Result<Arc<dyn VideoClip>
             subclip_video(clip, start, duration).map_err(IoError::from)
         }
         PlanOp::Crop { x, y, w, h } => Crop::new(*x, *y, *w, *h).apply(clip).map_err(IoError::from),
-        PlanOp::Scale { w, h } => Resize::to(Size::new(*w, *h))
+        PlanOp::Scale { w, h } => Resize::to_bicubic(Size::new(*w, *h))
             .apply(clip)
             .map_err(IoError::from),
         PlanOp::HFlip => MirrorX.apply(clip).map_err(IoError::from),

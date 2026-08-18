@@ -45,6 +45,8 @@ impl CompileCtx<'_> {
                 json!({ "x": crop.x, "y": crop.y, "w": crop.w, "h": crop.h }),
                 node,
             );
+            // yuv420-safe before the upscale; scale kernel is lanczos in io.
+            node = self.unary("even", "rf.transform.even_dims", json!({}), node);
             if let Some((w, h)) = clip.scale_to {
                 node = self.unary(
                     "scale",

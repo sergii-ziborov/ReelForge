@@ -123,6 +123,15 @@ reelforge = "0.2"
   FFmpeg `-vf` baseline for the edit workload.
 - Example: `cargo run -p reelforge-io --example e2e_bench --release -- --quick`
 
+### Added (demo + scale)
+
+- `demo_reel`: 1080p designed scenes (gradient, plate titles, tracked privacy).
+- `privacy_file`: run `TrackedPrivacy` on a real file (static ellipse;
+  `pixelate` / `solid` / strong gaussian).
+- In-process scale is bicubic; filtergraph scale is lanczos. CaptureProject
+  crop→scale inserts `rf.transform.even_dims`.
+
 ### Not in this slice
 
-GPU compute kernels are not part of this release.
+GPU compute kernels are not part of this release. Mild gaussian privacy is
+not identity-safe.

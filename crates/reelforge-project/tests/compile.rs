@@ -101,6 +101,7 @@ fn crop_and_scale_compile() {
     let out = compile_project(&p).unwrap();
     let kinds = ops(&out.graph);
     assert!(kinds.contains(&"rf.transform.crop"), "{kinds:?}");
+    assert!(kinds.contains(&"rf.transform.even_dims"), "{kinds:?}");
     assert!(kinds.contains(&"rf.transform.scale"), "{kinds:?}");
 }
 

@@ -30,14 +30,29 @@ cargo install reelforge-cli    # installs the `reelforge` binary
 - **Stage resume** — each execution stage is hashed on disk; resume re-enters at the first invalid stage.
 - **Preview planner** — requested frame → output cone; skip inactive compose, bypass encode/audio, proxy seeds, drop draft masks.
 - **E2E bench** — 1080p/4K, subject counts, codecs (incl. NVENC/QSV/AMF skip), peak RSS, p50/p95, A/V drift, FFmpeg `-vf` baseline.
+- **Scale quality** — in-process `rf.transform.scale` is bicubic; FFmpeg filtergraph scale is lanczos. Crop→scale inserts `even_dims` so yuv420 upscales stay even.
 
 GPU compute kernels are **not** in 0.2.
 
-Watch a 720p reel of the stack (test pattern + titles + privacy + slide):
-
 ```bash
 cargo run -p reelforge --example demo_reel --release
+cargo run -p reelforge --example privacy_file --release -- --input clip.mp4 --style pixelate
 ```
+
+### Not done (honest)
+
+These are product holes, not missing checkboxes from the 0.2 contract slice.
+
+| Gap | Reality |
+|-----|---------|
+| **Identity-safe privacy** | Default gaussian is recoverable (oval, tone, eye/mouth sites remain). Use `pixelate` / `solid`, or σ ≳ 0.2 × face diameter. Not a promise of anonymity. |
+| **No detector** | `TrackedPrivacy` follows a `TrackSet`. ReelForge does not find faces. Tracks come from Capture / SightLoom JSON. |
+| **Static ellipse** | `privacy_file` places one box. A moving talking-head needs a real track. |
+| **GPU compute** | Registry can run `rf.gpu.passthrough` / `rf.encode.hw`. No CUDA/OpenCL kernels. |
+| **CLI** | `version` / `probe` / `cut` / `filter` / `plan` only. No `compile_project`, no graph run, no privacy. |
+| **Publish** | Tree is `0.2.0`. crates.io may still be `0.1.5` until `publish.yml` / `scripts/publish-crates.sh` is run. |
+| **Windows RSS** | E2E peak RSS is Linux `VmHWM` only (`unsafe_code = forbid`). |
+| **Capture owns** | Job queue, preview cache, event streams, editor — not this repo. |
 
 ---
 
@@ -65,7 +80,7 @@ cargo run -p reelforge --example demo_reel --release
 - **Geometry:** crop, resize (**nearest / bilinear / bicubic**), rotate (90° / free angle), mirror, margin, even size, scroll, slide in/out
 - **Time:** speed, accel/decel, reverse, time-symmetrize, loop, freeze, freeze-region, super-sample, blink
 - **Color / look:** fades, B&W, invert, multiply, gamma, lum/contrast, **painting** (edge-enhance + ink), chroma mask, mask and/or
-- **Blur:** **HeadBlur** + **TrackedBlur** (multi-region tracks JSON / SightLoom-compatible samples)
+- **Blur / privacy:** **HeadBlur**, **TrackedBlur**, **TrackedPrivacy** (`gaussian` / `pixelate` / `solid`). Mild gaussian is *not* identity-safe.
 - **Audio:** gain, stereo L/R, fade in/out, peak normalize, delay
 
 ### Text & captions
@@ -95,6 +110,7 @@ cargo run -p reelforge --example demo_reel --release
 - Criterion benches: `cargo bench -p reelforge-fx`, `cargo bench -p reelforge-io --bench render_plan`
 - E2E harness: `cargo run -p reelforge-io --example e2e_bench --release -- --quick` (1080p/4K, subjects, codecs, RSS, p50/p95)
 - Demo reel: `cargo run -p reelforge --example demo_reel --release`
+- File privacy: `cargo run -p reelforge --example privacy_file --release -- --input clip.mp4 --style pixelate`
 - CI: fmt / clippy / test / docs / package dry-run / bench compile (Linux, Windows, macOS) + FFmpeg job
 
 ---
