@@ -73,6 +73,23 @@ enum Commands {
         #[arg(long)]
         out: Option<String>,
     },
+    /// Inspect / run a JSON `RenderGraph` (Host / Intelligence encode path).
+    Graph {
+        /// Path to `RenderGraph` JSON.
+        path: String,
+        /// Print nodes / schedule (default).
+        #[arg(long, group = "mode")]
+        explain: bool,
+        /// Schedule, execute, and write outputs.
+        #[arg(long, group = "mode")]
+        run: bool,
+        /// Override the first `GraphOutput.uri`.
+        #[arg(long)]
+        output: Option<String>,
+        /// Mask package directory (`manifest.json` + blobs) as `AdapterHost`.
+        #[arg(long)]
+        mask_package: Option<String>,
+    },
 }
 
 fn main() {
@@ -125,6 +142,22 @@ fn run(cli: Cli) -> Result<(), String> {
                 PlanMode::Explain
             };
             commands::plan::run(&path, mode, out.as_deref())
+        }
+        Commands::Graph {
+            path,
+            explain,
+            run,
+            output,
+            mask_package,
+        } => {
+            use commands::graph::GraphMode;
+            let _ = explain;
+            let mode = if run {
+                GraphMode::Run
+            } else {
+                GraphMode::Explain
+            };
+            commands::graph::run(&path, mode, output.as_deref(), mask_package.as_deref())
         }
     }
 }

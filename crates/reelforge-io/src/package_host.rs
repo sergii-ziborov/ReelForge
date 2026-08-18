@@ -48,7 +48,10 @@ impl AdapterHost for SightloomPackageHost {
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
         if !wants.is_empty() && wants != self.package.manifest.package_id {
-            return Ok(None);
+            return Err(crate::error::IoError::message(format!(
+                "mask package id '{}' does not match graph package_id '{wants}'",
+                self.package.manifest.package_id
+            )));
         }
         if wants.is_empty()
             && request.params.get("tracks").is_none()
@@ -205,5 +208,29 @@ mod tests {
         let far = (16 * 32 + 24) * 3;
         assert!(frame.data()[bar] < 250, "package silhouette must fill");
         assert_eq!(frame.data()[far], 255, "outside dense mask stays white");
+    }
+
+    #[test]
+    fn package_id_mismatch_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("masks")).unwrap();
+        let manifest = serde_json::json!({
+            "package_id": "pkg-on-disk",
+            "tracks": [],
+            "masks": []
+        });
+        fs::write(dir.path().join("manifest.json"), manifest.to_string()).unwrap();
+        let host = SightloomPackageHost::open(dir.path()).unwrap();
+        let err = execute_adapter(
+            &AdapterRequest::new(
+                "sightloom",
+                serde_json::json!({ "package_id": "pkg-from-graph" }),
+            ),
+            &AdapterContext::new().with_host(Arc::new(host)),
+        )
+        .expect_err("mismatch must fail closed");
+        let msg = err.to_string();
+        assert!(msg.contains("pkg-on-disk"), "{msg}");
+        assert!(msg.contains("pkg-from-graph"), "{msg}");
     }
 }

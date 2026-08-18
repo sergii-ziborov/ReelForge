@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- CLI: `reelforge graph --explain` / `--run` `[--output] [--mask-package]`.
+  Host encode path for Intelligence `graph.json` + mask package.
+- `SightloomPackageHost`: `package_id` mismatch is an error, not a silent skip.
+
 ## 0.2.0 — 2026-08-15
 
 Breaking release. **Do not treat crates.io `0.1.5` and this tree as the same API.**

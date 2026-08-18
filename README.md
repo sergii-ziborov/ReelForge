@@ -49,7 +49,7 @@ These are product holes, not missing checkboxes from the 0.2 contract slice.
 | **No detector** | `TrackedPrivacy` follows a `TrackSet`. ReelForge does not find faces. Tracks come from Capture / SightLoom JSON. |
 | **Static ellipse** | `privacy_file` places one box. A moving talking-head needs a real track. |
 | **GPU compute** | Registry can run `rf.gpu.passthrough` / `rf.encode.hw`. No CUDA/OpenCL kernels. |
-| **CLI** | `version` / `probe` / `cut` / `filter` / `plan` only. No `compile_project`, no graph run, no privacy. |
+| **CLI** | `version` / `probe` / `cut` / `filter` / `plan` / `graph`. No `compile_project`. |
 | **Publish** | Tree is `0.2.0`. crates.io may still be `0.1.5` until `publish.yml` / `scripts/publish-crates.sh` is run. |
 | **Windows RSS** | E2E peak RSS is Linux `VmHWM` only (`unsafe_code = forbid`). |
 | **Capture owns** | Job queue, preview cache, event streams, editor — not this repo. |
@@ -106,7 +106,7 @@ These are product holes, not missing checkboxes from the 0.2 contract slice.
 ### Quality & tooling
 - `psnr_rgb` / `ssim_rgb` frame metrics
 - **Correctness gate** (synthetic + MP4 decode/transform/encode, CI-failing floors) — see [docs/CORRECTNESS.md](docs/CORRECTNESS.md)
-- CLI: `version`, `probe`, `cut`, `filter`, `plan`
+- CLI: `version`, `probe`, `cut`, `filter`, `plan`, `graph`
 - Criterion benches: `cargo bench -p reelforge-fx`, `cargo bench -p reelforge-io --bench render_plan`
 - E2E harness: `cargo run -p reelforge-io --example e2e_bench --release -- --quick` (1080p/4K, subjects, codecs, RSS, p50/p95)
 - Demo reel: `cargo run -p reelforge --example demo_reel --release`
@@ -218,7 +218,11 @@ reelforge cut --start 10 --duration 5 in.mp4 out.mp4
 reelforge filter --hflip in.mp4 out.mp4
 reelforge plan job.json --explain
 reelforge plan job.json --run
+reelforge graph --explain graph.json
+reelforge graph --run graph.json --mask-package pkg --output out.mp4
 ```
+
+`--mask-package` opens `SightloomPackageHost` (Intelligence `package_id` + folder). A mismatched `package_id` is an error, not a skip. Inline RLE / ellipse redaction still runs without a package.
 
 ### RenderGraph (DAG → compile → run)
 
