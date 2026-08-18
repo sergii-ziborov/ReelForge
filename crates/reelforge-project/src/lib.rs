@@ -2,6 +2,10 @@
 //!
 //! This is the project *schema* + compiler. Screen capture, desktop editor,
 //! and cache policy belong to `ReelForge` Capture — not this crate.
+//!
+//! Wire contract: `tests/golden/capture_project_v1.json` is a copy of the
+//! Capture schema golden. `cargo test -p reelforge-project --test conformance`
+//! must stay green when that file is refreshed.
 
 mod compile;
 mod emit;
