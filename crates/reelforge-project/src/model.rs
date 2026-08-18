@@ -101,7 +101,7 @@ pub struct MediaRef {
     pub role: Option<String>,
 }
 
-/// Incoming transition (declared; compile v1 may warn and skip).
+/// Incoming transition (fade / dissolve / wipe → slides).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Transition {
     /// Kind.
@@ -154,6 +154,19 @@ pub struct NestedSequence {
     pub duration: Option<MediaTime>,
 }
 
+/// Pixel crop inside the source frame (`rf.transform.crop`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CropRect {
+    /// Left.
+    pub x: u32,
+    /// Top.
+    pub y: u32,
+    /// Width.
+    pub w: u32,
+    /// Height.
+    pub h: u32,
+}
+
 /// One clip on a track.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TimelineClip {
@@ -163,12 +176,18 @@ pub struct TimelineClip {
     pub media: MediaRefId,
     /// Source in/out.
     pub source: SourceRange,
-    /// Retiming (v1 compile accepts identity only).
+    /// Retiming (identity / speed / freeze / loop).
     #[serde(default)]
     pub retiming: Retiming,
     /// Optional incoming transition.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transition_in: Option<Transition>,
+    /// Crop applied after trim (click-zoom).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crop: Option<CropRect>,
+    /// Scale the crop back to this size (usually the sequence canvas).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale_to: Option<(u32, u32)>,
     /// Clip metadata.
     #[serde(default)]
     pub metadata: Metadata,

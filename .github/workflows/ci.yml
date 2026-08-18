@@ -59,7 +59,7 @@ jobs:
           set -euo pipefail
           # Use --list only: full package/publish dry-run requires all path-dep
           # versions to already exist on crates.io (breaks new version bumps).
-          for pkg in reelforge-core reelforge-compose reelforge-fx reelforge-io reelforge-text reelforge reelforge-cli; do
+          for pkg in reelforge-core reelforge-compose reelforge-fx reelforge-text reelforge-render-graph reelforge-sightloom-adapter reelforge-project reelforge-io reelforge reelforge-cli; do
             echo "==== cargo package -p ${pkg} --list ===="
             cargo package -p "${pkg}" --list --allow-dirty | head -n 5
           done

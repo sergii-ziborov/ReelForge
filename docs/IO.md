@@ -102,11 +102,20 @@ Odd frame sizes are cropped to even for yuv420 encoders. Expand size with `Resiz
 
 ### Privacy e2e bench
 
+Criterion micros (fused 40-subject ROI at 720p):
+
 ```bash
 cargo bench -p reelforge-io --bench privacy_e2e
 ```
 
-Measures fused 40-subject ROI redaction at 720p, RGB24 pack (encode-ready), and — when host `ffmpeg` is on `PATH` — decode → redaction → `write_video`. Frame-graph micros stay in `reelforge-fx` `frame_ops`.
+Full decode → privacy/edit → encode matrix (1080p/4K, codecs, RSS, p50/p95):
+
+```bash
+cargo run -p reelforge-io --example e2e_bench --release -- --quick
+cargo run -p reelforge-io --example e2e_bench --release -- --input clip.mp4 --full --json
+```
+
+Missing encoders are skipped. Frame-graph micros stay in `reelforge-fx` `frame_ops`.
 
 ## Filtergraph
 

@@ -8,7 +8,7 @@ use reelforge_render_graph::{MediaAsset, MediaAssetId, NodeId, RenderNode, Rende
 use serde_json::json;
 
 impl CompileCtx<'_> {
-    pub(crate) fn emit_clip(&mut self, clip: &TimelineClip) -> Result<(NodeId, f64)> {
+    pub(crate) fn emit_clip(&mut self, clip: &TimelineClip) -> Result<(NodeId, MediaTime)> {
         let media = self.lookup_media(&clip.media)?;
         let asset_key = format!("m_{}", media.id.as_str());
         let asset = MediaAsset {
@@ -38,6 +38,22 @@ impl CompileCtx<'_> {
             src,
         );
         node = self.apply_retiming(clip, node);
+        if let Some(crop) = clip.crop {
+            node = self.unary(
+                "crop",
+                "rf.transform.crop",
+                json!({ "x": crop.x, "y": crop.y, "w": crop.w, "h": crop.h }),
+                node,
+            );
+            if let Some((w, h)) = clip.scale_to {
+                node = self.unary(
+                    "scale",
+                    "rf.transform.scale",
+                    json!({ "w": w, "h": h }),
+                    node,
+                );
+            }
+        }
         let overlap = self.apply_transition_in(clip, &mut node);
         Ok((node, overlap))
     }
@@ -73,16 +89,15 @@ impl CompileCtx<'_> {
         }
     }
 
-    fn apply_transition_in(&mut self, clip: &TimelineClip, node: &mut NodeId) -> f64 {
+    fn apply_transition_in(&mut self, clip: &TimelineClip, node: &mut NodeId) -> MediaTime {
         let Some(tr) = &clip.transition_in else {
-            return 0.0;
+            return MediaTime::zero(clip.source.duration.timescale.max(1));
         };
-        let dur = tr.duration.as_secs();
         let fade = json!({ "duration": media_time_json(tr.duration) });
         match tr.kind {
             TransitionKind::Fade => {
                 *node = self.unary("fin", "rf.transform.fade_in", fade, node.clone());
-                0.0
+                MediaTime::zero(tr.duration.timescale.max(1))
             }
             TransitionKind::Dissolve => {
                 if let Some(prev) = self.layers.last() {
@@ -97,14 +112,37 @@ impl CompileCtx<'_> {
                     }
                 }
                 *node = self.unary("fin", "rf.transform.fade_in", fade, node.clone());
-                dur
+                tr.duration
             }
             TransitionKind::Wipe => {
+                if let Some(prev) = self.layers.last() {
+                    let slid = self.unary(
+                        "sout",
+                        "rf.transform.slide_out",
+                        json!({
+                            "duration": media_time_json(tr.duration),
+                            "side": "left",
+                        }),
+                        prev.node.clone(),
+                    );
+                    if let Some(last) = self.layers.last_mut() {
+                        last.node = slid;
+                    }
+                }
+                *node = self.unary(
+                    "sin",
+                    "rf.transform.slide_in",
+                    json!({
+                        "duration": media_time_json(tr.duration),
+                        "side": "right",
+                    }),
+                    node.clone(),
+                );
                 self.warnings.push(format!(
-                    "clip {}: wipe is declared but not compiled",
+                    "clip {}: wipe compiles to opposing slides (LTR push)",
                     clip.id.as_str()
                 ));
-                0.0
+                tr.duration
             }
         }
     }
@@ -114,20 +152,20 @@ pub(crate) fn media_time_json(t: MediaTime) -> serde_json::Value {
     json!({ "ticks": t.ticks, "timescale": t.timescale })
 }
 
-pub(crate) fn record_secs(clip: &TimelineClip) -> Result<f64> {
-    let src = clip.source.duration.as_secs();
+pub(crate) fn record_duration(clip: &TimelineClip) -> Result<MediaTime> {
+    let src = clip.source.duration;
     match clip.retiming {
         Retiming::Identity => Ok(src),
-        Retiming::Speed { factor } if factor.is_finite() && factor > 0.0 => Ok(src / factor),
-        Retiming::Speed { factor } => Err(ProjectError::message(format!(
-            "clip {}: invalid speed factor {factor}",
-            clip.id.as_str()
-        ))),
-        Retiming::Freeze { hold, .. } => Ok(src + hold.as_secs()),
+        Retiming::Speed { factor } => src
+            .div_f64(factor)
+            .map_err(|e| ProjectError::message(format!("clip {}: {e}", clip.id.as_str()))),
+        Retiming::Freeze { hold, .. } => src
+            .saturating_add(hold)
+            .map_err(|e| ProjectError::message(format!("clip {}: {e}", clip.id.as_str()))),
         Retiming::Loop {
             duration: Some(d), ..
-        } if d.as_secs() > 0.0 => Ok(d.as_secs()),
-        Retiming::Loop { times: Some(n), .. } if n > 0 => Ok(src * f64::from(n)),
+        } if d.ticks > 0 => Ok(d),
+        Retiming::Loop { times: Some(n), .. } if n > 0 => Ok(src.saturating_mul_u32(n)),
         Retiming::Loop { .. } => Err(ProjectError::message(format!(
             "clip {}: loop needs duration or times",
             clip.id.as_str()

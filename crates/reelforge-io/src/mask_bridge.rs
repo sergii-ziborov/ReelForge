@@ -51,7 +51,9 @@ pub fn mask_timeline_to_track_set(masks: &MaskTimeline) -> TrackSet {
                         coverage: None,
                     }
                 };
-            if let Some(asset) = s.asset.as_ref().and_then(|a| a.asset.to_coverage()) {
+            if let Some(refer) = s.asset.as_ref()
+                && let Ok(Some(asset)) = refer.asset.try_to_coverage()
+            {
                 sample.coverage = Some(CoverageMask {
                     left: asset.left,
                     top: asset.top,
@@ -96,6 +98,14 @@ pub fn apply_region_redaction(
 ) -> Result<Arc<dyn VideoClip>> {
     if redaction.masks.samples.is_empty() {
         return Err(IoError::message("RegionRedaction masks are empty"));
+    }
+    for sample in &redaction.masks.samples {
+        if let Some(refer) = &sample.asset {
+            refer
+                .asset
+                .try_to_coverage()
+                .map_err(|e| IoError::message(format!("mask asset: {e}")))?;
+        }
     }
     let tracks = mask_timeline_to_track_set(&redaction.masks);
     if tracks.is_empty() {
@@ -288,5 +298,34 @@ mod tests {
             .unwrap()
             .frame_at(Time::ZERO)
             .unwrap();
+    }
+
+    #[test]
+    fn apply_rejects_malformed_inline_mask() {
+        use reelforge_render_graph::{MaskAsset, MaskAssetRef};
+
+        let mut masks = MaskTimeline::new();
+        let mut sample = MaskSample::ellipse(MediaTime::new(0, 30).unwrap(), 8.0, 8.0, 4.0);
+        sample.asset = Some(MaskAssetRef::inline(MaskAsset::Dense {
+            width: 2,
+            height: 2,
+            data: vec![1, 2, 3],
+        }));
+        masks.push(sample);
+        let clip: Arc<dyn VideoClip> = Arc::new(ColorClip::new(
+            Size::new(16, 16),
+            Rgb8::WHITE,
+            Duration::from_secs(1.0),
+        ));
+        match apply_region_redaction(
+            clip,
+            &RegionRedaction {
+                masks,
+                style: RedactionStyle::default(),
+            },
+        ) {
+            Ok(_) => panic!("expected malformed mask to fail"),
+            Err(err) => assert!(err.to_string().contains("mask asset"), "{err}"),
+        }
     }
 }

@@ -2,7 +2,7 @@
 
 use crate::adapter::{AdapterHost, AdapterOutput, AdapterRequest};
 use crate::error::Result;
-use crate::mask_package::MaskPackage;
+use crate::mask_package::{MaskPackage, MaskPackageLimits};
 use reelforge_render_graph::{MaskAsset, mask_timeline_from_tracks};
 use std::path::Path;
 
@@ -19,8 +19,17 @@ impl SightloomPackageHost {
     ///
     /// I/O or JSON.
     pub fn open(dir: impl AsRef<Path>) -> Result<Self> {
+        Self::open_with(dir, MaskPackageLimits::new())
+    }
+
+    /// Open with an explicit package policy.
+    ///
+    /// # Errors
+    ///
+    /// I/O, JSON, or package security checks.
+    pub fn open_with(dir: impl AsRef<Path>, limits: MaskPackageLimits) -> Result<Self> {
         Ok(Self {
-            package: MaskPackage::open(dir)?,
+            package: MaskPackage::open_with(dir, limits)?,
         })
     }
 

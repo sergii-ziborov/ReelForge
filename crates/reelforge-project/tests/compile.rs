@@ -25,6 +25,8 @@ fn clip(id: &str, media_id: &str, start: f64, dur: f64) -> TimelineItem {
         source: SourceRange::from_secs(start, dur).unwrap(),
         retiming: Retiming::Identity,
         transition_in: None,
+        crop: None,
+        scale_to: None,
         metadata: Metadata::default(),
     })
 }
@@ -77,6 +79,32 @@ fn single_clip_is_source_trim_output() {
 }
 
 #[test]
+fn crop_and_scale_compile() {
+    use reelforge_project::CropRect;
+    let mut p = CaptureProject::new(ProjectId::new("p"), "zoom");
+    p.media.push(media("a", "a.mp4"));
+    let mut seq = Sequence::new(SequenceId::new("s"), "main");
+    let mut tr = TimelineTrack::new(TimelineTrackId::new("v0"), TrackKind::Video);
+    let TimelineItem::Clip(mut c) = clip("c1", "a", 0.0, 2.0) else {
+        panic!("clip");
+    };
+    c.crop = Some(CropRect {
+        x: 80,
+        y: 45,
+        w: 160,
+        h: 90,
+    });
+    c.scale_to = Some((320, 180));
+    tr.items.push(TimelineItem::Clip(c));
+    seq.tracks.push(tr);
+    p.sequences.push(seq);
+    let out = compile_project(&p).unwrap();
+    let kinds = ops(&out.graph);
+    assert!(kinds.contains(&"rf.transform.crop"), "{kinds:?}");
+    assert!(kinds.contains(&"rf.transform.scale"), "{kinds:?}");
+}
+
+#[test]
 fn gap_then_clip_uses_compose_start() {
     let mut p = CaptureProject::new(ProjectId::new("p"), "gap");
     p.media.push(media("a", "a.mp4"));
@@ -103,8 +131,9 @@ fn gap_then_clip_uses_compose_start() {
             _ => None,
         })
         .expect("compose");
-    let start = compose["layers"][0]["start"].as_f64().unwrap();
-    assert!((start - 1.5).abs() < 1e-9);
+    let start = &compose["layers"][0]["start"];
+    assert_eq!(start["ticks"], 1500);
+    assert_eq!(start["timescale"], 1000);
 }
 
 #[test]

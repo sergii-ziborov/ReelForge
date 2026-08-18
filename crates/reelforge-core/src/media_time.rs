@@ -221,6 +221,77 @@ impl MediaTime {
         })
     }
 
+    /// Whether this instant is the origin (`ticks == 0`).
+    #[must_use]
+    pub const fn is_zero(self) -> bool {
+        self.ticks == 0
+    }
+
+    /// Add `rhs` after rebasing it onto `self.timescale` (saturating ticks).
+    ///
+    /// # Errors
+    ///
+    /// Zero timescale on rebase.
+    pub fn saturating_add(self, rhs: Self) -> Result<Self> {
+        let rhs = rhs.rebase(self.timescale)?;
+        Ok(Self {
+            ticks: self.ticks.saturating_add(rhs.ticks),
+            timescale: self.timescale,
+        })
+    }
+
+    /// Subtract `rhs` after rebasing it onto `self.timescale` (saturating ticks).
+    ///
+    /// # Errors
+    ///
+    /// Zero timescale on rebase.
+    pub fn saturating_sub(self, rhs: Self) -> Result<Self> {
+        let rhs = rhs.rebase(self.timescale)?;
+        Ok(Self {
+            ticks: self.ticks.saturating_sub(rhs.ticks),
+            timescale: self.timescale,
+        })
+    }
+
+    /// Later of the two instants (rhs rebased onto `self.timescale`).
+    ///
+    /// # Errors
+    ///
+    /// Zero timescale on rebase.
+    pub fn max_time(self, rhs: Self) -> Result<Self> {
+        let rhs = rhs.rebase(self.timescale)?;
+        Ok(if rhs.ticks > self.ticks { rhs } else { self })
+    }
+
+    /// Scale this duration by `1/factor` (speed-up shortens record time).
+    ///
+    /// # Errors
+    ///
+    /// Non-finite or non-positive `factor`.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+    pub fn div_f64(self, factor: f64) -> Result<Self> {
+        if !factor.is_finite() || factor <= 0.0 {
+            return Err(CoreError::invalid_timing(format!(
+                "invalid scale factor {factor}"
+            )));
+        }
+        #[allow(clippy::cast_possible_truncation)]
+        let ticks = (self.ticks as f64 / factor).round() as i64;
+        Ok(Self {
+            ticks,
+            timescale: self.timescale,
+        })
+    }
+
+    /// Multiply this duration by a positive integer (loop `times`).
+    #[must_use]
+    pub const fn saturating_mul_u32(self, n: u32) -> Self {
+        Self {
+            ticks: self.ticks.saturating_mul(n as i64),
+            timescale: self.timescale,
+        }
+    }
+
     /// CFR half-open frame index range `[start, end)` for a media interval.
     ///
     /// Uses exact tick math via [`Self::frame_index`]. Empty when `end <= start`
@@ -298,5 +369,25 @@ mod tests {
         let r = t.rebase(90_000).unwrap();
         assert_eq!(r.ticks, 90_000);
         assert!((r.as_secs() - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn add_sub_across_timescales() {
+        let a = MediaTime::new(1_000, 1_000).unwrap();
+        let b = MediaTime::new(90_000, 90_000).unwrap();
+        let sum = a.saturating_add(b).unwrap();
+        assert_eq!(sum.timescale, 1_000);
+        assert_eq!(sum.ticks, 2_000);
+        let back = sum.saturating_sub(b).unwrap();
+        assert_eq!(back.ticks, 1_000);
+        assert!(MediaTime::zero(1_000).is_zero());
+    }
+
+    #[test]
+    fn speed_and_loop_scale_ticks() {
+        let d = MediaTime::new(4_000, 1_000).unwrap();
+        assert_eq!(d.div_f64(2.0).unwrap().ticks, 2_000);
+        assert_eq!(d.saturating_mul_u32(3).ticks, 12_000);
+        assert!(d.div_f64(0.0).is_err());
     }
 }

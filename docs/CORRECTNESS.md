@@ -50,4 +50,16 @@ cargo bench -p reelforge-fx --bench frame_ops
 cargo bench -p reelforge-io --bench render_plan
 ```
 
+## End-to-end bench (speed + RSS + codecs)
+
+Not a CI quality gate. Times real decode → privacy/edit → encode.
+
+```bash
+cargo run -p reelforge-io --example e2e_bench --release -- --quick
+cargo run -p reelforge-io --example e2e_bench --release -- --input path/to/1080p.mp4 --full --json
+```
+
+`--quick` is the tiny lavfi smoke (also `cargo test -p reelforge-io --test e2e_bench`).  
+`--full` adds 4K and 100-subject rows. Missing encoders are skipped, not failed.
+
 Use benches for **speed**; use correctness_gate for **trust**.

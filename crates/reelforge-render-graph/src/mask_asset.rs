@@ -4,12 +4,70 @@
 //! when the vision adapter already has a silhouette — do not collapse it to
 //! an ellipse.
 
+use crate::error::{GraphError, Result};
 use crate::ids::SubjectId;
 use reelforge_core::MediaTime;
+use serde::{Deserialize, Serialize};
 
 /// Subject key on a materialized mask frame (same as [`SubjectId`]).
 pub type SubjectKey = SubjectId;
-use serde::{Deserialize, Serialize};
+
+/// Soft / hard decode caps for mask payloads (inline JSON or package blobs).
+///
+/// Defaults fit 8K coverage (`8192×8192` / 64 MiB). Construct with
+/// [`MaskDecodeLimits::new`] — the type is `#[non_exhaustive]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct MaskDecodeLimits {
+    /// Max coverage width.
+    pub max_width: u32,
+    /// Max coverage height.
+    pub max_height: u32,
+    /// Max decoded `width * height` bytes.
+    pub max_decoded_bytes: usize,
+    /// Max RLE run count.
+    pub max_rle_runs: usize,
+    /// Max polygon vertices.
+    pub max_polygon_points: usize,
+    /// When true, RLE runs must cover every pixel exactly.
+    pub require_rle_complete: bool,
+}
+
+impl Default for MaskDecodeLimits {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MaskDecodeLimits {
+    /// Stock limits: 8K box, 64 MiB, 1M RLE runs, 4096 polygon points.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            max_width: 8192,
+            max_height: 8192,
+            max_decoded_bytes: 64 * 1024 * 1024,
+            max_rle_runs: 1_048_576,
+            max_polygon_points: 4096,
+            require_rle_complete: true,
+        }
+    }
+
+    /// Override the decoded-byte ceiling.
+    #[must_use]
+    pub const fn with_max_decoded_bytes(mut self, bytes: usize) -> Self {
+        self.max_decoded_bytes = bytes;
+        self
+    }
+
+    /// Override the pixel box.
+    #[must_use]
+    pub const fn with_max_dimensions(mut self, width: u32, height: u32) -> Self {
+        self.max_width = width;
+        self.max_height = height;
+        self
+    }
+}
 
 /// Handle or inline payload consumed by redaction.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -158,41 +216,54 @@ impl MaskAsset {
         }
     }
 
-    /// Decode to cropped coverage (`0..=255`). `External` returns `None`.
+    /// Decode to cropped coverage (`0..=255`). `External` and invalid payloads
+    /// return `None` (use [`MaskAsset::try_to_coverage`] for the reason).
     #[must_use]
     pub fn to_coverage(&self) -> Option<DecodedCoverage> {
+        self.try_to_coverage().ok().flatten()
+    }
+
+    /// Decode with [`MaskDecodeLimits::new`].
+    ///
+    /// `External` is `Ok(None)` — the host must resolve it first. Oversized,
+    /// incomplete, or malformed payloads are errors (do not allocate).
+    ///
+    /// # Errors
+    ///
+    /// Dimension / byte / RLE / polygon limit violations, or length mismatch.
+    pub fn try_to_coverage(&self) -> Result<Option<DecodedCoverage>> {
+        self.try_to_coverage_with(&MaskDecodeLimits::new())
+    }
+
+    /// Decode with explicit limits.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`MaskAsset::try_to_coverage`].
+    pub fn try_to_coverage_with(
+        &self,
+        limits: &MaskDecodeLimits,
+    ) -> Result<Option<DecodedCoverage>> {
         match self {
             Self::Dense {
                 width,
                 height,
                 data,
-            } => Some(DecodedCoverage {
-                left: 0,
-                top: 0,
-                width: *width,
-                height: *height,
-                data: data.clone(),
-            }),
+            } => decode_dense(0, 0, *width, *height, data, limits).map(Some),
             Self::Cropped {
                 left,
                 top,
                 width,
                 height,
                 data,
-            } => Some(DecodedCoverage {
-                left: *left,
-                top: *top,
-                width: *width,
-                height: *height,
-                data: data.clone(),
-            }),
+            } => decode_dense(*left, *top, *width, *height, data, limits).map(Some),
             Self::Rle {
                 width,
                 height,
                 runs,
-            } => decode_rle(*width, *height, runs),
-            Self::Polygon { points } => rasterize_polygon(points),
-            Self::External { .. } => None,
+            } => decode_rle(*width, *height, runs, limits).map(Some),
+            Self::Polygon { points } => rasterize_polygon(points, limits).map(Some),
+            Self::External { .. } => Ok(None),
         }
     }
 }
@@ -212,19 +283,96 @@ pub struct DecodedCoverage {
     pub data: Vec<u8>,
 }
 
-fn decode_rle(width: u32, height: u32, runs: &[(u32, u8)]) -> Option<DecodedCoverage> {
-    let n = (width as usize).checked_mul(height as usize)?;
+fn pixel_count(width: u32, height: u32, limits: &MaskDecodeLimits) -> Result<usize> {
+    if width == 0 || height == 0 {
+        return Err(GraphError::message("mask: width and height must be > 0"));
+    }
+    if width > limits.max_width || height > limits.max_height {
+        return Err(GraphError::message(format!(
+            "mask: {width}x{height} exceeds {}x{}",
+            limits.max_width, limits.max_height
+        )));
+    }
+    let n = (width as usize)
+        .checked_mul(height as usize)
+        .ok_or_else(|| GraphError::message(format!("mask: {width}x{height} overflows usize")))?;
+    if n > limits.max_decoded_bytes {
+        return Err(GraphError::message(format!(
+            "mask: {n} decoded bytes exceeds {}",
+            limits.max_decoded_bytes
+        )));
+    }
+    Ok(n)
+}
+
+fn decode_dense(
+    left: u32,
+    top: u32,
+    width: u32,
+    height: u32,
+    data: &[u8],
+    limits: &MaskDecodeLimits,
+) -> Result<DecodedCoverage> {
+    let n = pixel_count(width, height, limits)?;
+    if data.len() != n {
+        return Err(GraphError::message(format!(
+            "mask: payload {} bytes, expected {n}",
+            data.len()
+        )));
+    }
+    if left.checked_add(width).is_none() || top.checked_add(height).is_none() {
+        return Err(GraphError::message(
+            "mask: crop origin + size overflows u32",
+        ));
+    }
+    Ok(DecodedCoverage {
+        left,
+        top,
+        width,
+        height,
+        data: data.to_vec(),
+    })
+}
+
+fn decode_rle(
+    width: u32,
+    height: u32,
+    runs: &[(u32, u8)],
+    limits: &MaskDecodeLimits,
+) -> Result<DecodedCoverage> {
+    if runs.len() > limits.max_rle_runs {
+        return Err(GraphError::message(format!(
+            "mask: {} RLE runs exceeds {}",
+            runs.len(),
+            limits.max_rle_runs
+        )));
+    }
+    let n = pixel_count(width, height, limits)?;
+    let mut covered = 0_u64;
+    for &(count, _) in runs {
+        covered = covered
+            .checked_add(u64::from(count))
+            .ok_or_else(|| GraphError::message("mask: RLE run length overflows"))?;
+    }
+    let need = n as u64;
+    if limits.require_rle_complete && covered != need {
+        return Err(GraphError::message(format!(
+            "mask: RLE covers {covered} pixels, expected {need}"
+        )));
+    }
+    if covered > need {
+        return Err(GraphError::message(format!(
+            "mask: RLE covers {covered} pixels, expected at most {need}"
+        )));
+    }
     let mut data = vec![0_u8; n];
     let mut i = 0_usize;
     for &(count, value) in runs {
-        let end = i.saturating_add(count as usize).min(n);
+        let end = i + count as usize;
         data[i..end].fill(value);
         i = end;
-        if i >= n {
-            break;
-        }
     }
-    Some(DecodedCoverage {
+    Ok(DecodedCoverage {
         left: 0,
         top: 0,
         width,
@@ -238,19 +386,47 @@ fn decode_rle(width: u32, height: u32, runs: &[(u32, u8)]) -> Option<DecodedCove
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-fn rasterize_polygon(points: &[(f32, f32)]) -> Option<DecodedCoverage> {
+fn rasterize_polygon(points: &[(f32, f32)], limits: &MaskDecodeLimits) -> Result<DecodedCoverage> {
     if points.len() < 3 {
-        return None;
+        return Err(GraphError::message("mask: polygon needs at least 3 points"));
     }
-    let (l, t, r, b) = MaskAsset::Polygon {
+    if points.len() > limits.max_polygon_points {
+        return Err(GraphError::message(format!(
+            "mask: {} polygon points exceeds {}",
+            points.len(),
+            limits.max_polygon_points
+        )));
+    }
+    if points.iter().any(|(x, y)| !x.is_finite() || !y.is_finite()) {
+        return Err(GraphError::message("mask: polygon has non-finite vertex"));
+    }
+    let (bbox_l, bbox_t, bbox_r, bbox_b) = MaskAsset::Polygon {
         points: points.to_vec(),
     }
-    .bbox()?;
-    let left = l.floor().max(0.0) as u32;
-    let top = t.floor().max(0.0) as u32;
-    let width = ((r.ceil() - left as f32).max(1.0) as u32).min(4096);
-    let height = ((b.ceil() - top as f32).max(1.0) as u32).min(4096);
-    let mut data = vec![0_u8; width as usize * height as usize];
+    .bbox()
+    .ok_or_else(|| GraphError::message("mask: polygon bbox is empty"))?;
+    if ![bbox_l, bbox_t, bbox_r, bbox_b]
+        .iter()
+        .all(|value| value.is_finite())
+    {
+        return Err(GraphError::message("mask: polygon bbox is non-finite"));
+    }
+    let left = bbox_l.floor().max(0.0) as u32;
+    let top = bbox_t.floor().max(0.0) as u32;
+    let width_f = (bbox_r.ceil() - left as f32).max(1.0);
+    let height_f = (bbox_b.ceil() - top as f32).max(1.0);
+    if width_f > f64::from(limits.max_width) as f32
+        || height_f > f64::from(limits.max_height) as f32
+    {
+        return Err(GraphError::message(format!(
+            "mask: polygon bbox {width_f}x{height_f} exceeds {}x{}",
+            limits.max_width, limits.max_height
+        )));
+    }
+    let width = width_f as u32;
+    let height = height_f as u32;
+    let pixels = pixel_count(width, height, limits)?;
+    let mut data = vec![0_u8; pixels];
     for y in 0..height {
         for x in 0..width {
             let px = left as f32 + x as f32 + 0.5;
@@ -260,7 +436,7 @@ fn rasterize_polygon(points: &[(f32, f32)]) -> Option<DecodedCoverage> {
             }
         }
     }
-    Some(DecodedCoverage {
+    Ok(DecodedCoverage {
         left,
         top,
         width,
@@ -316,6 +492,79 @@ mod tests {
             mask_ref: 7,
         };
         assert!(a.to_coverage().is_none());
+        assert!(a.try_to_coverage().unwrap().is_none());
         assert!(a.bbox().is_none());
+    }
+
+    #[test]
+    fn dense_rejects_length_mismatch() {
+        let a = MaskAsset::Dense {
+            width: 2,
+            height: 2,
+            data: vec![1, 2, 3],
+        };
+        assert!(a.to_coverage().is_none());
+        assert!(a.try_to_coverage().is_err());
+    }
+
+    #[test]
+    fn rle_rejects_incomplete() {
+        let a = MaskAsset::Rle {
+            width: 4,
+            height: 1,
+            runs: vec![(2, 255)],
+        };
+        let err = a.try_to_coverage().unwrap_err();
+        assert!(err.to_string().contains("RLE covers 2"));
+    }
+
+    #[test]
+    fn rle_rejects_too_many_runs() {
+        let limits = MaskDecodeLimits::new();
+        let runs = vec![(1, 1); limits.max_rle_runs + 1];
+        let a = MaskAsset::Rle {
+            width: 8,
+            height: 8,
+            runs,
+        };
+        assert!(
+            a.try_to_coverage()
+                .unwrap_err()
+                .to_string()
+                .contains("RLE runs")
+        );
+    }
+
+    #[test]
+    fn huge_dimensions_do_not_allocate() {
+        let a = MaskAsset::Dense {
+            width: u32::MAX,
+            height: u32::MAX,
+            data: vec![],
+        };
+        let err = a.try_to_coverage().unwrap_err();
+        assert!(err.to_string().contains("exceeds"));
+    }
+
+    #[test]
+    fn polygon_rejects_nan_and_too_many_points() {
+        let nan = MaskAsset::Polygon {
+            points: vec![(0.0, 0.0), (1.0, 0.0), (f32::NAN, 1.0)],
+        };
+        assert!(
+            nan.try_to_coverage()
+                .unwrap_err()
+                .to_string()
+                .contains("non-finite")
+        );
+        let many = MaskAsset::Polygon {
+            points: vec![(0.0, 0.0); 5000],
+        };
+        assert!(
+            many.try_to_coverage()
+                .unwrap_err()
+                .to_string()
+                .contains("polygon points")
+        );
     }
 }

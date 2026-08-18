@@ -66,6 +66,7 @@ fn source_contract(asset: &MediaAsset) -> MediaContract {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn infer_op_contract(
     node_id: &str,
     op: &CompiledOp,
@@ -107,6 +108,28 @@ fn infer_op_contract(
                 audio: true,
                 masks: false,
                 notes: None,
+            })
+        }
+        TypedParams::TimelineConcat { .. } => {
+            if upstreams.len() < 2 {
+                return Err(contract_err(
+                    node_id,
+                    "rf.timeline.concat needs at least two inputs",
+                ));
+            }
+            for (i, c) in upstreams.iter().enumerate() {
+                require(
+                    node_id,
+                    &format!("rf.timeline.concat input {i}"),
+                    c,
+                    &MediaContract::video_only(),
+                )?;
+            }
+            Ok(MediaContract {
+                video: true,
+                audio: upstreams.iter().any(|c| c.audio),
+                masks: false,
+                notes: Some("sequential concat".into()),
             })
         }
         TypedParams::ComposeLayers { .. } => {

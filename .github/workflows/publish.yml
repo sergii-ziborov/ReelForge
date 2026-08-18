@@ -38,9 +38,9 @@ jobs:
         run: |
           set -euo pipefail
           # Full package dry-run cannot resolve unpublished path-dep versions
-          # (e.g. reelforge-io ^0.1.5 before core is uploaded). --list validates
+          # (e.g. reelforge-io ^0.2.0 before core is uploaded). --list validates
           # include/exclude without hitting crates.io for workspace siblings.
-          for pkg in reelforge-core reelforge-compose reelforge-fx reelforge-render-graph reelforge-io reelforge-text reelforge reelforge-cli; do
+          for pkg in reelforge-core reelforge-compose reelforge-fx reelforge-text reelforge-render-graph reelforge-sightloom-adapter reelforge-project reelforge-io reelforge reelforge-cli; do
             echo "==== ${pkg} ===="
             cargo package -p "${pkg}" --list --allow-dirty >/dev/null
           done
@@ -75,6 +75,30 @@ jobs:
           # crates.io rejects clients without a descriptive User-Agent.
           export CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse
 
+          WS_VERSION="$(python3 - <<'PY'
+import pathlib, re
+text = pathlib.Path("Cargo.toml").read_text(encoding="utf-8")
+m = re.search(r"\[workspace\.package\][^\[]*version\s*=\s*\"([^\"]+)\"", text, re.S)
+if not m:
+    raise SystemExit("workspace.package.version not found")
+print(m.group(1))
+PY
+)"
+          echo "Publishing workspace version ${WS_VERSION}"
+
+          CRATES=(
+            reelforge-core
+            reelforge-compose
+            reelforge-fx
+            reelforge-text
+            reelforge-render-graph
+            reelforge-sightloom-adapter
+            reelforge-project
+            reelforge-io
+            reelforge
+            reelforge-cli
+          )
+
           crate_exists() {
             local name="$1"
             local ver="$2"
@@ -84,9 +108,9 @@ jobs:
 
           publish_one() {
             local pkg="$1"
-            echo "==== Publishing ${pkg} ===="
-            if crate_exists "${pkg}" "0.1.5"; then
-              echo "${pkg} 0.1.5 already on crates.io; skip"
+            echo "==== Publishing ${pkg} ${WS_VERSION} ===="
+            if crate_exists "${pkg}" "${WS_VERSION}"; then
+              echo "${pkg} ${WS_VERSION} already on crates.io; skip"
               return 0
             fi
             # cargo publish waits until the crate is available after upload.
@@ -98,7 +122,7 @@ jobs:
               fi
               echo "publish ${pkg} attempt ${attempt} failed; sleeping 180s (rate limit / index)..."
               sleep 180
-              if crate_exists "${pkg}" "0.1.5"; then
+              if crate_exists "${pkg}" "${WS_VERSION}"; then
                 echo "${pkg} appeared on crates.io after retry wait"
                 break
               fi
@@ -110,21 +134,16 @@ jobs:
             sleep 90
           }
 
-          publish_one reelforge-core
-          publish_one reelforge-compose
-          publish_one reelforge-fx
-          publish_one reelforge-render-graph
-          publish_one reelforge-io
-          publish_one reelforge-text
-          publish_one reelforge
-          publish_one reelforge-cli
+          for pkg in "${CRATES[@]}"; do
+            publish_one "${pkg}"
+          done
 
           echo "All crates published."
-          for c in reelforge-core reelforge-compose reelforge-fx reelforge-render-graph reelforge-io reelforge-text reelforge reelforge-cli; do
-            if crate_exists "$c" "0.1.5"; then
-              echo "OK $c 0.1.5"
+          for c in "${CRATES[@]}"; do
+            if crate_exists "$c" "${WS_VERSION}"; then
+              echo "OK $c ${WS_VERSION}"
             else
-              echo "MISSING $c 0.1.5"
+              echo "MISSING $c ${WS_VERSION}"
               exit 1
             fi
           done

@@ -24,6 +24,8 @@ fn clip(id: &str, media_id: &str, start: f64, dur: f64) -> TimelineItem {
         source: SourceRange::from_secs(start, dur).unwrap(),
         retiming: Retiming::Identity,
         transition_in: None,
+        crop: None,
+        scale_to: None,
         metadata: Metadata::default(),
     })
 }
@@ -146,6 +148,123 @@ fn nested_sequence_offsets_child() {
             _ => None,
         })
         .expect("compose");
-    let start = compose["layers"][0]["start"].as_f64().unwrap();
-    assert!((start - 0.75).abs() < 1e-9);
+    let start = &compose["layers"][0]["start"];
+    assert_eq!(start["ticks"], 750);
+    assert_eq!(start["timescale"], 1000);
+}
+
+#[test]
+fn wipe_compiles_to_opposing_slides() {
+    let mut p = CaptureProject::new(ProjectId::new("p"), "wipe");
+    p.media.push(media("a", "a.mp4"));
+    let mut seq = Sequence::new(SequenceId::new("s"), "main");
+    let mut tr = TimelineTrack::new(TimelineTrackId::new("v0"), TrackKind::Video);
+    tr.items.push(clip("c1", "a", 0.0, 2.0));
+    let TimelineItem::Clip(mut c2) = clip("c2", "a", 0.0, 2.0) else {
+        panic!("clip");
+    };
+    c2.transition_in = Some(reelforge_project::Transition {
+        kind: reelforge_project::TransitionKind::Wipe,
+        duration: MediaTime::from_secs(0.5, 1_000).unwrap(),
+    });
+    tr.items.push(TimelineItem::Clip(c2));
+    seq.tracks.push(tr);
+    p.sequences.push(seq);
+    let out = compile_project(&p).unwrap();
+    let names: Vec<_> = out
+        .graph
+        .nodes
+        .iter()
+        .filter_map(|n| match &n.body {
+            RenderNodeKind::Op { operation, .. } => Some(operation.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(names.contains(&"rf.transform.slide_in"));
+    assert!(names.contains(&"rf.transform.slide_out"));
+    assert!(
+        out.warnings.iter().any(|w| w.contains("opposing slides")),
+        "{:?}",
+        out.warnings
+    );
+}
+
+#[test]
+fn subtitle_track_emits_burn() {
+    let mut p = CaptureProject::new(ProjectId::new("p"), "subs");
+    p.media.push(media("a", "a.mp4"));
+    p.media.push(MediaRef {
+        id: MediaRefId::new("s"),
+        uri: "talk.srt".into(),
+        duration: None,
+        role: Some("subtitle".into()),
+    });
+    let mut seq = Sequence::new(SequenceId::new("s"), "main");
+    let mut v = TimelineTrack::new(TimelineTrackId::new("v0"), TrackKind::Video);
+    v.items.push(clip("c1", "a", 0.0, 2.0));
+    let mut st = TimelineTrack::new(TimelineTrackId::new("s0"), TrackKind::Subtitle);
+    st.items.push(clip("sc", "s", 0.0, 2.0));
+    seq.tracks.push(v);
+    seq.tracks.push(st);
+    p.sequences.push(seq);
+    let out = compile_project(&p).unwrap();
+    let burn = out
+        .graph
+        .nodes
+        .iter()
+        .find_map(|n| match &n.body {
+            RenderNodeKind::Op { operation, params }
+                if operation.as_str() == "rf.subtitle.burn" =>
+            {
+                Some(params)
+            }
+            _ => None,
+        })
+        .expect("subtitle burn");
+    assert_eq!(burn["cues"][0]["uri"], "talk.srt");
+    assert_eq!(burn["cues"][0]["start"]["ticks"], 0);
+    assert!(
+        !out.warnings.iter().any(|w| w.contains("not compiled")),
+        "{:?}",
+        out.warnings
+    );
+}
+
+#[test]
+fn query_only_semantic_skips_empty_redaction() {
+    let mut p = CaptureProject::new(ProjectId::new("p"), "query");
+    p.media.push(media("a", "a.mp4"));
+    p.semantic
+        .push(SemanticRef::new("query", "who_is_speaking"));
+    p.semantic.push(SemanticRef::new("event", "knock"));
+    let mut seq = Sequence::new(SequenceId::new("s"), "main");
+    let mut tr = TimelineTrack::new(TimelineTrackId::new("v0"), TrackKind::Video);
+    tr.items.push(clip("c1", "a", 0.0, 2.0));
+    seq.tracks.push(tr);
+    p.sequences.push(seq);
+    let out = compile_project(&p).unwrap();
+    let has_redact = out
+        .graph
+        .nodes
+        .iter()
+        .any(|n| matches!(n.body, RenderNodeKind::Redaction { .. }));
+    assert!(
+        !has_redact,
+        "query/event-only must not attach empty redaction"
+    );
+    let adapter = out
+        .graph
+        .nodes
+        .iter()
+        .find_map(|n| match &n.body {
+            RenderNodeKind::Op { operation, params }
+                if operation.as_str() == "rf.adapter.sightloom" =>
+            {
+                Some(params)
+            }
+            _ => None,
+        })
+        .expect("adapter");
+    assert_eq!(adapter["refs"][0]["kind"], "query");
+    assert_eq!(adapter["query"][0], "who_is_speaking");
 }

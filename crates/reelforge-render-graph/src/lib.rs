@@ -14,6 +14,11 @@
 //! Typed compile (`CompiledOp` / `TypedParams`) is the source of truth for
 //! registry↔executor parity. Media execution lives in `reelforge-io`.
 //!
+//! **0.2 public construction:** [`OperationDescriptor`], [`MediaContract`],
+//! [`CapabilitySet`], and [`OperationLimits`] are `#[non_exhaustive]`. Use
+//! [`OperationDescriptor::new`] (and the `MediaContract` helpers) — do not
+//! write struct literals from Intelligence / Capture / MCP hosts.
+//!
 //! `RenderPlan` v1 (linear one-shot) remains in `reelforge-io` for simple jobs.
 
 mod animated;
@@ -62,7 +67,9 @@ pub use mask::{
     MaskInterpolation, MaskLifecycle, MaskProvenance, MaskRegionAt, MaskSample, MaskTimeline,
     MissingMaskPolicy,
 };
-pub use mask_asset::{DecodedCoverage, MaskAsset, MaskAssetRef, MaskFrame, SubjectKey};
+pub use mask_asset::{
+    DecodedCoverage, MaskAsset, MaskAssetRef, MaskDecodeLimits, MaskFrame, SubjectKey,
+};
 pub use op::{
     BackendClass, CapabilitySet, ExecutorKind, MediaContract, OperationDescriptor, OperationId,
     OperationLimits, OperationRegistry, SemVer,

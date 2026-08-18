@@ -42,6 +42,12 @@ impl JobStore {
         self.job_dir(id).join("job.json")
     }
 
+    /// Directory for persisted stage artifacts (`stages/*.mp4`).
+    #[must_use]
+    pub fn stages_dir(&self, id: &JobId) -> PathBuf {
+        self.job_dir(id).join("stages")
+    }
+
     /// Write `job` (creates the job directory).
     ///
     /// # Errors

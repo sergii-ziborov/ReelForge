@@ -13,13 +13,20 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) struct LayerRef {
     pub node: NodeId,
-    pub start: f64,
+    pub start: MediaTime,
     pub track: usize,
 }
 
 pub(crate) struct AudioRef {
     pub node: NodeId,
-    pub start: f64,
+    pub start: MediaTime,
+}
+
+pub(crate) struct SubtitleCueRef {
+    pub uri: String,
+    pub start: MediaTime,
+    pub source_start: MediaTime,
+    pub duration: MediaTime,
 }
 
 pub(crate) struct CompileCtx<'a> {
@@ -30,6 +37,7 @@ pub(crate) struct CompileCtx<'a> {
     pub nodes: Vec<RenderNode>,
     pub layers: Vec<LayerRef>,
     pub audio: Vec<AudioRef>,
+    pub subtitles: Vec<SubtitleCueRef>,
     pub warnings: Vec<String>,
     next: u32,
 }
@@ -45,6 +53,7 @@ impl<'a> CompileCtx<'a> {
             nodes: Vec::new(),
             layers: Vec::new(),
             audio: Vec::new(),
+            subtitles: Vec::new(),
             warnings,
             next: 0,
         }
@@ -67,10 +76,10 @@ impl<'a> CompileCtx<'a> {
                     .warnings
                     .push(format!("audio track {} is muted", track.id.as_str())),
                 TrackKind::Audio => self.emit_picture_track(track, ti, true)?,
-                TrackKind::Subtitle => self.warnings.push(format!(
-                    "subtitle track {} is stored but not compiled",
-                    track.id.as_str()
-                )),
+                TrackKind::Subtitle if track.muted => self
+                    .warnings
+                    .push(format!("subtitle track {} is muted", track.id.as_str())),
+                TrackKind::Subtitle => self.emit_subtitle_track(track)?,
             }
         }
         self.stack.remove(seq.id.0.as_str());
@@ -83,14 +92,19 @@ impl<'a> CompileCtx<'a> {
         track_index: usize,
         audio_only: bool,
     ) -> Result<()> {
-        let mut cursor = 0.0_f64;
+        let mut cursor = MediaTime::zero(1_000);
         for item in &track.items {
             match item {
-                TimelineItem::Gap(g) => cursor += g.duration.as_secs(),
+                TimelineItem::Gap(g) => {
+                    cursor = cursor.saturating_add(g.duration)?;
+                }
                 TimelineItem::Clip(clip) => {
-                    let rec = crate::emit_clip::record_secs(clip)?;
+                    let rec = crate::emit_clip::record_duration(clip)?;
                     let (node, overlap) = self.emit_clip(clip)?;
-                    cursor = (cursor - overlap).max(0.0);
+                    cursor = cursor.saturating_sub(overlap)?;
+                    if cursor.ticks < 0 {
+                        cursor.ticks = 0;
+                    }
                     if audio_only {
                         self.audio.push(AudioRef {
                             node,
@@ -103,25 +117,66 @@ impl<'a> CompileCtx<'a> {
                             track: track_index,
                         });
                     }
-                    cursor += rec;
+                    cursor = cursor.saturating_add(rec)?;
                 }
                 TimelineItem::Nested(nested) => {
-                    let add = nested.duration.map_or_else(
-                        || self.lookup_seq(&nested.sequence).map_or(0.0, child_span),
-                        MediaTime::as_secs,
-                    );
                     let child_id = nested.sequence.clone();
                     let child = self.lookup_seq(&child_id)?.clone();
+                    let add = match nested.duration {
+                        Some(d) => d,
+                        None => child_span(&child)?,
+                    };
                     let before_v = self.layers.len();
                     let before_a = self.audio.len();
+                    let before_s = self.subtitles.len();
                     self.emit_sequence(&child)?;
                     for layer in &mut self.layers[before_v..] {
-                        layer.start += cursor;
+                        layer.start = cursor.saturating_add(layer.start)?;
                     }
                     for layer in &mut self.audio[before_a..] {
-                        layer.start += cursor;
+                        layer.start = cursor.saturating_add(layer.start)?;
                     }
-                    cursor += add;
+                    for cue in &mut self.subtitles[before_s..] {
+                        cue.start = cursor.saturating_add(cue.start)?;
+                    }
+                    cursor = cursor.saturating_add(add)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn emit_subtitle_track(&mut self, track: &TimelineTrack) -> Result<()> {
+        let mut cursor = MediaTime::zero(1_000);
+        for item in &track.items {
+            match item {
+                TimelineItem::Gap(g) => {
+                    cursor = cursor.saturating_add(g.duration)?;
+                }
+                TimelineItem::Clip(clip) => {
+                    let rec = crate::emit_clip::record_duration(clip)?;
+                    let media = self.lookup_media(&clip.media)?;
+                    self.subtitles.push(SubtitleCueRef {
+                        uri: media.uri.clone(),
+                        start: cursor,
+                        source_start: clip.source.start,
+                        duration: rec,
+                    });
+                    cursor = cursor.saturating_add(rec)?;
+                }
+                TimelineItem::Nested(nested) => {
+                    let child_id = nested.sequence.clone();
+                    let child = self.lookup_seq(&child_id)?.clone();
+                    let add = match nested.duration {
+                        Some(d) => d,
+                        None => child_span(&child)?,
+                    };
+                    let before_s = self.subtitles.len();
+                    self.emit_sequence(&child)?;
+                    for cue in &mut self.subtitles[before_s..] {
+                        cue.start = cursor.saturating_add(cue.start)?;
+                    }
+                    cursor = cursor.saturating_add(add)?;
                 }
             }
         }
@@ -135,7 +190,7 @@ impl<'a> CompileCtx<'a> {
             .iter()
             .map(|l| {
                 json!({
-                    "start": l.start,
+                    "start": crate::emit_clip::media_time_json(l.start),
                     "layer_index": l.track,
                     "x": 0,
                     "y": 0,
@@ -166,7 +221,7 @@ impl<'a> CompileCtx<'a> {
         let mut tracks = vec![json!({})];
         for a in &self.audio {
             inputs.push(a.node.clone());
-            tracks.push(json!({ "start": a.start }));
+            tracks.push(json!({ "start": crate::emit_clip::media_time_json(a.start) }));
         }
         self.nodes.push(RenderNode {
             id: mix.clone(),
@@ -179,7 +234,9 @@ impl<'a> CompileCtx<'a> {
         mix
     }
 
-    /// Subject/event/query/policy handles → adapter + empty fused redaction.
+    /// Subject/event/query/policy handles → adapter.
+    /// Empty fused redaction is only attached when a subject or policy is present
+    /// (the host fills masks). Query/event-only plans stay adapter-only.
     pub(crate) fn emit_semantic_privacy(
         &mut self,
         refs: &[SemanticRef],
@@ -191,6 +248,12 @@ impl<'a> CompileCtx<'a> {
             semantic_adapter_params(refs),
             picture,
         );
+        let needs_redaction = refs
+            .iter()
+            .any(|r| r.kind == "subject" || r.kind == "policy");
+        if !needs_redaction {
+            return adapter;
+        }
         let id = self.fresh("redact");
         self.nodes.push(RenderNode {
             id: id.clone(),
@@ -200,6 +263,22 @@ impl<'a> CompileCtx<'a> {
             inputs: vec![adapter],
         });
         id
+    }
+
+    pub(crate) fn emit_subtitle_burn(&mut self, picture: NodeId) -> NodeId {
+        let cues: Vec<serde_json::Value> = self
+            .subtitles
+            .iter()
+            .map(|c| {
+                json!({
+                    "uri": c.uri,
+                    "start": crate::emit_clip::media_time_json(c.start),
+                    "in": crate::emit_clip::media_time_json(c.source_start),
+                    "duration": crate::emit_clip::media_time_json(c.duration),
+                })
+            })
+            .collect();
+        self.unary("subs", "rf.subtitle.burn", json!({ "cues": cues }), picture)
     }
 
     pub(crate) fn unary(
@@ -243,7 +322,11 @@ impl<'a> CompileCtx<'a> {
 }
 
 pub(crate) fn semantic_adapter_params(refs: &[SemanticRef]) -> serde_json::Value {
-    let mut params = json!({});
+    let listed: Vec<serde_json::Value> = refs
+        .iter()
+        .map(|r| json!({ "kind": r.kind, "id": r.id }))
+        .collect();
+    let mut params = json!({ "refs": listed });
     for (key, kind) in [
         ("subjects", "subject"),
         ("events", "event"),
@@ -262,19 +345,22 @@ pub(crate) fn semantic_adapter_params(refs: &[SemanticRef]) -> serde_json::Value
     params
 }
 
-pub(crate) fn child_span(seq: &Sequence) -> f64 {
-    seq.tracks
-        .iter()
-        .filter(|t| t.kind == TrackKind::Video)
-        .map(|t| {
-            t.items
-                .iter()
-                .map(|i| match i {
-                    TimelineItem::Gap(g) => g.duration.as_secs(),
-                    TimelineItem::Clip(c) => crate::emit_clip::record_secs(c).unwrap_or(0.0),
-                    TimelineItem::Nested(n) => n.duration.map_or(0.0, MediaTime::as_secs),
-                })
-                .sum::<f64>()
-        })
-        .fold(0.0, f64::max)
+pub(crate) fn child_span(seq: &Sequence) -> Result<MediaTime> {
+    let mut best = MediaTime::zero(1_000);
+    for track in &seq.tracks {
+        if track.kind != TrackKind::Video {
+            continue;
+        }
+        let mut span = MediaTime::zero(1_000);
+        for item in &track.items {
+            let add = match item {
+                TimelineItem::Gap(g) => g.duration,
+                TimelineItem::Clip(c) => crate::emit_clip::record_duration(c)?,
+                TimelineItem::Nested(n) => n.duration.unwrap_or_else(|| MediaTime::zero(1_000)),
+            };
+            span = span.saturating_add(add)?;
+        }
+        best = best.max_time(span)?;
+    }
+    Ok(best)
 }

@@ -63,7 +63,7 @@ sources ──► effects / subclips ──► composite ──► write_* / fra
 
 ```toml
 [dependencies]
-reelforge = "0.1"
+reelforge = "0.2"
 ```
 
 ```bash
@@ -350,15 +350,15 @@ Authoring ids (`NodeId`) are aliases. After compile, execution identity is a den
 `TrackTimeline` is the identity source (`TrackId` + optional `SubjectId` / `AppearanceId` / `ObservationId` / `Geometry` / `OcclusionState` / `MaskRef`).  
 `MaskTimeline` is a **materialized ROI view** of one or more tracks — not a vision index. ReelForge does not query subjects.
 
-Pixel silhouettes travel as `MaskAsset` (`Dense` / `Cropped` / `Rle` / `Polygon` / `External`) on `MaskSample.asset` / `MaskFrame`. The privacy pass stamps a **union coverage ROI** and blurs only that crop — not the whole frame × N subjects. Load coverage: `privacy_e2e` Criterion bench (decode → redaction → encode) plus `privacy_load` tests (long VFR PTS index, 50-subject fused fill, muxed A/V drift).
+Pixel silhouettes travel as `MaskAsset` (`Dense` / `Cropped` / `Rle` / `Polygon` / `External`) on `MaskSample.asset` / `MaskFrame`. The privacy pass stamps a **union coverage ROI** and blurs only that crop — not the whole frame × N subjects. Load coverage: `privacy_e2e` Criterion bench (decode → redaction → encode), the `e2e_bench` example (1080p/4K, codecs, RSS, p50/p95), plus `privacy_load` tests (long VFR PTS index, 50-subject fused fill, muxed A/V drift).
 
 `rf.adapter.sightloom` is a real **adapter executor**. `AdapterRegistry` ships a JSON SightLoom executor. `SightloomPackageHost` opens a folder (`manifest.json` + `masks/*.bin`) and resolves `MaskAsset::External` to dense/cropped coverage — no SightLoom crate. A custom `AdapterHost` can still wrap a live vision process. Empty-mask `Redaction` nodes consume the adapter's timeline.
 
 GPU stages (`rf.gpu.passthrough`, `rf.encode.hw`) execute instead of failing closed. `GpuRegistry` passthrough keeps the clip; `rf.encode.hw` probes host `ffmpeg` for NVENC/QSV/AMF (or uses `backend` / `codec`). A `GpuHost` can replace the clip with an `ExternalSurface` device path. ReelForge does not ship CUDA kernels.
 
-Durable jobs: `JobStore` persists `{id}/job.json`. `submit_render_job` fingerprints the graph+plan. `run_render_job` / `resume_render_job` write `Running` → `Done`, cancel → `Paused`, other errors → `Failed`. A `Done` job with the same fingerprint and an output file is a no-op. In-process stages re-evaluate on resume; a matching `StageCache` hit still skips encode. Capture owns the queue.
+Durable jobs: `JobStore` persists `{id}/job.json` and `{id}/stages/*.mp4`. `submit_render_job` fingerprints the graph+plan. `run_render_job` / `resume_render_job` write `Running` → `Done`, cancel → `Paused`, other errors → `Failed`. A `Done` job with the same fingerprint and an output file is a no-op. After each plan stage the runner writes a stage artifact; resume validates fingerprint + file hash and re-enters at `next_stage`, skipping completed stages. Capture owns the queue.
 
-Preview contract: `PreviewRequest` + `PreviewQuality` (`Draft` / `Proxy` / `Full`). `preview_clip` / `preview_graph` sample one RGB frame at `MediaTime` (downscale, no encode). `write_proxy` / thumbnails remain the file-side hooks. Capture owns which spec to cache.
+Preview planner: `plan_preview` / `slice_preview_graph` then `preview_graph`. Requested `MediaTime` + quality → keep the output cone, drop encode/audio-only ops, skip compose layers that start after the sample time, proxy seeds to the Draft/Proxy box, strip pixel mask assets in Draft. Then one `frame_at`. `write_proxy` / thumbnails remain the file-side hooks. Capture owns which spec to cache.
 
 `rf.transform.trim` / `fade_in` / `fade_out` compile to `MediaTime` ticks (`MediaRange` for trim). Float seconds in JSON become 1 MHz ticks; `{ticks, timescale}` is preserved. Conversion to `Time`/`Duration` happens only at the effect / FFmpeg boundary.
 

@@ -18,11 +18,13 @@ pub struct ProjectCompile {
 
 /// Compile the active sequence.
 ///
-/// Video clips: `Source` → trim (ticks) → optional speed / fade → compose.
+/// Video clips: `Source` → trim (ticks) → optional speed / fade / slide → compose.
 /// Audio tracks: same chain, then `rf.audio.mix` onto the picture.
-/// Project `semantic` refs compile to `rf.adapter.sightloom` + empty redaction
-/// (subject / event / query / policy handles — not bboxes).
-/// Markers stay editorial. Wipe is stored, not compiled. Muted tracks skip.
+/// Subtitle tracks compile to `rf.subtitle.burn` (file URI + record start).
+/// Project `semantic` refs compile to `rf.adapter.sightloom`. An empty
+/// redaction is attached only when a subject or policy is present.
+/// Markers stay editorial. Wipe compiles to opposing slides (LTR push).
+/// Muted tracks skip. Timeline cursor stays in [`reelforge_core::MediaTime`].
 ///
 /// # Errors
 ///
@@ -41,14 +43,17 @@ pub fn compile_project(project: &CaptureProject) -> Result<ProjectCompile> {
         ));
     }
 
-    let mut picture = if ctx.layers.len() == 1 && ctx.layers[0].start < 1e-9 && seq.canvas.is_none()
-    {
-        ctx.layers[0].node.clone()
-    } else {
-        ctx.emit_compose(seq.canvas)
-    };
+    let mut picture =
+        if ctx.layers.len() == 1 && ctx.layers[0].start.is_zero() && seq.canvas.is_none() {
+            ctx.layers[0].node.clone()
+        } else {
+            ctx.emit_compose(seq.canvas)
+        };
     if !ctx.audio.is_empty() {
         picture = ctx.emit_audio_mix(picture);
+    }
+    if !ctx.subtitles.is_empty() {
+        picture = ctx.emit_subtitle_burn(picture);
     }
     if !project.semantic.is_empty() {
         picture = ctx.emit_semantic_privacy(&project.semantic, picture);

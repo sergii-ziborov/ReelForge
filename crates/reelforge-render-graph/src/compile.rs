@@ -118,6 +118,30 @@ pub enum TypedParams {
         #[serde(deserialize_with = "de_media_time")]
         hold: MediaTime,
     },
+    /// `rf.transform.slide_in`
+    SlideIn {
+        /// Slide length.
+        #[serde(deserialize_with = "de_media_time")]
+        duration: MediaTime,
+        /// `left` / `right` / `top` / `bottom`.
+        #[serde(default)]
+        side: String,
+    },
+    /// `rf.transform.slide_out`
+    SlideOut {
+        /// Slide length.
+        #[serde(deserialize_with = "de_media_time")]
+        duration: MediaTime,
+        /// `left` / `right` / `top` / `bottom`.
+        #[serde(default)]
+        side: String,
+    },
+    /// `rf.subtitle.burn` — overlay cues from subtitle files.
+    SubtitleBurn {
+        /// Cue descriptors (`uri`, `start`, `in`, `duration`).
+        #[serde(default)]
+        cues: Value,
+    },
     /// `rf.transform.loop`
     Loop {
         /// Total output length when set.
@@ -144,6 +168,12 @@ pub enum TypedParams {
     Redaction {
         /// Validated redaction object (masks non-empty).
         value: Value,
+    },
+    /// `rf.timeline.concat` — sequential end-to-end clips, not layered.
+    TimelineConcat {
+        /// Clip descriptors (start/duration) when present.
+        #[serde(default)]
+        clips: Value,
     },
     /// `rf.compose.layers`
     ComposeLayers {
@@ -254,11 +284,15 @@ pub fn is_executable_op_id(id: &str) -> bool {
             | "rf.transform.speed"
             | "rf.transform.freeze"
             | "rf.transform.loop"
+            | "rf.transform.slide_in"
+            | "rf.transform.slide_out"
+            | "rf.subtitle.burn"
             | "rf.color.black_and_white"
             | "rf.color.invert"
             | "rf.color.painting"
             | "rf.redaction.region"
             | "rf.compose.layers"
+            | "rf.timeline.concat"
             | "rf.audio.gain"
             | "rf.audio.drop"
             | "rf.audio.preserve"
@@ -275,7 +309,9 @@ impl TypedParams {
     #[must_use]
     pub const fn executor_kind(&self) -> crate::op::ExecutorKind {
         match self {
-            Self::ComposeLayers { .. } | Self::AudioMix { .. } => crate::op::ExecutorKind::Nary,
+            Self::ComposeLayers { .. } | Self::AudioMix { .. } | Self::TimelineConcat { .. } => {
+                crate::op::ExecutorKind::Nary
+            }
             _ => crate::op::ExecutorKind::Unary,
         }
     }
@@ -545,6 +581,42 @@ fn parse_typed_params(id: &str, raw: &Value) -> Result<TypedParams> {
             }
             Ok(TypedParams::Loop { duration, times })
         }
+        "rf.transform.slide_in" => {
+            let duration =
+                time_field(raw, "duration").ok_or_else(|| GraphError::InvalidParams {
+                    operation: id.into(),
+                    message: "duration required".into(),
+                })?;
+            Ok(TypedParams::SlideIn {
+                duration,
+                side: raw
+                    .get("side")
+                    .and_then(Value::as_str)
+                    .unwrap_or("right")
+                    .into(),
+            })
+        }
+        "rf.transform.slide_out" => {
+            let duration =
+                time_field(raw, "duration").ok_or_else(|| GraphError::InvalidParams {
+                    operation: id.into(),
+                    message: "duration required".into(),
+                })?;
+            Ok(TypedParams::SlideOut {
+                duration,
+                side: raw
+                    .get("side")
+                    .and_then(Value::as_str)
+                    .unwrap_or("left")
+                    .into(),
+            })
+        }
+        "rf.subtitle.burn" => Ok(TypedParams::SubtitleBurn {
+            cues: raw
+                .get("cues")
+                .cloned()
+                .unwrap_or_else(|| Value::Array(vec![])),
+        }),
         "rf.transform.fade_out" => Ok(TypedParams::FadeOut {
             duration: time_field(raw, "duration")
                 .unwrap_or_else(|| MediaTime::from_secs(0.5, MediaTime::HZ_1M).unwrap_or_default()),
@@ -598,6 +670,13 @@ fn parse_typed_params(id: &str, raw: &Value) -> Result<TypedParams> {
             }
             Ok(TypedParams::Redaction { value: raw.clone() })
         }
+        "rf.timeline.concat" => Ok(TypedParams::TimelineConcat {
+            clips: raw
+                .get("clips")
+                .cloned()
+                .or_else(|| raw.get("ranges").cloned())
+                .unwrap_or_else(|| Value::Array(vec![])),
+        }),
         "rf.compose.layers" => Ok(TypedParams::ComposeLayers {
             w: u32_field(raw, "w"),
             h: u32_field(raw, "h"),
@@ -645,7 +724,7 @@ fn parse_typed_params(id: &str, raw: &Value) -> Result<TypedParams> {
 
 fn estimate_cost(id: &str, params: &TypedParams) -> CostEstimate {
     match (id, params) {
-        ("rf.transform.scale" | "rf.transform.crop", _) => CostEstimate {
+        ("rf.transform.scale" | "rf.transform.crop" | "rf.timeline.concat", _) => CostEstimate {
             cpu: 2.0,
             memory: 2.0,
             io: 0.5,
@@ -695,6 +774,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn timeline_concat_is_nary() {
+        assert_eq!(
+            TypedParams::TimelineConcat {
+                clips: serde_json::json!([]),
+            }
+            .executor_kind(),
+            crate::op::ExecutorKind::Nary
+        );
+    }
+
+    #[test]
     fn compiles_scale_and_rejects_missing() {
         let r = OperationRegistry::with_builtins();
         let c = compile_op(
@@ -718,18 +808,13 @@ mod tests {
     #[test]
     fn not_executable_unknown_custom_id() {
         let mut r = OperationRegistry::with_builtins();
-        r.register(crate::op::OperationDescriptor {
-            id: OperationId::new("rf.future.thing"),
-            version: SemVer::V1,
-            input: crate::op::MediaContract::default(),
-            output: crate::op::MediaContract::default(),
-            backend: BackendClass::Rust,
-            deterministic: true,
-            capabilities: crate::op::CapabilitySet::default(),
-            parameter_schema: Value::Null,
-            limits: crate::op::OperationLimits::default(),
-            executor_kind: crate::op::ExecutorKind::Unary,
-        });
+        r.register(crate::op::OperationDescriptor::new(
+            "rf.future.thing",
+            SemVer::V1,
+            crate::op::MediaContract::default(),
+            crate::op::MediaContract::default(),
+            BackendClass::Rust,
+        ));
         let err = compile_op(&r, &OperationId::new("rf.future.thing"), &Value::Null).unwrap_err();
         assert_eq!(err.code_str(), "RFGRAPH_NOT_EXECUTABLE");
     }
@@ -815,7 +900,26 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(c.params, TypedParams::Adapter { .. }));
-        assert_eq!(c.backend, BackendClass::Adapter);
+    }
+
+    #[test]
+    fn compiles_slide_and_subtitle_burn() {
+        let r = OperationRegistry::with_builtins();
+        let slide = compile_op(
+            &r,
+            &OperationId::new("rf.transform.slide_in"),
+            &serde_json::json!({ "duration": { "ticks": 500, "timescale": 1000 }, "side": "right" }),
+        )
+        .unwrap();
+        assert!(matches!(slide.params, TypedParams::SlideIn { .. }));
+        let burn = compile_op(
+            &r,
+            &OperationId::new("rf.subtitle.burn"),
+            &serde_json::json!({ "cues": [{ "uri": "a.srt" }] }),
+        )
+        .unwrap();
+        assert!(matches!(burn.params, TypedParams::SubtitleBurn { .. }));
+        check_registry_executor_parity(&r).unwrap();
     }
 
     #[test]

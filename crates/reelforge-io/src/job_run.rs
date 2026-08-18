@@ -2,10 +2,11 @@
 
 use crate::control::{WriteControl, WriteProgress, WriteStage};
 use crate::error::{IoError, Result};
-use crate::graph_run::{GraphRunOptions, run_render_graph_with_manifest};
+use crate::graph_run::{GraphRunOptions, plan_stage_fingerprints, run_render_graph_with_manifest};
 use crate::job::{JobState, RenderJob};
 use crate::job_store::JobStore;
 use crate::stage_cache::StageCache;
+use crate::stage_resume::{StageCommit, restore_validated_prefix};
 use reelforge_render_graph::{ArtifactManifest, ExecutionPlan, RenderGraph, schedule_graph};
 use std::path::Path;
 
@@ -39,8 +40,9 @@ pub fn submit_render_job(
 /// Cancel (`IoError::Cancelled`) persists [`JobState::Paused`]. Other errors
 /// persist [`JobState::Failed`]. Success persists [`JobState::Done`].
 ///
-/// In-process stages still re-evaluate on resume; a matching full-run
-/// [`StageCache`] hit skips encode. Capture owns retry / queue policy.
+/// Completed stages with a valid on-disk artifact are skipped. In-process
+/// stages without a file still re-run. A matching full-run [`StageCache`]
+/// hit skips encode. Capture owns retry / queue policy.
 ///
 /// # Errors
 ///
@@ -64,6 +66,7 @@ pub fn run_render_job(
     if job.run_fingerprint.as_deref() != Some(fp.as_str()) {
         job.checkpoint.next_stage = 0;
         job.checkpoint.stage_fingerprints.clear();
+        job.checkpoint.stage_artifacts.clear();
     }
     job.run_fingerprint = Some(fp);
     job.checkpoint.total_stages = u32::try_from(plan.stages.len()).unwrap_or(u32::MAX);
@@ -72,9 +75,37 @@ pub fn run_render_job(
     job.touch();
     store.save(job)?;
 
+    let expected = plan_stage_fingerprints(graph, &plan, &options.registry)?;
+    let resume = restore_validated_prefix(&job.checkpoint.stage_artifacts, &expected)?;
+    job.checkpoint.next_stage = resume.start_stage;
+
+    let mut options = options.clone();
+    options.persist_stage_dir = Some(store.stages_dir(&job.id));
+    let store_cb = store.clone();
+    let job_id = job.id.clone();
+    options.on_stage_committed = Some(std::sync::Arc::new(move |commit: StageCommit| {
+        if let Ok(mut live) = store_cb.load(&job_id) {
+            live.checkpoint.next_stage = commit.index.saturating_add(1);
+            live.checkpoint
+                .stage_fingerprints
+                .truncate(commit.index as usize);
+            live.checkpoint.stage_fingerprints.push(commit.fingerprint);
+            live.checkpoint
+                .stage_artifacts
+                .retain(|a| a.stage_index != commit.index);
+            live.checkpoint.stage_artifacts.extend(commit.artifacts);
+            live.touch();
+            let _ = store_cb.save(&live);
+        }
+    }));
+    options = options.with_stage_resume(resume);
+
     let control = checkpointing_control(store, job, control);
-    match run_render_graph_with_manifest(graph, &control, options) {
+    match run_render_graph_with_manifest(graph, &control, &options) {
         Ok(manifest) => {
+            if let Ok(live) = store.load(&job.id) {
+                job.checkpoint = live.checkpoint;
+            }
             job.state = JobState::Done;
             job.checkpoint.next_stage = job.checkpoint.total_stages;
             job.output_uri = first_output_uri(graph).or(job.output_uri.clone());
@@ -84,6 +115,9 @@ pub fn run_render_job(
             Ok(manifest)
         }
         Err(e) => {
+            if let Ok(live) = store.load(&job.id) {
+                job.checkpoint = live.checkpoint;
+            }
             if matches!(e, IoError::Cancelled) {
                 job.state = JobState::Paused;
             } else {
@@ -242,5 +276,11 @@ mod tests {
         assert!(!manifest.outputs.is_empty());
         assert_eq!(store.load(&job.id).unwrap().state, JobState::Done);
         let _ = JobId::new("x");
+    }
+
+    #[test]
+    fn resume_plan_stops_at_missing_artifact() {
+        let rec = crate::StageArtifactRecord::new(0, "fp", "n", "no-such-stage.mp4");
+        assert_eq!(crate::first_invalid_stage(&[rec], 4), 0);
     }
 }

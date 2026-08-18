@@ -9,6 +9,7 @@ mod adapter_registry;
 mod audio_file;
 mod av_sync;
 mod control;
+mod e2e_bench;
 mod encode_native;
 mod error;
 mod exec;
@@ -30,9 +31,11 @@ mod pipeline;
 mod pool;
 mod preview;
 mod preview_contract;
+mod preview_plan;
 mod realtime;
 mod render_plan;
 mod stage_cache;
+mod stage_resume;
 mod tracks_json;
 mod video_file;
 mod waveform;
@@ -45,6 +48,10 @@ pub use adapter_registry::{AdapterRegistry, SightloomJsonExecutor};
 pub use audio_file::{AudioFileClip, layout_for_channels, open_audio};
 pub use av_sync::{av_duration_drift, av_streams_aligned, max_av_drift_secs};
 pub use control::{CancelToken, ProgressCallback, WriteControl, WriteProgress, WriteStage};
+pub use e2e_bench::{
+    E2eCase, E2eCodec, E2eKind, E2eReport, format_report, full_cases, peak_rss_bytes, percentile,
+    run_e2e_case, smoke_cases, standard_cases,
+};
 pub use encode_native::{encode_sampled_rawvideo, is_native_raw_format};
 pub use error::{IoError, Result};
 pub use ffmpeg::{
@@ -61,12 +68,12 @@ pub use graph_run::{
     GraphBundle, GraphEncodeHints, GraphRunOptions, explain_render_graph,
     explain_render_graph_with, is_executable_op, materialize_execution_plan,
     materialize_execution_plan_with_adapters, materialize_graph, materialize_graph_bundle,
-    materialize_graph_with_seeds, node_backend, run_execution_plan, run_execution_plan_with,
-    run_execution_plan_with_manifest, run_render_graph, run_render_graph_with,
-    run_render_graph_with_manifest,
+    materialize_graph_with_seeds, node_backend, plan_stage_fingerprints, run_execution_plan,
+    run_execution_plan_with, run_execution_plan_with_manifest, run_render_graph,
+    run_render_graph_with, run_render_graph_with_manifest,
 };
 pub use image_clip::ImageClip;
-pub use job::{JobCheckpoint, JobId, JobState, RENDER_JOB_VERSION, RenderJob};
+pub use job::{JobCheckpoint, JobId, JobState, RENDER_JOB_VERSION, RenderJob, StageArtifactRecord};
 pub use job_run::{resume_render_job, run_render_job, submit_render_job};
 pub use job_store::JobStore;
 pub use manifest_seal::{fingerprint_file, seal_manifest_on_disk};
@@ -75,7 +82,10 @@ pub use mask_bridge::{
     mask_timeline_to_track_set, privacy_style_from_redaction, region_redaction_from_value,
     track_timelines_to_track_set,
 };
-pub use mask_package::{MASK_PACKAGE_VERSION, MaskBlobEntry, MaskPackage, MaskPackageManifest};
+pub use mask_package::{
+    MASK_PACKAGE_MAX_BLOBS, MASK_PACKAGE_VERSION, MaskBlobEntry, MaskPackage, MaskPackageLimits,
+    MaskPackageManifest,
+};
 pub use options::{OpenAudioOptions, OpenVideoOptions, WriteGifOptions, WriteVideoOptions};
 pub use package_host::SightloomPackageHost;
 pub use pool::RgbFramePool;
@@ -83,6 +93,7 @@ pub use preview::{ProxyOptions, proxy_size, thumbnail_png_bytes, write_proxy, wr
 pub use preview_contract::{
     PreviewFrame, PreviewQuality, PreviewRequest, PreviewSpec, preview_clip, preview_graph,
 };
+pub use preview_plan::{PreviewPlan, plan_preview, slice_preview_graph};
 pub use realtime::{
     HwEncoderSupport, RealtimeExport, detect_hw_encoders, nvenc_available, realtime_write_options,
     run_filtergraph_encode,
@@ -94,6 +105,10 @@ pub use render_plan::{
     run_render_plan, run_render_plan_with, validate_remainder,
 };
 pub use stage_cache::StageCache;
+pub use stage_resume::{
+    StageCommit, StageResumePlan, StageRunHooks, artifact_is_valid, first_invalid_stage,
+    persist_stage_video, restore_validated_prefix,
+};
 pub use tracks_json::{
     SampleJson, TRACKS_JSON_VERSION, TrackJson, TracksDocument, load_track_set, parse_track_set,
     track_set_from_value,

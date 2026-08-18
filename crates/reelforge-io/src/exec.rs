@@ -8,16 +8,19 @@ use crate::gpu::{GpuContext, GpuRequest, execute_gpu};
 use crate::graph_run::{GraphEncodeHints, NodeMedia};
 use crate::mask_bridge::{apply_region_redaction, region_redaction_from_value};
 use reelforge_compose::{
-    CompositeLayer, MixTrack, composite_video, composite_video_with_background, mix_audio,
+    CompositeLayer, MixTrack, composite_video, composite_video_with_background, concatenate_audio,
+    concatenate_video, mix_audio,
 };
 use reelforge_core::{
-    AudioEffect, Position, Rgb8, Size, Time, VideoClip, VideoEffect, subclip_audio, subclip_video,
+    AudioEffect, MediaTime, Position, Rgb8, Size, Time, VideoClip, VideoEffect, subclip_audio,
+    subclip_video,
 };
 use reelforge_fx::{
     BlackAndWhite, Crop, EvenSize, FadeIn, FadeOut, Freeze, InvertColors, Loop, MirrorX, MirrorY,
-    Painting, Resize, Rotate, Speed, VolumeGain,
+    Painting, Resize, Rotate, SlideIn, SlideOut, SlideSide, Speed, VolumeGain,
 };
 use reelforge_render_graph::{CompiledOp, ExecutorKind, TypedParams};
+use reelforge_text::{BurnInOptions, burn_in_layers, parse_subtitles_path};
 use std::sync::Arc;
 
 /// Run a compiled op on gathered inputs.
@@ -67,11 +70,41 @@ fn execute_nary(compiled: &CompiledOp, inputs: Vec<NodeMedia>) -> Result<NodeMed
             })
         }
         TypedParams::AudioMix { tracks } => apply_audio_mix(inputs, tracks),
+        TypedParams::TimelineConcat { .. } => apply_timeline_concat(inputs),
         other => Err(IoError::message(format!(
             "{} is not an n-ary executor ({other:?})",
             compiled.id
         ))),
     }
+}
+
+fn apply_timeline_concat(inputs: Vec<NodeMedia>) -> Result<NodeMedia> {
+    if inputs.len() < 2 {
+        return Err(IoError::message(
+            "rf.timeline.concat needs at least two inputs",
+        ));
+    }
+    let mut videos = Vec::with_capacity(inputs.len());
+    let mut audios = Vec::with_capacity(inputs.len());
+    let mut all_audio = true;
+    for media in inputs {
+        videos.push(media.video);
+        match media.audio {
+            Some(a) => audios.push(a),
+            None => all_audio = false,
+        }
+    }
+    let video = concatenate_video(videos).map_err(|e| IoError::message(e.to_string()))?;
+    let audio = if all_audio {
+        Some(concatenate_audio(audios).map_err(|e| IoError::message(e.to_string()))?)
+    } else {
+        None
+    };
+    Ok(NodeMedia {
+        video,
+        audio,
+        masks: None,
+    })
 }
 
 fn execute_unary(
@@ -192,8 +225,8 @@ fn apply_audio_mix(inputs: Vec<NodeMedia>, track_value: &serde_json::Value) -> R
                     track = track.with_gain(g as f32);
                 }
             }
-            if let Some(s) = tp.get("start").and_then(serde_json::Value::as_f64) {
-                track = track.with_start(Time::from_secs(s));
+            if let Some(s) = tp.get("start").and_then(json_as_time) {
+                track = track.with_start(s);
             }
         }
         tracks.push(track);
@@ -247,8 +280,8 @@ fn apply_compose_layers(
                     layer = layer.with_opacity(op as f32);
                 }
             }
-            if let Some(start) = lp.get("start").and_then(serde_json::Value::as_f64) {
-                layer = layer.with_start(Time::from_secs(start));
+            if let Some(start) = lp.get("start").and_then(json_as_time) {
+                layer = layer.with_start(start);
             }
             if let Some(idx) = lp.get("layer_index").and_then(serde_json::Value::as_i64) {
                 #[allow(clippy::cast_possible_truncation)]
@@ -298,6 +331,20 @@ fn apply_typed_video(
         TypedParams::FadeOut { duration } => FadeOut::new(duration.to_duration())
             .apply(clip)
             .map_err(IoError::from),
+        TypedParams::SlideIn { duration, side } => {
+            SlideIn::new(duration.to_duration(), parse_slide_side(side))
+                .apply(clip)
+                .map_err(IoError::from)
+        }
+        TypedParams::SlideOut { duration, side } => {
+            SlideOut::new(duration.to_duration(), parse_slide_side(side))
+                .apply(clip)
+                .map_err(IoError::from)
+        }
+        TypedParams::SubtitleBurn { cues } => apply_subtitle_burn(clip, cues),
+        TypedParams::TimelineConcat { .. } => Err(IoError::message(
+            "rf.timeline.concat is n-ary — use concatenate_video on gathered inputs",
+        )),
         TypedParams::Adapter { .. } | TypedParams::Gpu { .. } => Ok(clip),
         TypedParams::Speed { factor } => {
             VideoEffect::apply(&Speed::new(*factor), clip).map_err(IoError::from)
@@ -424,4 +471,120 @@ fn apply_rotate_typed(
         }
     };
     rot.apply(clip).map_err(IoError::from)
+}
+
+fn json_as_time(v: &serde_json::Value) -> Option<Time> {
+    if let Some(s) = v.as_f64() {
+        return Some(Time::from_secs(s));
+    }
+    let ticks = v.get("ticks")?.as_i64()?;
+    let timescale = u32::try_from(v.get("timescale")?.as_u64()?).ok()?;
+    MediaTime::new(ticks, timescale)
+        .ok()
+        .map(MediaTime::to_time)
+}
+
+fn parse_slide_side(side: &str) -> SlideSide {
+    match side {
+        "left" => SlideSide::Left,
+        "top" => SlideSide::Top,
+        "bottom" => SlideSide::Bottom,
+        _ => SlideSide::Right,
+    }
+}
+
+fn apply_subtitle_burn(
+    clip: Arc<dyn VideoClip>,
+    cues: &serde_json::Value,
+) -> Result<Arc<dyn VideoClip>> {
+    let Some(arr) = cues.as_array() else {
+        return Err(IoError::message("rf.subtitle.burn cues must be an array"));
+    };
+    if arr.is_empty() {
+        return Ok(clip);
+    }
+    let size = clip.size();
+    let mut layers = vec![CompositeLayer::new(Arc::clone(&clip)).with_layer_index(0)];
+    for cue in arr {
+        let uri = cue
+            .get("uri")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| IoError::message("rf.subtitle.burn cue needs uri"))?;
+        let record_start = cue
+            .get("start")
+            .and_then(json_as_time)
+            .unwrap_or(Time::ZERO);
+        let src_in = cue.get("in").and_then(json_as_time).unwrap_or(Time::ZERO);
+        let src_end = cue
+            .get("duration")
+            .and_then(json_as_time)
+            .map(|d| Time::from_secs(src_in.as_secs() + d.as_secs()));
+        let parsed = parse_subtitles_path(uri).map_err(|e| IoError::message(e.to_string()))?;
+        let mut shifted = Vec::new();
+        for mut item in parsed {
+            if item.end.as_secs() <= src_in.as_secs() {
+                continue;
+            }
+            if let Some(end) = src_end
+                && item.start.as_secs() >= end.as_secs()
+            {
+                continue;
+            }
+            let delta = record_start.as_secs() - src_in.as_secs();
+            item.start = Time::from_secs(item.start.as_secs() + delta);
+            item.end = Time::from_secs(item.end.as_secs() + delta);
+            shifted.push(item);
+        }
+        if shifted.is_empty() {
+            continue;
+        }
+        let burned = burn_in_layers(&shifted, &BurnInOptions::default())
+            .map_err(|e| IoError::message(e.to_string()))?;
+        layers.extend(burned);
+    }
+    if layers.len() == 1 {
+        return Ok(clip);
+    }
+    composite_video(size, layers).map_err(|e| IoError::message(e.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reelforge_core::{ColorClip, Duration, Rgb8, Size, Time, VideoClip};
+
+    #[test]
+    fn timeline_concat_plays_end_to_end() {
+        assert_eq!(
+            TypedParams::TimelineConcat {
+                clips: serde_json::json!([]),
+            }
+            .executor_kind(),
+            ExecutorKind::Nary
+        );
+        let white: Arc<dyn VideoClip> = Arc::new(ColorClip::new(
+            Size::new(8, 8),
+            Rgb8::WHITE,
+            Duration::from_secs(1.0),
+        ));
+        let black: Arc<dyn VideoClip> = Arc::new(ColorClip::new(
+            Size::new(8, 8),
+            Rgb8::BLACK,
+            Duration::from_secs(1.0),
+        ));
+        let out = apply_timeline_concat(vec![
+            NodeMedia::new(white, None),
+            NodeMedia::new(black, None),
+        ])
+        .unwrap();
+        assert!((out.video.duration().as_secs() - 2.0).abs() < 1e-6);
+        assert_eq!(
+            out.video.frame_at(Time::from_secs(0.2)).unwrap().data()[0],
+            255
+        );
+        assert_eq!(
+            out.video.frame_at(Time::from_secs(1.2)).unwrap().data()[0],
+            0
+        );
+    }
 }

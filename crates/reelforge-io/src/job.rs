@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Schema version for persisted [`RenderJob`] files.
-pub const RENDER_JOB_VERSION: u32 = 1;
+pub const RENDER_JOB_VERSION: u32 = 2;
 
 /// Stable job handle.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -62,6 +62,49 @@ impl JobState {
     }
 }
 
+/// One persisted stage output (file on disk + fingerprints).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct StageArtifactRecord {
+    /// [`ExecutionPlan`] stage index that produced this file.
+    pub stage_index: u32,
+    /// Strong stage fingerprint (inputs + ops + backend + host).
+    pub fingerprint: String,
+    /// Graph node id this file stands in for.
+    pub node_id: String,
+    /// Absolute or store-relative path.
+    pub uri: String,
+    /// SHA-style content hash of `uri` after write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_fingerprint: Option<String>,
+}
+
+impl StageArtifactRecord {
+    /// Build a record.
+    #[must_use]
+    pub fn new(
+        stage_index: u32,
+        fingerprint: impl Into<String>,
+        node_id: impl Into<String>,
+        uri: impl Into<String>,
+    ) -> Self {
+        Self {
+            stage_index,
+            fingerprint: fingerprint.into(),
+            node_id: node_id.into(),
+            uri: uri.into(),
+            file_fingerprint: None,
+        }
+    }
+
+    /// Attach a file content hash.
+    #[must_use]
+    pub fn with_file_fingerprint(mut self, hash: impl Into<String>) -> Self {
+        self.file_fingerprint = Some(hash.into());
+        self
+    }
+}
+
 /// Progress snapshot after the last completed plan stage.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct JobCheckpoint {
@@ -72,6 +115,9 @@ pub struct JobCheckpoint {
     /// Stage fingerprints recorded so far (diagnostics / cache keys).
     #[serde(default)]
     pub stage_fingerprints: Vec<String>,
+    /// Validated on-disk products for completed stages.
+    #[serde(default)]
+    pub stage_artifacts: Vec<StageArtifactRecord>,
 }
 
 /// Durable record of one graph render.

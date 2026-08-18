@@ -29,6 +29,18 @@ impl core::fmt::Display for OperationId {
     }
 }
 
+impl From<&str> for OperationId {
+    fn from(id: &str) -> Self {
+        Self::new(id)
+    }
+}
+
+impl From<String> for OperationId {
+    fn from(id: String) -> Self {
+        Self::new(id)
+    }
+}
+
 /// Semantic version for an operation schema.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SemVer {
@@ -91,7 +103,12 @@ pub enum BackendClass {
 }
 
 /// High-level media kind contract.
+///
+/// `#[non_exhaustive]` so 0.2.x can add optional streams without another `SemVer` break.
+/// Construct with [`MediaContract::video_av`], [`MediaContract::video_only`], or
+/// [`MediaContract::audio_only`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[non_exhaustive]
 pub struct MediaContract {
     /// Accepts video frames.
     #[serde(default)]
@@ -157,18 +174,52 @@ impl MediaContract {
             ..self.clone()
         }
     }
+
+    /// Attach a free-form note.
+    #[must_use]
+    pub fn with_notes(mut self, notes: impl Into<String>) -> Self {
+        self.notes = Some(notes.into());
+        self
+    }
+
+    /// Mark the contract as accepting mask timelines.
+    #[must_use]
+    pub fn with_masks(mut self) -> Self {
+        self.masks = true;
+        self
+    }
 }
 
 /// Capability flags for feature detection.
+///
+/// Construct with [`CapabilitySet::from_tags`] from outside this crate.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[non_exhaustive]
 pub struct CapabilitySet {
     /// Tags such as `realtime`, `privacy`, `preview`.
     #[serde(default)]
     pub tags: Vec<String>,
 }
 
+impl CapabilitySet {
+    /// Tags in registration order.
+    #[must_use]
+    pub fn from_tags<S>(tags: impl IntoIterator<Item = S>) -> Self
+    where
+        S: Into<String>,
+    {
+        Self {
+            tags: tags.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
 /// Soft resource limits for an operation.
+///
+/// Extra limit fields may appear in 0.2.x; construct with [`Default`] or
+/// [`OperationLimits::new`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[non_exhaustive]
 pub struct OperationLimits {
     /// Max recommended resolution width.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -181,8 +232,22 @@ pub struct OperationLimits {
     pub notes: Option<String>,
 }
 
+impl OperationLimits {
+    /// Empty limits.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
 /// Full operation descriptor for registry / MCP.
+///
+/// **0.2 contract:** this type is `#[non_exhaustive]`. Downstream crates
+/// (Intelligence, Capture, MCP hosts) must construct it with
+/// [`OperationDescriptor::new`] — not a struct literal. JSON still accepts
+/// omitted `executor_kind` (`#[serde(default)]` → [`ExecutorKind::Unary`]).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct OperationDescriptor {
     /// Stable id.
     pub id: OperationId,
@@ -210,6 +275,97 @@ pub struct OperationDescriptor {
     pub executor_kind: ExecutorKind,
 }
 
+impl OperationDescriptor {
+    /// Registerable descriptor. Extra fields default to deterministic, unary,
+    /// empty capabilities / schema / limits.
+    ///
+    /// This is the stable constructor for 0.2.x. New optional fields will land
+    /// here with defaults — do not write struct literals in other crates.
+    #[must_use]
+    pub fn new(
+        id: impl Into<String>,
+        version: SemVer,
+        input: MediaContract,
+        output: MediaContract,
+        backend: BackendClass,
+    ) -> Self {
+        Self {
+            id: OperationId::new(id),
+            version,
+            input,
+            output,
+            backend,
+            deterministic: true,
+            capabilities: CapabilitySet::default(),
+            parameter_schema: Value::Null,
+            limits: OperationLimits::default(),
+            executor_kind: ExecutorKind::Unary,
+        }
+    }
+
+    /// Unary shortcut (`new` already defaults to unary).
+    #[must_use]
+    pub fn unary(
+        id: impl Into<String>,
+        version: SemVer,
+        input: MediaContract,
+        output: MediaContract,
+        backend: BackendClass,
+    ) -> Self {
+        Self::new(id, version, input, output, backend)
+    }
+
+    /// N-ary shortcut (`compose`, `mix`).
+    #[must_use]
+    pub fn nary(
+        id: impl Into<String>,
+        version: SemVer,
+        input: MediaContract,
+        output: MediaContract,
+        backend: BackendClass,
+    ) -> Self {
+        Self::new(id, version, input, output, backend).with_executor_kind(ExecutorKind::Nary)
+    }
+
+    /// Override bit-reproducibility (encoders are typically `false`).
+    #[must_use]
+    pub fn with_deterministic(mut self, deterministic: bool) -> Self {
+        self.deterministic = deterministic;
+        self
+    }
+
+    /// Replace capability tags.
+    #[must_use]
+    pub fn with_capabilities<S>(mut self, tags: impl IntoIterator<Item = S>) -> Self
+    where
+        S: Into<String>,
+    {
+        self.capabilities = CapabilitySet::from_tags(tags);
+        self
+    }
+
+    /// JSON Schema fragment for parameters.
+    #[must_use]
+    pub fn with_parameter_schema(mut self, schema: Value) -> Self {
+        self.parameter_schema = schema;
+        self
+    }
+
+    /// Soft resource limits.
+    #[must_use]
+    pub fn with_limits(mut self, limits: OperationLimits) -> Self {
+        self.limits = limits;
+        self
+    }
+
+    /// Input arity for the bound executor.
+    #[must_use]
+    pub fn with_executor_kind(mut self, kind: ExecutorKind) -> Self {
+        self.executor_kind = kind;
+        self
+    }
+}
+
 /// In-memory registry of typed operations.
 #[derive(Debug, Clone, Default)]
 pub struct OperationRegistry {
@@ -228,34 +384,31 @@ impl OperationRegistry {
     #[allow(clippy::too_many_lines)]
     pub fn with_builtins() -> Self {
         let mut r = Self::new();
-        let video_av = MediaContract {
-            video: true,
-            audio: true,
-            masks: false,
-            notes: None,
-        };
-        let video_only = MediaContract {
-            video: true,
-            audio: false,
-            masks: false,
-            notes: None,
+        let video_av = MediaContract::video_av();
+        let video_only = MediaContract::video_only();
+        let mk = |id: &str,
+                  backend: BackendClass,
+                  input: MediaContract,
+                  output: MediaContract,
+                  schema: Value,
+                  tags: &[&str],
+                  kind: ExecutorKind| {
+            OperationDescriptor::new(id, SemVer::V1, input, output, backend)
+                .with_parameter_schema(schema)
+                .with_capabilities(tags.iter().copied())
+                .with_executor_kind(kind)
         };
 
         let mut transform = |id: &str, backend: BackendClass, schema: Value, tags: &[&str]| {
-            r.register(OperationDescriptor {
-                id: OperationId::new(id),
-                version: SemVer::V1,
-                input: video_av.clone(),
-                output: video_av.clone(),
+            r.register(mk(
+                id,
                 backend,
-                deterministic: true,
-                capabilities: CapabilitySet {
-                    tags: tags.iter().map(|t| (*t).into()).collect(),
-                },
-                parameter_schema: schema,
-                limits: OperationLimits::default(),
-                executor_kind: ExecutorKind::Unary,
-            });
+                video_av.clone(),
+                video_av.clone(),
+                schema,
+                tags,
+                ExecutorKind::Unary,
+            ));
         };
 
         transform(
@@ -377,76 +530,72 @@ impl OperationRegistry {
             }),
             &["edit", "time"],
         );
+        transform(
+            "rf.transform.slide_in",
+            BackendClass::Rust,
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "duration": {},
+                    "side": { "type": "string" }
+                },
+                "required": ["duration"]
+            }),
+            &["edit", "transition"],
+        );
+        transform(
+            "rf.transform.slide_out",
+            BackendClass::Rust,
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "duration": {},
+                    "side": { "type": "string" }
+                },
+                "required": ["duration"]
+            }),
+            &["edit", "transition"],
+        );
 
-        r.register(OperationDescriptor {
-            id: OperationId::new("rf.color.black_and_white"),
-            version: SemVer::V1,
-            input: video_only.clone(),
-            output: video_only.clone(),
-            backend: BackendClass::Rust,
-            deterministic: true,
-            capabilities: CapabilitySet {
-                tags: vec!["color".into()],
-            },
-            parameter_schema: serde_json::json!({ "type": "object" }),
-            limits: OperationLimits::default(),
-            executor_kind: ExecutorKind::Unary,
-        });
-        r.register(OperationDescriptor {
-            id: OperationId::new("rf.color.invert"),
-            version: SemVer::V1,
-            input: video_only.clone(),
-            output: video_only.clone(),
-            backend: BackendClass::Rust,
-            deterministic: true,
-            capabilities: CapabilitySet {
-                tags: vec!["color".into()],
-            },
-            parameter_schema: serde_json::json!({ "type": "object" }),
-            limits: OperationLimits::default(),
-            executor_kind: ExecutorKind::Unary,
-        });
-        r.register(OperationDescriptor {
-            id: OperationId::new("rf.color.painting"),
-            version: SemVer::V1,
-            input: video_only.clone(),
-            output: video_only.clone(),
-            backend: BackendClass::Rust,
-            deterministic: true,
-            capabilities: CapabilitySet {
-                tags: vec!["color".into(), "stylize".into()],
-            },
-            parameter_schema: serde_json::json!({
+        r.register(mk(
+            "rf.color.black_and_white",
+            BackendClass::Rust,
+            video_only.clone(),
+            video_only.clone(),
+            serde_json::json!({ "type": "object" }),
+            &["color"],
+            ExecutorKind::Unary,
+        ));
+        r.register(mk(
+            "rf.color.invert",
+            BackendClass::Rust,
+            video_only.clone(),
+            video_only.clone(),
+            serde_json::json!({ "type": "object" }),
+            &["color"],
+            ExecutorKind::Unary,
+        ));
+        r.register(mk(
+            "rf.color.painting",
+            BackendClass::Rust,
+            video_only.clone(),
+            video_only.clone(),
+            serde_json::json!({
                 "type": "object",
                 "properties": {
                     "saturation": { "type": "number" },
                     "black": { "type": "number" }
                 }
             }),
-            limits: OperationLimits::default(),
-            executor_kind: ExecutorKind::Unary,
-        });
-        r.register(OperationDescriptor {
-            id: OperationId::new("rf.compose.layers"),
-            version: SemVer::V1,
-            input: MediaContract {
-                video: true,
-                audio: false,
-                masks: false,
-                notes: Some("multi-input composite".into()),
-            },
-            output: MediaContract {
-                video: true,
-                audio: false,
-                masks: false,
-                notes: None,
-            },
-            backend: BackendClass::Rust,
-            deterministic: true,
-            capabilities: CapabilitySet {
-                tags: vec!["compose".into()],
-            },
-            parameter_schema: serde_json::json!({
+            &["color", "stylize"],
+            ExecutorKind::Unary,
+        ));
+        r.register(mk(
+            "rf.compose.layers",
+            BackendClass::Rust,
+            MediaContract::video_only().with_notes("multi-input composite"),
+            MediaContract::video_only(),
+            serde_json::json!({
                 "type": "object",
                 "properties": {
                     "w": { "type": "integer" },
@@ -454,80 +603,60 @@ impl OperationRegistry {
                     "layers": { "type": "array" }
                 }
             }),
-            limits: OperationLimits::default(),
-            executor_kind: ExecutorKind::Nary,
-        });
-        r.register(OperationDescriptor {
-            id: OperationId::new("rf.audio.gain"),
-            version: SemVer::V1,
-            input: MediaContract {
-                video: false,
-                audio: true,
-                masks: false,
-                notes: None,
-            },
-            output: MediaContract {
-                video: false,
-                audio: true,
-                masks: false,
-                notes: None,
-            },
-            backend: BackendClass::Rust,
-            deterministic: true,
-            capabilities: CapabilitySet {
-                tags: vec!["audio".into()],
-            },
-            parameter_schema: serde_json::json!({
+            &["compose"],
+            ExecutorKind::Nary,
+        ));
+        r.register(mk(
+            "rf.timeline.concat",
+            BackendClass::Rust,
+            MediaContract::video_only().with_notes("n-ary sequential concat"),
+            MediaContract::video_only().with_notes("duration = sum of inputs"),
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "clips": { "type": "array" },
+                    "ranges": { "type": "array" }
+                }
+            }),
+            &["timeline", "concat", "edit"],
+            ExecutorKind::Nary,
+        ));
+        r.register(mk(
+            "rf.audio.gain",
+            BackendClass::Rust,
+            MediaContract::audio_only(),
+            MediaContract::audio_only(),
+            serde_json::json!({
                 "type": "object",
                 "properties": { "factor": { "type": "number" } }
             }),
-            limits: OperationLimits::default(),
-            executor_kind: ExecutorKind::Unary,
-        });
-        r.register(OperationDescriptor {
-            id: OperationId::new("rf.audio.drop"),
-            version: SemVer::V1,
-            input: video_av.clone(),
-            output: video_only.clone(),
-            backend: BackendClass::Rust,
-            deterministic: true,
-            capabilities: CapabilitySet {
-                tags: vec!["audio".into()],
-            },
-            parameter_schema: serde_json::json!({ "type": "object" }),
-            limits: OperationLimits::default(),
-            executor_kind: ExecutorKind::Unary,
-        });
-        r.register(OperationDescriptor {
-            id: OperationId::new("rf.audio.preserve"),
-            version: SemVer::V1,
-            input: video_av.clone(),
-            output: video_av.clone(),
-            backend: BackendClass::Rust,
-            deterministic: true,
-            capabilities: CapabilitySet {
-                tags: vec!["audio".into()],
-            },
-            parameter_schema: serde_json::json!({ "type": "object" }),
-            limits: OperationLimits::default(),
-            executor_kind: ExecutorKind::Unary,
-        });
-        r.register(OperationDescriptor {
-            id: OperationId::new("rf.audio.mix"),
-            version: SemVer::V1,
-            input: MediaContract {
-                video: true,
-                audio: true,
-                masks: false,
-                notes: Some("multi-input audio mix; video from first input".into()),
-            },
-            output: video_av.clone(),
-            backend: BackendClass::Rust,
-            deterministic: true,
-            capabilities: CapabilitySet {
-                tags: vec!["audio".into(), "mix".into()],
-            },
-            parameter_schema: serde_json::json!({
+            &["audio"],
+            ExecutorKind::Unary,
+        ));
+        r.register(mk(
+            "rf.audio.drop",
+            BackendClass::Rust,
+            video_av.clone(),
+            video_only.clone(),
+            serde_json::json!({ "type": "object" }),
+            &["audio"],
+            ExecutorKind::Unary,
+        ));
+        r.register(mk(
+            "rf.audio.preserve",
+            BackendClass::Rust,
+            video_av.clone(),
+            video_av.clone(),
+            serde_json::json!({ "type": "object" }),
+            &["audio"],
+            ExecutorKind::Unary,
+        ));
+        r.register(mk(
+            "rf.audio.mix",
+            BackendClass::Rust,
+            MediaContract::video_av().with_notes("multi-input audio mix; video from first input"),
+            video_av.clone(),
+            serde_json::json!({
                 "type": "object",
                 "properties": {
                     "tracks": {
@@ -542,60 +671,48 @@ impl OperationRegistry {
                     }
                 }
             }),
-            limits: OperationLimits::default(),
-            executor_kind: ExecutorKind::Nary,
-        });
-        r.register(OperationDescriptor {
-            id: OperationId::new("rf.redaction.region"),
-            version: SemVer::V1,
-            input: MediaContract {
-                video: true,
-                audio: false,
-                masks: true,
-                notes: Some("RegionRedaction + MaskTimeline".into()),
-            },
-            output: MediaContract {
-                video: true,
-                audio: false,
-                masks: false,
-                notes: None,
-            },
-            backend: BackendClass::Rust,
-            deterministic: true,
-            capabilities: CapabilitySet {
-                tags: vec!["privacy".into(), "vision".into()],
-            },
-            parameter_schema: serde_json::json!({
+            &["audio", "mix"],
+            ExecutorKind::Nary,
+        ));
+        r.register(mk(
+            "rf.redaction.region",
+            BackendClass::Rust,
+            MediaContract::video_only()
+                .with_masks()
+                .with_notes("RegionRedaction + MaskTimeline"),
+            MediaContract::video_only(),
+            serde_json::json!({
                 "type": "object",
                 "properties": {
                     "style": { "type": "object" },
                     "masks": { "type": "object" }
                 }
             }),
-            limits: OperationLimits::default(),
-            executor_kind: ExecutorKind::Unary,
-        });
-        r.register(OperationDescriptor {
-            id: OperationId::new("rf.adapter.sightloom"),
-            version: SemVer::V1,
-            input: MediaContract {
-                video: true,
-                audio: true,
-                masks: false,
-                notes: Some("SightLoom materialize → MaskTimeline".into()),
-            },
-            output: MediaContract {
-                video: true,
-                audio: true,
-                masks: true,
-                notes: Some("video passthrough + masks".into()),
-            },
-            backend: BackendClass::Adapter,
-            deterministic: true,
-            capabilities: CapabilitySet {
-                tags: vec!["adapter".into(), "vision".into(), "privacy".into()],
-            },
-            parameter_schema: serde_json::json!({
+            &["privacy", "vision"],
+            ExecutorKind::Unary,
+        ));
+        r.register(mk(
+            "rf.subtitle.burn",
+            BackendClass::Rust,
+            MediaContract::video_only(),
+            MediaContract::video_only(),
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "cues": { "type": "array" }
+                }
+            }),
+            &["text", "subtitle"],
+            ExecutorKind::Unary,
+        ));
+        r.register(mk(
+            "rf.adapter.sightloom",
+            BackendClass::Adapter,
+            MediaContract::video_av().with_notes("SightLoom materialize → MaskTimeline"),
+            MediaContract::video_av()
+                .with_masks()
+                .with_notes("video passthrough + masks"),
+            serde_json::json!({
                 "type": "object",
                 "properties": {
                     "tracks": {},
@@ -605,73 +722,54 @@ impl OperationRegistry {
                     "query": {}
                 }
             }),
-            limits: OperationLimits::default(),
-            executor_kind: ExecutorKind::Unary,
-        });
-        r.register(OperationDescriptor {
-            id: OperationId::new("rf.gpu.passthrough"),
-            version: SemVer::V1,
-            input: video_av.clone(),
-            output: video_av.clone(),
-            backend: BackendClass::Gpu,
-            deterministic: true,
-            capabilities: CapabilitySet {
-                tags: vec!["gpu".into()],
-            },
-            parameter_schema: serde_json::json!({
+            &["adapter", "vision", "privacy"],
+            ExecutorKind::Unary,
+        ));
+        r.register(mk(
+            "rf.gpu.passthrough",
+            BackendClass::Gpu,
+            video_av.clone(),
+            video_av.clone(),
+            serde_json::json!({
                 "type": "object",
                 "properties": { "backend": { "type": "string" } }
             }),
-            limits: OperationLimits::default(),
-            executor_kind: ExecutorKind::Unary,
-        });
-        r.register(OperationDescriptor {
-            id: OperationId::new("rf.encode.hw"),
-            version: SemVer::V1,
-            input: video_av.clone(),
-            output: MediaContract {
-                video: true,
-                audio: true,
-                masks: false,
-                notes: Some("hardware encode hint".into()),
-            },
-            backend: BackendClass::Gpu,
-            deterministic: false,
-            capabilities: CapabilitySet {
-                tags: vec!["gpu".into(), "encode".into()],
-            },
-            parameter_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "backend": { "type": "string" },
-                    "codec": { "type": "string" }
-                }
-            }),
-            limits: OperationLimits::default(),
-            executor_kind: ExecutorKind::Unary,
-        });
-        r.register(OperationDescriptor {
-            id: OperationId::new("rf.encode.h264"),
-            version: SemVer::V1,
-            input: video_av.clone(),
-            output: MediaContract {
-                video: true,
-                audio: true,
-                masks: false,
-                notes: Some("container file".into()),
-            },
-            backend: BackendClass::Ffmpeg,
-            deterministic: false,
-            capabilities: CapabilitySet {
-                tags: vec!["encode".into()],
-            },
-            parameter_schema: serde_json::json!({
-                "type": "object",
-                "properties": { "crf": { "type": "integer" }, "path": { "type": "string" } }
-            }),
-            limits: OperationLimits::default(),
-            executor_kind: ExecutorKind::Unary,
-        });
+            &["gpu"],
+            ExecutorKind::Unary,
+        ));
+        r.register(
+            mk(
+                "rf.encode.hw",
+                BackendClass::Gpu,
+                video_av.clone(),
+                MediaContract::video_av().with_notes("hardware encode hint"),
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "backend": { "type": "string" },
+                        "codec": { "type": "string" }
+                    }
+                }),
+                &["gpu", "encode"],
+                ExecutorKind::Unary,
+            )
+            .with_deterministic(false),
+        );
+        r.register(
+            mk(
+                "rf.encode.h264",
+                BackendClass::Ffmpeg,
+                video_av.clone(),
+                MediaContract::video_av().with_notes("container file"),
+                serde_json::json!({
+                    "type": "object",
+                    "properties": { "crf": { "type": "integer" }, "path": { "type": "string" } }
+                }),
+                &["encode"],
+                ExecutorKind::Unary,
+            )
+            .with_deterministic(false),
+        );
         r
     }
 
@@ -719,5 +817,74 @@ mod tests {
         assert!(r.len() >= 3);
         let d = r.get(&OperationId::new("rf.redaction.region")).unwrap();
         assert_eq!(d.backend, BackendClass::Rust);
+        assert_eq!(d.executor_kind, ExecutorKind::Unary);
+        assert!(d.input.masks);
+    }
+
+    #[test]
+    fn constructor_defaults_executor_kind_unary() {
+        let d = OperationDescriptor::unary(
+            "rf.custom.demo",
+            SemVer::V1,
+            MediaContract::video_only(),
+            MediaContract::video_only(),
+            BackendClass::Rust,
+        );
+        assert_eq!(d.executor_kind, ExecutorKind::Unary);
+        assert!(d.deterministic);
+        assert!(d.capabilities.tags.is_empty());
+        assert_eq!(d.parameter_schema, Value::Null);
+    }
+
+    #[test]
+    fn nary_builder_and_schema_roundtrip() {
+        let d = OperationDescriptor::nary(
+            "rf.custom.mix",
+            SemVer::V1,
+            MediaContract::video_av(),
+            MediaContract::video_av(),
+            BackendClass::Rust,
+        )
+        .with_capabilities(["mix"])
+        .with_parameter_schema(serde_json::json!({ "type": "object" }))
+        .with_limits(OperationLimits::new());
+        assert_eq!(d.executor_kind, ExecutorKind::Nary);
+        assert_eq!(d.capabilities.tags, vec!["mix".to_string()]);
+        let text = serde_json::to_string(&d).unwrap();
+        let back: OperationDescriptor = serde_json::from_str(&text).unwrap();
+        assert_eq!(back.executor_kind, ExecutorKind::Nary);
+        assert_eq!(back.id.as_str(), "rf.custom.mix");
+    }
+
+    #[test]
+    fn serde_missing_executor_kind_defaults_unary() {
+        let json = r#"{
+            "id": "rf.legacy.op",
+            "version": { "major": 1, "minor": 0, "patch": 0 },
+            "input": { "video": true },
+            "output": { "video": true },
+            "backend": "rust",
+            "deterministic": true
+        }"#;
+        let d: OperationDescriptor = serde_json::from_str(json).unwrap();
+        assert_eq!(d.executor_kind, ExecutorKind::Unary);
+        assert_eq!(d.id.as_str(), "rf.legacy.op");
+    }
+
+    #[test]
+    fn compose_and_mix_stay_nary() {
+        let r = OperationRegistry::with_builtins();
+        assert_eq!(
+            r.get(&OperationId::new("rf.compose.layers"))
+                .unwrap()
+                .executor_kind,
+            ExecutorKind::Nary
+        );
+        assert_eq!(
+            r.get(&OperationId::new("rf.audio.mix"))
+                .unwrap()
+                .executor_kind,
+            ExecutorKind::Nary
+        );
     }
 }

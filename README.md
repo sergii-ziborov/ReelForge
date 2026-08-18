@@ -10,8 +10,10 @@ A fluent **clip graph** for cutting, compositing, titling, effects, and render �
 
 ```toml
 [dependencies]
-reelforge = "0.1"
+reelforge = "0.2"
 ```
+
+`0.2` is a breaking release. crates.io `0.1.5` and this tree are **not** the same API — see [CHANGELOG.md](CHANGELOG.md).
 
 ```bash
 cargo add reelforge
@@ -19,6 +21,23 @@ cargo install reelforge-cli    # installs the `reelforge` binary
 ```
 
 **Requirements:** Rust **1.97+** (`rust-toolchain.toml`), and host **ffmpeg** + **ffprobe** on `PATH` (or `REELFORGE_FFMPEG` / `REELFORGE_FFPROBE`). ReelForge does **not** link libav.
+
+### What's in 0.2
+
+- **Stable construction** — `OperationDescriptor`, `MediaContract`, `CapabilitySet`, and `OperationLimits` are `#[non_exhaustive]`. Build them with `::new` / `unary` / `nary`, not struct literals.
+- **CaptureProject compile** — sequences compile in `MediaTime` ticks (trim, speed, freeze, loop, dissolve, wipe → opposing slides, subtitle burn, n-ary concat). Semantic subject/policy refs attach redaction; markers stay editorial.
+- **Mask packages** — path confinement, schema/limits, optional SHA-256. Bad inline assets fail closed.
+- **Stage resume** — each execution stage is hashed on disk; resume re-enters at the first invalid stage.
+- **Preview planner** — requested frame → output cone; skip inactive compose, bypass encode/audio, proxy seeds, drop draft masks.
+- **E2E bench** — 1080p/4K, subject counts, codecs (incl. NVENC/QSV/AMF skip), peak RSS, p50/p95, A/V drift, FFmpeg `-vf` baseline.
+
+GPU compute kernels are **not** in 0.2.
+
+Watch a 720p reel of the stack (test pattern + titles + privacy + slide):
+
+```bash
+cargo run -p reelforge --example demo_reel --release
+```
 
 ---
 
@@ -63,14 +82,19 @@ cargo install reelforge-cli    # installs the `reelforge` binary
 - Filtergraph fast path for pure file transforms (trim/crop/scale/flip); source audio is copied
 - **RenderPlan** JSON: optimize (fuse/DCE) + FFmpeg prefix extract + **hybrid** run (prefix → Rust remainder → encode)
 - **RenderGraph** DAG: typed ops, hybrid `ExecutionPlan`, **TrackTimeline** → `MaskTimeline` view + fused **RegionRedaction**
-- **CaptureProject**: OTIO-like sequences/tracks/clips/gaps → `compile_project` → `RenderGraph`
+- **CaptureProject**: OTIO-like sequences/tracks/clips/gaps → `compile_project` → `RenderGraph` (tick-accurate)
+- **Jobs**: durable `JobStore`; resume validates stage fingerprints + file hashes
+- **Preview**: `plan_preview` / `preview_graph` — one `frame_at` on a sliced DAG
 - Optional SightLoom-shaped JSON adapter (`parse_track_timelines`) — no SightLoom crate
+- Mask package host: confined paths, decode limits, optional content hashes
 
 ### Quality & tooling
 - `psnr_rgb` / `ssim_rgb` frame metrics
 - **Correctness gate** (synthetic + MP4 decode/transform/encode, CI-failing floors) — see [docs/CORRECTNESS.md](docs/CORRECTNESS.md)
 - CLI: `version`, `probe`, `cut`, `filter`, `plan`
 - Criterion benches: `cargo bench -p reelforge-fx`, `cargo bench -p reelforge-io --bench render_plan`
+- E2E harness: `cargo run -p reelforge-io --example e2e_bench --release -- --quick` (1080p/4K, subjects, codecs, RSS, p50/p95)
+- Demo reel: `cargo run -p reelforge --example demo_reel --release`
 - CI: fmt / clippy / test / docs / package dry-run / bench compile (Linux, Windows, macOS) + FFmpeg job
 
 ---
@@ -269,6 +293,8 @@ run_render_graph(&graph)?; // schedule + hybrid execute + write
 | [`reelforge-compose`](https://crates.io/crates/reelforge-compose) | Layers, concat, composite |
 | [`reelforge-text`](https://crates.io/crates/reelforge-text) | Titles & subtitles |
 | [`reelforge-render-graph`](https://crates.io/crates/reelforge-render-graph) | RenderGraph, compile, schedule, masks |
+| [`reelforge-project`](https://crates.io/crates/reelforge-project) | CaptureProject schema + timeline compiler |
+| [`reelforge-sightloom-adapter`](https://crates.io/crates/reelforge-sightloom-adapter) | SightLoom-shaped track JSON (no SightLoom crate) |
 | [`reelforge-cli`](https://crates.io/crates/reelforge-cli) | Command-line tool |
 
 ---

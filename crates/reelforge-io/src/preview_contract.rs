@@ -131,18 +131,21 @@ pub fn preview_clip(clip: &dyn VideoClip, request: PreviewRequest) -> Result<Pre
     })
 }
 
-/// Materialize a graph (optional seeds) and sample a preview frame.
+/// Plan a sliced graph, proxy seeds, materialize, then sample one frame.
 ///
 /// # Errors
 ///
-/// Graph, materialize, or sample failures.
+/// Plan, materialize, or sample failures.
 pub fn preview_graph<S: BuildHasher>(
     graph: &RenderGraph,
     request: PreviewRequest,
     options: &GraphRunOptions,
     seeds: &HashMap<MediaAssetId, Arc<dyn VideoClip>, S>,
 ) -> Result<PreviewFrame> {
-    let (clip, _) = materialize_graph_with_seeds(graph, &options.registry, seeds)?;
+    let plan = crate::plan_preview(graph, request)?;
+    let sliced = crate::slice_preview_graph(graph, &plan);
+    let proxied = crate::preview_plan::proxy_preview_seeds(seeds, request);
+    let (clip, _) = materialize_graph_with_seeds(&sliced, &options.registry, &proxied)?;
     preview_clip(clip.as_ref(), request)
 }
 

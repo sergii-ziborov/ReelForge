@@ -15,7 +15,7 @@ pub use compile::{ProjectCompile, compile_project};
 pub use error::{ProjectError, Result};
 pub use ids::{MediaRefId, ProjectId, SequenceId, TimelineClipId, TimelineTrackId};
 pub use model::{
-    Gap, Marker, MediaRef, Metadata, NestedSequence, Retiming, SemanticRef, SourceRange,
+    CropRect, Gap, Marker, MediaRef, Metadata, NestedSequence, Retiming, SemanticRef, SourceRange,
     TimelineClip, TimelineItem, Transition, TransitionKind,
 };
 pub use project::{CAPTURE_PROJECT_VERSION, CaptureProject, Sequence, TimelineTrack, TrackKind};

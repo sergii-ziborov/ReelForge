@@ -22,3 +22,9 @@ impl ProjectError {
         Self::Message(msg.into())
     }
 }
+
+impl From<reelforge_core::CoreError> for ProjectError {
+    fn from(e: reelforge_core::CoreError) -> Self {
+        Self::Message(e.to_string())
+    }
+}

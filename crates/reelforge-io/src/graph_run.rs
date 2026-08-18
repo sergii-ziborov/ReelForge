@@ -126,6 +126,14 @@ pub struct GraphRunOptions {
     pub gpu_host: Option<Arc<dyn crate::GpuHost>>,
     /// GPU executors (builtins by default).
     pub gpu_registry: crate::GpuRegistry,
+    /// Skip in-process eval for stages before this index (job resume).
+    pub resume_from_stage: u32,
+    /// Restored node clips from validated stage artifacts.
+    pub restored_video: HashMap<String, Arc<dyn VideoClip>>,
+    /// Persist each completed stage under this directory.
+    pub persist_stage_dir: Option<PathBuf>,
+    /// Invoked after a stage is committed (fingerprint + artifacts).
+    pub on_stage_committed: Option<std::sync::Arc<dyn Fn(crate::StageCommit) + Send + Sync>>,
 }
 
 impl Default for GraphRunOptions {
@@ -141,6 +149,10 @@ impl Default for GraphRunOptions {
             adapter_registry: crate::AdapterRegistry::with_builtins(),
             gpu_host: None,
             gpu_registry: crate::GpuRegistry::with_builtins(),
+            resume_from_stage: 0,
+            restored_video: HashMap::new(),
+            persist_stage_dir: None,
+            on_stage_committed: None,
         }
     }
 }
@@ -200,6 +212,32 @@ impl GraphRunOptions {
         self.gpu_registry = registry;
         self
     }
+
+    /// Resume from a validated prefix (skip completed stages).
+    #[must_use]
+    pub fn with_stage_resume(mut self, plan: crate::StageResumePlan) -> Self {
+        self.resume_from_stage = plan.start_stage;
+        self.restored_video = plan.restored_video;
+        self
+    }
+
+    /// Persist each completed stage under `dir`.
+    #[must_use]
+    pub fn with_stage_persist_dir(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.persist_stage_dir = Some(dir.into());
+        self
+    }
+
+    /// Hooks passed into the stage walker.
+    #[must_use]
+    pub fn stage_hooks(&self) -> crate::StageRunHooks {
+        crate::StageRunHooks {
+            start_stage: self.resume_from_stage,
+            restored_video: self.restored_video.clone(),
+            persist_dir: self.persist_stage_dir.clone(),
+            on_committed: self.on_stage_committed.clone(),
+        }
+    }
 }
 
 impl core::fmt::Debug for GraphRunOptions {
@@ -215,6 +253,10 @@ impl core::fmt::Debug for GraphRunOptions {
             .field("adapter_registry", &self.adapter_registry.len())
             .field("gpu_host", &self.gpu_host.is_some())
             .field("gpu_registry", &self.gpu_registry.len())
+            .field("resume_from_stage", &self.resume_from_stage)
+            .field("restored_video", &self.restored_video.len())
+            .field("persist_stage_dir", &self.persist_stage_dir)
+            .field("on_stage_committed", &self.on_stage_committed.is_some())
             .finish()
     }
 }
@@ -450,6 +492,7 @@ fn execute_plan_and_seal(
             host: options.gpu_host.clone(),
             registry: options.gpu_registry.clone(),
         },
+        Some(&options.stage_hooks()),
     )?;
     merge_option_hints(&mut bundle.hints, options);
     write_graph_outputs(
@@ -609,6 +652,7 @@ pub fn materialize_execution_plan<S: BuildHasher, A: BuildHasher>(
         cache,
         crate::AdapterContext::default(),
         crate::GpuContext::default(),
+        None,
     )
 }
 
@@ -629,6 +673,7 @@ pub fn materialize_execution_plan_with_adapters<S: BuildHasher, A: BuildHasher>(
     cache: Option<&StageCache>,
     adapters: crate::AdapterContext,
     gpu: crate::GpuContext,
+    hooks: Option<&crate::StageRunHooks>,
 ) -> Result<GraphBundle> {
     graph
         .validate()
@@ -640,10 +685,17 @@ pub fn materialize_execution_plan_with_adapters<S: BuildHasher, A: BuildHasher>(
     }
 
     let mut ctx = MaterializeCtx::new(graph, registry, with_audio, adapters, gpu);
+    if let Some(h) = hooks {
+        for (id, clip) in &h.restored_video {
+            ctx.produced
+                .insert(id.clone(), NodeMedia::new(Arc::clone(clip), None));
+        }
+    }
     let mut upstream_fp = asset_input_fingerprint(graph);
     let total_stages = plan.stages.len();
     #[allow(clippy::cast_possible_truncation)]
     let total_u = total_stages as u64;
+    let start_stage = hooks.map_or(0, |h| h.start_stage as usize);
 
     for (si, stage) in plan.stages.iter().enumerate() {
         if let Some(c) = control {
@@ -672,8 +724,38 @@ pub fn materialize_execution_plan_with_adapters<S: BuildHasher, A: BuildHasher>(
             ctx.stage_fingerprints.push(stage_fp.clone());
         }
 
+        if si < start_stage {
+            upstream_fp = stage_fp;
+            continue;
+        }
+
         for id in node_ids {
             ctx.eval_node(id, video_seeds, audio_seeds)?;
+        }
+
+        if let Some(h) = hooks {
+            let mut artifacts = Vec::new();
+            if let Some(dir) = h.persist_dir.as_ref() {
+                for id in node_ids {
+                    let Some(media) = ctx.produced.get(&id.0) else {
+                        continue;
+                    };
+                    artifacts.push(crate::persist_stage_video(
+                        dir,
+                        u32::try_from(si).unwrap_or(u32::MAX),
+                        &stage_fp,
+                        &id.0,
+                        media.video.as_ref(),
+                    )?);
+                }
+            }
+            if let Some(cb) = &h.on_committed {
+                cb(crate::StageCommit {
+                    index: u32::try_from(si).unwrap_or(u32::MAX),
+                    fingerprint: stage_fp.clone(),
+                    artifacts,
+                });
+            }
         }
 
         // Next stage inputs depend on this stage's work.
@@ -820,6 +902,36 @@ fn asset_input_fingerprint(graph: &RenderGraph) -> String {
         a.uri.hash(&mut h);
     }
     format!("{:016x}", h.finish())
+}
+
+/// Live fingerprints for each plan stage (same keys the runner uses).
+///
+/// # Errors
+///
+/// Unknown ops / compile failures.
+pub fn plan_stage_fingerprints(
+    graph: &RenderGraph,
+    plan: &ExecutionPlan,
+    registry: &OperationRegistry,
+) -> Result<Vec<String>> {
+    let mut upstream_fp = asset_input_fingerprint(graph);
+    let mut out = Vec::with_capacity(plan.stages.len());
+    for stage in &plan.stages {
+        let node_ids = stage.node_ids();
+        let compiled = compile_stage_ops(graph, registry, node_ids)?;
+        let node_id_strs: Vec<String> = node_ids.iter().map(|n| n.0.clone()).collect();
+        let stage_fp = fingerprint_stage_key(&StageCacheKey {
+            backend: stage.backend_tag(),
+            node_ids: &node_id_strs,
+            input_fingerprint: &upstream_fp,
+            compiled: &compiled,
+            ffmpeg_version: crate::stage_cache::probe_ffmpeg_version_cached(),
+            host_tag: std::env::consts::OS,
+        });
+        out.push(stage_fp.clone());
+        upstream_fp = stage_fp;
+    }
+    Ok(out)
 }
 
 fn compile_stage_ops(
@@ -1461,6 +1573,46 @@ mod tests {
         )
         .unwrap();
         assert!((bundle.video.duration().as_secs() - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn resume_skips_prefix_when_nodes_restored() {
+        let g = linear_redaction_graph();
+        let registry = OperationRegistry::with_builtins();
+        let plan = schedule_graph(&g, &registry).unwrap();
+        assert!(plan.stage_count() >= 2);
+        let seed: Arc<dyn VideoClip> = Arc::new(
+            ColorClip::new(Size::new(16, 16), Rgb8::RED, Duration::from_secs(1.0)).with_fps(15.0),
+        );
+        let mut seeds = HashMap::new();
+        seeds.insert(MediaAssetId("a".into()), Arc::clone(&seed));
+        let audio: HashMap<MediaAssetId, Arc<dyn AudioClip>> = HashMap::new();
+        let mut restored = HashMap::new();
+        for id in plan.stages[0].node_ids() {
+            restored.insert(id.0.clone(), Arc::clone(&seed));
+        }
+        let hooks = crate::StageRunHooks {
+            start_stage: 1,
+            restored_video: restored,
+            persist_dir: None,
+            on_committed: None,
+        };
+        let bundle = materialize_execution_plan_with_adapters(
+            &g,
+            &plan,
+            &registry,
+            &seeds,
+            &audio,
+            true,
+            None,
+            None,
+            crate::AdapterContext::default(),
+            crate::GpuContext::default(),
+            Some(&hooks),
+        )
+        .unwrap();
+        assert!(bundle.video.duration().as_secs() > 0.0);
+        let _ = bundle.video.frame_at(Time::ZERO).unwrap();
     }
 
     #[test]
