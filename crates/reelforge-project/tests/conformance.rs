@@ -1,4 +1,4 @@
-//! Capture → ReelForge wire contract.
+//! `Capture` to `ReelForge` wire contract.
 //!
 //! The JSON is a copy of
 //! `ReelForge-Capture/crates/reelforge-capture-schema/tests/golden/capture_project_v1.json`.
@@ -48,15 +48,15 @@ fn capture_golden_compiles() {
         })
         .collect();
     assert!(
-        ops.iter().any(|o| *o == "rf.transform.crop"),
+        ops.contains(&"rf.transform.crop"),
         "zoom crop missing: {ops:?}"
     );
     assert!(
-        ops.iter().any(|o| *o == "rf.transform.scale"),
+        ops.contains(&"rf.transform.scale"),
         "zoom scale missing: {ops:?}"
     );
     assert!(
-        ops.iter().any(|o| *o == "rf.transform.speed"),
+        ops.contains(&"rf.transform.speed"),
         "speed clip missing: {ops:?}"
     );
     out.graph.validate().unwrap();

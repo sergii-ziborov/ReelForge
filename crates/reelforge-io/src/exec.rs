@@ -34,7 +34,13 @@ pub(crate) fn execute_compiled(
     hints: &mut GraphEncodeHints,
 ) -> Result<NodeMedia> {
     match compiled.params.executor_kind() {
-        ExecutorKind::Nary => execute_nary(compiled, inputs),
+        ExecutorKind::Nary => {
+            let media = execute_nary(compiled, inputs)?;
+            if matches!(compiled.params, TypedParams::AudioMix { .. }) && media.audio.is_some() {
+                hints.preserve_audio = true;
+            }
+            Ok(media)
+        }
         ExecutorKind::Unary => {
             let input = expect_unary(inputs, compiled.id.as_str())?;
             execute_unary(compiled, input, hints)
@@ -125,7 +131,7 @@ fn execute_unary(
             })
         }
         TypedParams::AudioDrop => {
-            hints.preserve_audio = false;
+            // Drop is node-local. A global flag would mute a later mix or another branch.
             Ok(NodeMedia {
                 video: input.video,
                 audio: None,

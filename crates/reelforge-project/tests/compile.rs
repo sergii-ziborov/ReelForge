@@ -133,8 +133,15 @@ fn gap_then_clip_uses_compose_start() {
         })
         .expect("compose");
     let start = &compose["layers"][0]["start"];
-    assert_eq!(start["ticks"], 1500);
-    assert_eq!(start["timescale"], 1000);
+    let ticks = start["ticks"].as_i64().unwrap();
+    let scale = start["timescale"].as_u64().unwrap();
+    // 1.5s may be stored as 3/2 after the rational cursor reduces 1500/1000.
+    assert!(scale > 0, "{start}");
+    assert_eq!(
+        ticks * 1_000,
+        1_500 * i64::try_from(scale).unwrap(),
+        "{start}"
+    );
 }
 
 #[test]
@@ -286,4 +293,70 @@ fn trim_keeps_media_time_ticks() {
     assert_eq!(params["start"]["timescale"], 1000);
     assert_eq!(params["duration"]["ticks"], 2000);
     assert_eq!(params["duration"]["timescale"], 1000);
+}
+
+#[test]
+#[allow(clippy::cast_precision_loss)]
+fn ntsc_clips_do_not_accumulate_millisecond_error() {
+    let mut p = CaptureProject::new(ProjectId::new("p"), "ntsc");
+    p.media.push(MediaRef {
+        id: MediaRefId::new("a"),
+        uri: "a.mp4".into(),
+        duration: Some(MediaTime {
+            ticks: 120,
+            timescale: 1,
+        }),
+        role: Some("video".into()),
+    });
+    let mut seq = Sequence::new(SequenceId::new("s"), "main");
+    let mut tr = TimelineTrack::new(TimelineTrackId::new("v0"), TrackKind::Video);
+    let frame = MediaTime {
+        ticks: 1001,
+        timescale: 30_000,
+    };
+    for i in 0..1000 {
+        tr.items.push(TimelineItem::Clip(TimelineClip {
+            id: TimelineClipId::new(format!("c{i}")),
+            media: MediaRefId::new("a"),
+            source: SourceRange {
+                start: MediaTime {
+                    ticks: 0,
+                    timescale: 30_000,
+                },
+                duration: frame,
+            },
+            retiming: Retiming::Identity,
+            transition_in: None,
+            crop: None,
+            scale_to: None,
+            metadata: Metadata::default(),
+        }));
+    }
+    seq.tracks.push(tr);
+    p.sequences.push(seq);
+    let out = compile_project(&p).unwrap();
+    let params = out
+        .graph
+        .nodes
+        .iter()
+        .find_map(|n| match &n.body {
+            RenderNodeKind::Op { operation, params }
+                if operation.as_str() == "rf.compose.layers" =>
+            {
+                Some(params)
+            }
+            _ => None,
+        })
+        .expect("compose");
+    let layers = params["layers"].as_array().expect("layers");
+    assert_eq!(layers.len(), 1000);
+    let start = &layers[999]["start"];
+    let ticks = start["ticks"].as_i64().unwrap();
+    let scale = start["timescale"].as_u64().unwrap();
+    let secs = ticks as f64 / scale as f64;
+    let exact = 999.0 * 1001.0 / 30_000.0;
+    assert!(
+        (secs - exact).abs() < 1e-6,
+        "last clip starts at {secs}, expected {exact}"
+    );
 }

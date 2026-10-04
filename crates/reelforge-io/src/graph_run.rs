@@ -71,15 +71,28 @@ impl core::fmt::Debug for GraphEncodeHints {
     }
 }
 
+/// One graph output bound to the media that node actually produced.
+#[derive(Clone)]
+pub struct GraphOutputMedia {
+    /// Destination path.
+    pub uri: String,
+    /// Picture for this output.
+    pub video: Arc<dyn VideoClip>,
+    /// Audio for this output. Absent means a silent file, not another output's mix.
+    pub audio: Option<Arc<dyn AudioClip>>,
+}
+
 /// Materialized video (+ optional audio) from a [`RenderGraph`].
 #[derive(Clone)]
 pub struct GraphBundle {
-    /// Video stream.
+    /// Video stream of the primary output.
     pub video: Arc<dyn VideoClip>,
     /// Optional audio (source companion or graph audio ops).
     pub audio: Option<Arc<dyn AudioClip>>,
     /// Encode / output hints.
     pub hints: GraphEncodeHints,
+    /// Every `GraphOutput` that has a URI, each with its own media.
+    pub outputs: Vec<GraphOutputMedia>,
 }
 
 /// One node product while walking the DAG.
@@ -446,10 +459,12 @@ fn execute_plan_and_seal(
         .map_err(|e| IoError::message(e.to_string()))?;
     control.check_cancel()?;
 
+    let multi_output = graph.outputs.len() > 1;
     let run_fp = options
         .cache
         .as_ref()
-        .map(|_| StageCache::run_fingerprint(graph, plan))
+        .filter(|_| !multi_output)
+        .map(|_| execution_cache_key(graph, plan, options))
         .transpose()?;
 
     if let (Some(cache), Some(fp)) = (&options.cache, &run_fp)
@@ -495,13 +510,27 @@ fn execute_plan_and_seal(
         Some(&options.stage_hooks()),
     )?;
     merge_option_hints(&mut bundle.hints, options);
-    write_graph_outputs(
-        graph,
-        bundle.video.as_ref(),
-        bundle.audio.as_deref(),
-        &bundle.hints,
-        control,
-    )?;
+    if bundle.outputs.is_empty() {
+        write_graph_outputs(
+            graph,
+            bundle.video.as_ref(),
+            bundle.audio.as_deref(),
+            &bundle.hints,
+            control,
+        )?;
+    } else {
+        for out in &bundle.outputs {
+            control.check_cancel()?;
+            write_one_output(
+                &out.uri,
+                out.video.as_ref(),
+                out.audio.as_deref(),
+                &bundle.hints,
+                control,
+            )?;
+        }
+        control.report(WriteProgress::new(WriteStage::Done, 1, 1));
+    }
     let written = resolve_output_path(graph).or(bundle.hints.output_path.clone());
     if let (Some(cache), Some(fp)) = (&options.cache, &run_fp)
         && let Some(out) = &written
@@ -868,29 +897,64 @@ impl<'a> MaterializeCtx<'a> {
     }
 
     fn finish_bundle(mut self) -> Result<GraphBundle> {
-        if let Some(out) = self.graph.outputs.first() {
-            if let Some(uri) = &out.uri {
-                self.hints.output_path.get_or_insert_with(|| uri.clone());
-            }
-            if let Some(c) = self.produced.get(&out.node.0) {
-                return Ok(GraphBundle {
-                    video: Arc::clone(&c.video),
-                    audio: c.audio.clone(),
-                    hints: self.hints,
-                });
-            }
+        let mut outputs = Vec::new();
+        for out in &self.graph.outputs {
+            let Some(uri) = out.uri.clone() else {
+                continue;
+            };
+            let Some(c) = self.produced.get(&out.node.0) else {
+                return Err(IoError::message(format!(
+                    "output '{}' node '{}' was not produced",
+                    out.name, out.node.0
+                )));
+            };
+            outputs.push(GraphOutputMedia {
+                uri,
+                video: Arc::clone(&c.video),
+                audio: c.audio.clone(),
+            });
+        }
+        if let Some(first) = outputs.first() {
+            self.hints
+                .output_path
+                .get_or_insert_with(|| first.uri.clone());
+            return Ok(GraphBundle {
+                video: Arc::clone(&first.video),
+                audio: first.audio.clone(),
+                hints: self.hints,
+                outputs,
+            });
         }
         if let Some(c) = self.primary_out {
             return Ok(GraphBundle {
                 video: c.video,
                 audio: c.audio,
                 hints: self.hints,
+                outputs,
             });
         }
         Err(IoError::message(
             "RenderGraph produced no output clip (missing Output node?)",
         ))
     }
+}
+
+fn execution_cache_key(
+    graph: &RenderGraph,
+    plan: &ExecutionPlan,
+    options: &GraphRunOptions,
+) -> Result<String> {
+    let base = StageCache::run_fingerprint(graph, plan)?;
+    Ok(format!(
+        "{base}|fps={}|codec={}|crf={}|audio={}",
+        options
+            .fps
+            .map(|fps| format!("{fps:.6}"))
+            .unwrap_or_default(),
+        options.video_codec.as_deref().unwrap_or(""),
+        options.crf.map(|crf| crf.to_string()).unwrap_or_default(),
+        u8::from(options.with_audio)
+    ))
 }
 
 fn asset_input_fingerprint(graph: &RenderGraph) -> String {
@@ -1092,27 +1156,38 @@ fn write_graph_outputs(
         ));
     }
 
-    let fps = resolve_fps(hints, clip)?;
     for path in paths {
         control.check_cancel()?;
-        let mut opts = WriteVideoOptions::new(&path, fps);
-        if let Some(codec) = &hints.video_codec {
-            opts = opts.with_video_codec(codec.clone());
-        }
-        if let Some(crf) = hints.crf {
-            opts = opts.with_crf(crf);
-        } else if hints.video_codec.is_none() {
-            opts = opts.with_crf(23);
-        }
-        if hints.preserve_audio
-            && let Some(a) = audio
-        {
-            write_av_with(clip, a, &opts, control)?;
-        } else {
-            write_video_with(clip, &opts, control)?;
-        }
+        write_one_output(&path, clip, audio, hints, control)?;
     }
     control.report(WriteProgress::new(WriteStage::Done, 1, 1));
+    Ok(())
+}
+
+fn write_one_output(
+    path: &str,
+    clip: &dyn VideoClip,
+    audio: Option<&dyn AudioClip>,
+    hints: &GraphEncodeHints,
+    control: &WriteControl,
+) -> Result<()> {
+    let fps = resolve_fps(hints, clip)?;
+    let mut opts = WriteVideoOptions::new(path, fps);
+    if let Some(codec) = &hints.video_codec {
+        opts = opts.with_video_codec(codec.clone());
+    }
+    if let Some(crf) = hints.crf {
+        opts = opts.with_crf(crf);
+    } else if hints.video_codec.is_none() {
+        opts = opts.with_crf(23);
+    }
+    if hints.preserve_audio
+        && let Some(a) = audio
+    {
+        write_av_with(clip, a, &opts, control)?;
+    } else {
+        write_video_with(clip, &opts, control)?;
+    }
     Ok(())
 }
 
@@ -1141,7 +1216,49 @@ fn can_use_ffmpeg_prefix(graph: &RenderGraph, plan: &ExecutionPlan) -> bool {
         .stages
         .first()
         .is_some_and(|s| matches!(s, ExecutionStage::Ffmpeg(_)));
-    has_rust && first_ffmpeg && graph.assets.len() == 1
+    let linear = plan
+        .stages
+        .first()
+        .is_some_and(|stage| ffmpeg_stage_is_line(graph, stage.node_ids()));
+    has_rust && first_ffmpeg && graph.assets.len() == 1 && linear
+}
+
+/// True when the stage is a single path. A shared upstream with two consumers
+/// is a legal DAG and must not be rewritten into one `FFmpeg` chain.
+fn ffmpeg_stage_is_line(graph: &RenderGraph, nodes: &[reelforge_render_graph::NodeId]) -> bool {
+    if nodes.is_empty() {
+        return false;
+    }
+    let set: HashSet<&str> = nodes.iter().map(|n| n.0.as_str()).collect();
+    let mut consumers: HashMap<&str, u32> = HashMap::new();
+    for node in &graph.nodes {
+        for input in &node.inputs {
+            if set.contains(input.0.as_str()) {
+                *consumers.entry(input.0.as_str()).or_default() += 1;
+            }
+        }
+    }
+    let mut heads = 0_u32;
+    for node in &graph.nodes {
+        if !set.contains(node.id.0.as_str()) {
+            continue;
+        }
+        let indeg = node
+            .inputs
+            .iter()
+            .filter(|input| set.contains(input.0.as_str()))
+            .count();
+        if indeg > 1 {
+            return false;
+        }
+        if indeg == 0 {
+            heads += 1;
+        }
+        if consumers.get(node.id.0.as_str()).copied().unwrap_or(0) > 1 {
+            return false;
+        }
+    }
+    heads <= 1
 }
 
 /// Returns `Ok(Some(()))` when hybrid path fully finished, `Ok(None)` to fall back.
@@ -1951,5 +2068,141 @@ mod tests {
         let bundle = materialize_graph_bundle(&g, &registry, &vseeds, &aseeds, true).unwrap();
         assert!(bundle.audio.is_some());
         assert!(bundle.hints.preserve_audio);
+    }
+
+    #[test]
+    fn drop_then_mix_keeps_audio_on_the_output() {
+        use reelforge_core::{AudioFormat, SilenceClip};
+        let registry = OperationRegistry::with_builtins();
+        let video: Arc<dyn VideoClip> = Arc::new(ColorClip::new(
+            Size::new(8, 8),
+            Rgb8::BLUE,
+            Duration::from_secs(1.0),
+        ));
+        let audio: Arc<dyn AudioClip> = Arc::new(SilenceClip::new(
+            AudioFormat::STEREO_48K,
+            Duration::from_secs(1.0),
+        ));
+        let g = RenderGraph {
+            version: RENDER_GRAPH_VERSION,
+            assets: vec![MediaAsset {
+                id: MediaAssetId("a".into()),
+                uri: "seed://a".into(),
+                duration: None,
+                role: None,
+            }],
+            nodes: vec![
+                RenderNode {
+                    id: NodeId("src".into()),
+                    body: RenderNodeKind::Source {
+                        asset: MediaAssetId("a".into()),
+                    },
+                    inputs: vec![],
+                },
+                RenderNode {
+                    id: NodeId("drop".into()),
+                    body: RenderNodeKind::Op {
+                        operation: OperationId::new("rf.audio.drop"),
+                        params: serde_json::json!({}),
+                    },
+                    inputs: vec![NodeId("src".into())],
+                },
+                RenderNode {
+                    id: NodeId("mix".into()),
+                    body: RenderNodeKind::Op {
+                        operation: OperationId::new("rf.audio.mix"),
+                        params: serde_json::json!({ "tracks": [{}, {}] }),
+                    },
+                    inputs: vec![NodeId("drop".into()), NodeId("src".into())],
+                },
+                RenderNode {
+                    id: NodeId("out".into()),
+                    body: RenderNodeKind::Output {
+                        name: "main".into(),
+                    },
+                    inputs: vec![NodeId("mix".into())],
+                },
+            ],
+            outputs: vec![GraphOutput {
+                name: "main".into(),
+                node: NodeId("out".into()),
+                uri: Some("out.mp4".into()),
+            }],
+        };
+        let mut vseeds = HashMap::new();
+        vseeds.insert(MediaAssetId("a".into()), video);
+        let mut aseeds = HashMap::new();
+        aseeds.insert(MediaAssetId("a".into()), audio);
+        let bundle = materialize_graph_bundle(&g, &registry, &vseeds, &aseeds, true).unwrap();
+        assert!(bundle.audio.is_some(), "mix must restore audio after drop");
+        assert!(bundle.hints.preserve_audio);
+        assert_eq!(bundle.outputs.len(), 1);
+        assert!(bundle.outputs[0].audio.is_some());
+    }
+
+    #[test]
+    fn cache_key_changes_with_fps() {
+        let graph = RenderGraph::default();
+        let plan = ExecutionPlan::default();
+        let slow = GraphRunOptions {
+            fps: Some(5.0),
+            ..GraphRunOptions::default()
+        };
+        let fast = GraphRunOptions {
+            fps: Some(10.0),
+            ..GraphRunOptions::default()
+        };
+        let a = execution_cache_key(&graph, &plan, &slow).unwrap();
+        let b = execution_cache_key(&graph, &plan, &fast).unwrap();
+        let again = execution_cache_key(&graph, &plan, &slow).unwrap();
+        assert_ne!(a, b);
+        assert_eq!(a, again);
+    }
+
+    #[test]
+    fn branched_stage_is_not_a_line() {
+        let graph = RenderGraph {
+            version: RENDER_GRAPH_VERSION,
+            assets: vec![],
+            nodes: vec![
+                RenderNode {
+                    id: NodeId("src".into()),
+                    body: RenderNodeKind::Source {
+                        asset: MediaAssetId("a".into()),
+                    },
+                    inputs: vec![],
+                },
+                RenderNode {
+                    id: NodeId("h".into()),
+                    body: RenderNodeKind::Op {
+                        operation: OperationId::new("rf.transform.hflip"),
+                        params: serde_json::json!({}),
+                    },
+                    inputs: vec![NodeId("src".into())],
+                },
+                RenderNode {
+                    id: NodeId("v".into()),
+                    body: RenderNodeKind::Op {
+                        operation: OperationId::new("rf.transform.vflip"),
+                        params: serde_json::json!({}),
+                    },
+                    inputs: vec![NodeId("src".into())],
+                },
+            ],
+            outputs: vec![],
+        };
+        let nodes = vec![NodeId("src".into()), NodeId("h".into()), NodeId("v".into())];
+        assert!(!ffmpeg_stage_is_line(&graph, &nodes));
+        // `src` still feeds `v`, so an FFmpeg prefix must not consume it for `h` alone.
+        assert!(!ffmpeg_stage_is_line(
+            &graph,
+            &[NodeId("src".into()), NodeId("h".into())]
+        ));
+        let mut line = graph.clone();
+        line.nodes.pop();
+        assert!(ffmpeg_stage_is_line(
+            &line,
+            &[NodeId("src".into()), NodeId("h".into())]
+        ));
     }
 }

@@ -149,8 +149,15 @@ fn nested_sequence_offsets_child() {
         })
         .expect("compose");
     let start = &compose["layers"][0]["start"];
-    assert_eq!(start["ticks"], 750);
-    assert_eq!(start["timescale"], 1000);
+    let ticks = start["ticks"].as_i64().unwrap();
+    let scale = start["timescale"].as_u64().unwrap();
+    // 0.75s may be stored as 3/4 after the rational cursor reduces 750/1000.
+    assert!(scale > 0, "{start}");
+    assert_eq!(
+        ticks * 1_000,
+        750 * i64::try_from(scale).unwrap(),
+        "{start}"
+    );
 }
 
 #[test]

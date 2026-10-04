@@ -1,5 +1,101 @@
 //! Emit timeline items into a [`RenderGraph`].
 
+/// Timeline cursor as an exact rational second (`num / den`).
+///
+/// Placing each clip by rebasing onto a 1 kHz clock rounds NTSC durations
+/// (`1001/30000`) and drifts by hundreds of milliseconds across a thousand clips.
+#[derive(Clone, Copy)]
+struct ExactCursor {
+    num: i128,
+    den: i128,
+}
+
+impl ExactCursor {
+    const fn zero() -> Self {
+        Self { num: 0, den: 1 }
+    }
+
+    fn add(&mut self, time: MediaTime) {
+        self.shift(time, false);
+    }
+
+    fn sub(&mut self, time: MediaTime) {
+        self.shift(time, true);
+        if self.num < 0 {
+            self.num = 0;
+        }
+    }
+
+    fn offset(self, time: MediaTime) -> MediaTime {
+        let mut next = self;
+        next.add(time);
+        next.to_media()
+    }
+
+    fn shift(&mut self, time: MediaTime, subtract: bool) {
+        let scale = i128::from(time.timescale.max(1));
+        let ticks = i128::from(time.ticks);
+        let signed = if subtract { -ticks } else { ticks };
+        let num = self
+            .num
+            .saturating_mul(scale)
+            .saturating_add(signed.saturating_mul(self.den));
+        let den = self.den.saturating_mul(scale).max(1);
+        *self = reduce_rational(num, den);
+    }
+
+    fn to_media(self) -> MediaTime {
+        if self.den > 0
+            && self.den <= i128::from(u32::MAX)
+            && (i128::from(i64::MIN)..=i128::from(i64::MAX)).contains(&self.num)
+        {
+            return MediaTime {
+                ticks: i64::try_from(self.num).unwrap_or(0),
+                timescale: u32::try_from(self.den).unwrap_or(1),
+            };
+        }
+        let target = 1_000_000_000_i128;
+        let num = self.num.saturating_mul(target);
+        let half = self.den / 2;
+        let adjusted = if num >= 0 { num + half } else { num - half };
+        let ticks = if self.den == 0 {
+            0
+        } else {
+            adjusted.div_euclid(self.den)
+        };
+        let ticks = i64::try_from(ticks).unwrap_or(if ticks.is_positive() {
+            i64::MAX
+        } else {
+            i64::MIN
+        });
+        MediaTime {
+            ticks,
+            timescale: 1_000_000_000,
+        }
+    }
+}
+
+fn reduce_rational(num: i128, den: i128) -> ExactCursor {
+    if den == 0 {
+        return ExactCursor { num: 0, den: 1 };
+    }
+    let (num, den) = if den < 0 { (-num, -den) } else { (num, den) };
+    let g = gcd_i128(num.abs(), den).max(1);
+    ExactCursor {
+        num: num / g,
+        den: den / g,
+    }
+}
+
+fn gcd_i128(mut a: i128, mut b: i128) -> i128 {
+    while b != 0 {
+        let r = a % b;
+        a = b;
+        b = r;
+    }
+    a
+}
+
 use crate::error::{ProjectError, Result};
 use crate::ids::{MediaRefId, SequenceId};
 use crate::model::{SemanticRef, TimelineItem};
@@ -92,32 +188,27 @@ impl<'a> CompileCtx<'a> {
         track_index: usize,
         audio_only: bool,
     ) -> Result<()> {
-        let mut cursor = MediaTime::zero(1_000);
+        let mut cursor = ExactCursor::zero();
         for item in &track.items {
             match item {
                 TimelineItem::Gap(g) => {
-                    cursor = cursor.saturating_add(g.duration)?;
+                    cursor.add(g.duration);
                 }
                 TimelineItem::Clip(clip) => {
                     let rec = crate::emit_clip::record_duration(clip)?;
                     let (node, overlap) = self.emit_clip(clip)?;
-                    cursor = cursor.saturating_sub(overlap)?;
-                    if cursor.ticks < 0 {
-                        cursor.ticks = 0;
-                    }
+                    cursor.sub(overlap);
+                    let start = cursor.to_media();
                     if audio_only {
-                        self.audio.push(AudioRef {
-                            node,
-                            start: cursor,
-                        });
+                        self.audio.push(AudioRef { node, start });
                     } else {
                         self.layers.push(LayerRef {
                             node,
-                            start: cursor,
+                            start,
                             track: track_index,
                         });
                     }
-                    cursor = cursor.saturating_add(rec)?;
+                    cursor.add(rec);
                 }
                 TimelineItem::Nested(nested) => {
                     let child_id = nested.sequence.clone();
@@ -130,16 +221,17 @@ impl<'a> CompileCtx<'a> {
                     let before_a = self.audio.len();
                     let before_s = self.subtitles.len();
                     self.emit_sequence(&child)?;
+                    let base = cursor;
                     for layer in &mut self.layers[before_v..] {
-                        layer.start = cursor.saturating_add(layer.start)?;
+                        layer.start = base.offset(layer.start);
                     }
                     for layer in &mut self.audio[before_a..] {
-                        layer.start = cursor.saturating_add(layer.start)?;
+                        layer.start = base.offset(layer.start);
                     }
                     for cue in &mut self.subtitles[before_s..] {
-                        cue.start = cursor.saturating_add(cue.start)?;
+                        cue.start = base.offset(cue.start);
                     }
-                    cursor = cursor.saturating_add(add)?;
+                    cursor.add(add);
                 }
             }
         }
@@ -147,22 +239,22 @@ impl<'a> CompileCtx<'a> {
     }
 
     fn emit_subtitle_track(&mut self, track: &TimelineTrack) -> Result<()> {
-        let mut cursor = MediaTime::zero(1_000);
+        let mut cursor = ExactCursor::zero();
         for item in &track.items {
             match item {
                 TimelineItem::Gap(g) => {
-                    cursor = cursor.saturating_add(g.duration)?;
+                    cursor.add(g.duration);
                 }
                 TimelineItem::Clip(clip) => {
                     let rec = crate::emit_clip::record_duration(clip)?;
                     let media = self.lookup_media(&clip.media)?;
                     self.subtitles.push(SubtitleCueRef {
                         uri: media.uri.clone(),
-                        start: cursor,
+                        start: cursor.to_media(),
                         source_start: clip.source.start,
                         duration: rec,
                     });
-                    cursor = cursor.saturating_add(rec)?;
+                    cursor.add(rec);
                 }
                 TimelineItem::Nested(nested) => {
                     let child_id = nested.sequence.clone();
@@ -173,10 +265,11 @@ impl<'a> CompileCtx<'a> {
                     };
                     let before_s = self.subtitles.len();
                     self.emit_sequence(&child)?;
+                    let base = cursor;
                     for cue in &mut self.subtitles[before_s..] {
-                        cue.start = cursor.saturating_add(cue.start)?;
+                        cue.start = base.offset(cue.start);
                     }
-                    cursor = cursor.saturating_add(add)?;
+                    cursor.add(add);
                 }
             }
         }

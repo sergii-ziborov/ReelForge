@@ -99,6 +99,16 @@ impl VideoClip for SpeedVideo {
     }
 }
 
+fn pcm_at(samples: &[f32], channels: usize, frames: usize, frame: usize, channel: usize) -> f32 {
+    if channels == 0 || frame >= frames {
+        return 0.0;
+    }
+    samples
+        .get(frame * channels + channel)
+        .copied()
+        .unwrap_or(0.0)
+}
+
 struct SpeedAudio {
     inner: Arc<dyn AudioClip>,
     factor: f64,
@@ -113,6 +123,11 @@ impl AudioClip for SpeedAudio {
         self.inner.format()
     }
 
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss
+    )]
     fn samples_at(&self, t: Time, frame_count: usize) -> Result<AudioBuffer> {
         if frame_count == 0 {
             return AudioBuffer::silence(self.format(), 0);
@@ -123,13 +138,33 @@ impl AudioClip for SpeedAudio {
                 range: (Time::ZERO, Time::from_secs(self.duration().as_secs())),
             });
         }
-        // Map output time to source time; request same frame count (simple nearest remap).
-        let src_t = Time::from_secs(t.as_secs() * self.factor);
+        // Output frame i maps to source time t*factor + i/rate*factor, independent of chunking.
+        let fmt = self.format();
+        let channels = usize::from(fmt.channels());
+        let factor = self.factor;
+        let src_start = (t.as_secs() * factor).max(0.0);
         let max_t = (self.inner.duration().as_secs() - f64::EPSILON).max(0.0);
-        let src_t = Time::from_secs(src_t.as_secs().min(max_t));
-        // For speed != 1, true resampling would change pitch/duration of the window.
-        // Sample at remapped start with the same frame_count (pitch-preserving stretch is approximate).
-        self.inner.samples_at(src_t, frame_count)
+        let src_start = src_start.min(max_t);
+        let src_span = (frame_count as f64) * factor;
+        let src_frames = src_span.ceil() as usize + 2;
+        let src = self
+            .inner
+            .samples_at(Time::from_secs(src_start), src_frames.max(1))?;
+        let src_samples = src.samples();
+        let src_frames_got = src_samples.len() / channels.max(1);
+        let mut out = vec![0.0_f32; frame_count.saturating_mul(channels)];
+        for i in 0..frame_count {
+            let src_pos = (i as f64) * factor;
+            let i0 = src_pos.floor() as usize;
+            let frac = (src_pos - i0 as f64) as f32;
+            let i1 = i0.saturating_add(1);
+            for c in 0..channels {
+                let a = pcm_at(src_samples, channels, src_frames_got, i0, c);
+                let b = pcm_at(src_samples, channels, src_frames_got, i1, c);
+                out[i * channels + c] = a + (b - a) * frac;
+            }
+        }
+        AudioBuffer::from_interleaved(fmt, out)
     }
 }
 
@@ -137,6 +172,50 @@ impl AudioClip for SpeedAudio {
 mod tests {
     use super::*;
     use reelforge_core::{ColorClip, Rgb8};
+
+    #[test]
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss
+    )]
+    fn audio_speed_is_independent_of_chunk_size() {
+        use reelforge_core::{AudioEffect, AudioFormat, SampleLayout};
+        struct Ramp {
+            frames: usize,
+        }
+        impl AudioClip for Ramp {
+            fn duration(&self) -> Duration {
+                Duration::from_secs(self.frames as f64 / 8.0)
+            }
+            fn format(&self) -> AudioFormat {
+                AudioFormat::new(8, SampleLayout::Mono).unwrap()
+            }
+            fn samples_at(&self, t: Time, frame_count: usize) -> Result<AudioBuffer> {
+                let start = (t.as_secs() * 8.0).round() as usize;
+                let mut samples = Vec::with_capacity(frame_count);
+                for i in 0..frame_count {
+                    let idx = start + i;
+                    let v = if idx < self.frames {
+                        idx as f32 * 0.01
+                    } else {
+                        0.0
+                    };
+                    samples.push(v);
+                }
+                AudioBuffer::from_interleaved(self.format(), samples)
+            }
+        }
+        let sped = AudioEffect::apply(&Speed::new(2.0), Arc::new(Ramp { frames: 32 })).unwrap();
+        let whole = sped.samples_at(Time::ZERO, 4).unwrap();
+        let a = sped.samples_at(Time::ZERO, 2).unwrap();
+        let b = sped.samples_at(Time::from_secs(2.0 / 8.0), 2).unwrap();
+        let mut chunked = a.samples().to_vec();
+        chunked.extend_from_slice(b.samples());
+        for (left, right) in whole.samples().iter().zip(chunked.iter()) {
+            assert!((left - right).abs() < 1e-4, "{left} vs {right}");
+        }
+    }
 
     #[test]
     fn speed_halves_duration() {
