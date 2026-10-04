@@ -66,7 +66,7 @@ impl JobState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct StageArtifactRecord {
-    /// [`ExecutionPlan`] stage index that produced this file.
+    /// [`reelforge_render_graph::ExecutionPlan`] stage index that produced this file.
     pub stage_index: u32,
     /// Strong stage fingerprint (inputs + ops + backend + host).
     pub fingerprint: String,

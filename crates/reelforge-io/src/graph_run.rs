@@ -372,7 +372,7 @@ pub fn run_render_graph_with(
     run_render_graph_with_manifest(graph, control, options).map(|_| ())
 }
 
-/// Run a graph and return the sealed [`ArtifactManifest`] (output URIs + file hashes).
+/// Run a graph and return the sealed [`reelforge_render_graph::ArtifactManifest`] (output URIs + file hashes).
 ///
 /// # Errors
 ///

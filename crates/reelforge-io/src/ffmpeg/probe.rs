@@ -37,7 +37,7 @@ pub struct VideoProbe {
     pub color: ColorInfo,
     /// Raw `ffprobe` `pix_fmt` when present.
     pub pix_fmt: Option<String>,
-    /// Decode target for [`crate::VideoFileClip::surface_at`] (YUV stays YUV).
+    /// Decode target for [`reelforge_core::VideoClip::surface_at`] (YUV stays YUV).
     pub pixel_format: PixelFormat,
 }
 

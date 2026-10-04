@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// Stage of a multi-step write / plan run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WriteStage {
-    /// Walking [`crate::ExecutionPlan`] stages (index = stage, total = stage count).
+    /// Walking [`reelforge_render_graph::ExecutionPlan`] stages (index = stage, total = stage count).
     Plan,
     /// Sampling / encoding video frames.
     Video,

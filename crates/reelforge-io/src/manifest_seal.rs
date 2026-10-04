@@ -33,9 +33,9 @@ pub fn fingerprint_file(path: impl AsRef<Path>) -> Result<String> {
     Ok(format!("{:016x}", hasher.finish()))
 }
 
-/// Fill [`ArtifactRef::file_fingerprint`] for artifacts whose `uri` is an existing file.
+/// Fill [`reelforge_render_graph::ArtifactRef::file_fingerprint`] for artifacts whose `uri` is an existing file.
 ///
-/// Planned [`ArtifactRef::fingerprint`] is left unchanged.
+/// Planned [`reelforge_render_graph::ArtifactRef::fingerprint`] is left unchanged.
 ///
 /// # Errors
 ///
