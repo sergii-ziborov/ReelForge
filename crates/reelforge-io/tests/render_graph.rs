@@ -2,7 +2,7 @@
 
 use reelforge_core::{Duration, Frame, FrameFormat, MediaTime, Size, Time, VideoClip};
 use reelforge_io::{
-    GraphRunOptions, ImageClip, OpenVideoOptions, WriteControl, WriteVideoOptions,
+    GraphRunOptions, ImageClip, OpenVideoOptions, StageCache, WriteControl, WriteVideoOptions,
     explain_render_graph, ffmpeg_available, materialize_graph, open_video, run_render_graph,
     run_render_graph_with, run_render_graph_with_manifest, write_video,
 };
@@ -10,6 +10,7 @@ use reelforge_render_graph::{
     GraphOutput, MaskSample, MaskTimeline, MediaAsset, MediaAssetId, NodeId, OperationId,
     RENDER_GRAPH_VERSION, RegionRedaction, RenderGraph, RenderNode, RenderNodeKind,
 };
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -457,4 +458,60 @@ fn fastpath_on_and_off_keep_the_same_picture() {
     assert_blue(rgb_of(&rep_fast, 96, 24));
     assert_red(rgb_of(&rep_slow, 8, 24));
     assert_blue(rgb_of(&rep_slow, 96, 24));
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    for byte in Sha256::digest(bytes) {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
+fn only_cache_mp4(root: &Path) -> PathBuf {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(root).expect("cache dir") {
+        let path = entry.expect("entry").path();
+        if path.extension().and_then(|ext| ext.to_str()) == Some("mp4") {
+            found.push(path);
+        }
+    }
+    assert_eq!(found.len(), 1, "expected one cached mp4");
+    found.remove(0)
+}
+
+#[test]
+fn unchanged_cache_is_reused_and_fps_change_is_not() {
+    if skip_without_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let src = dir.path().join("src.mp4");
+    let out = dir.path().join("out.mp4");
+    let cache_root = dir.path().join("cache");
+    gen_color_mp4(&src);
+    let mut opts = GraphRunOptions::new().video_only();
+    opts.cache = Some(StageCache::open(&cache_root).expect("cache"));
+    opts.fps = Some(10.0);
+    let graph = source_and_out(&file_uri(&src), &file_uri(&out), vec![], "src");
+    run_render_graph_with(&graph, &WriteControl::default(), &opts).expect("first render");
+
+    let marker = b"REUSED-CACHE-MARKER";
+    let artifact = only_cache_mp4(&cache_root);
+    std::fs::write(&artifact, marker).expect("poison");
+    std::fs::write(
+        format!("{}.sha256", artifact.display()),
+        format!("{}\n", sha256_hex(marker)),
+    )
+    .expect("sidecar");
+    std::fs::remove_file(&out).expect("drop output");
+    run_render_graph_with(&graph, &WriteControl::default(), &opts).expect("cached render");
+    assert_eq!(std::fs::read(&out).expect("restored"), marker);
+
+    opts.fps = Some(5.0);
+    run_render_graph_with(&graph, &WriteControl::default(), &opts).expect("new fps");
+    let fresh = std::fs::read(&out).expect("re-encoded");
+    assert_ne!(fresh, marker);
+    assert!(fresh.len() > marker.len());
 }

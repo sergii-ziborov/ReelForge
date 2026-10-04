@@ -971,14 +971,20 @@ impl<'a> MaterializeCtx<'a> {
     }
 }
 
-fn execution_cache_key(
+pub(crate) fn execution_cache_key(
     graph: &RenderGraph,
     plan: &ExecutionPlan,
     options: &GraphRunOptions,
 ) -> Result<String> {
     let base = StageCache::run_fingerprint(graph, plan)?;
+    let sources = crate::stage_cache::source_set_fingerprint(
+        graph
+            .assets
+            .iter()
+            .map(|asset| (asset.id.0.as_str(), asset.uri.as_str())),
+    );
     Ok(format!(
-        "{base}|fps={}|codec={}|crf={}|audio={}",
+        "{base}|fps={}|codec={}|crf={}|audio={}|src={sources}",
         options
             .fps
             .map(|fps| format!("{fps:.6}"))
@@ -990,14 +996,12 @@ fn execution_cache_key(
 }
 
 fn asset_input_fingerprint(graph: &RenderGraph) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    let mut h = DefaultHasher::new();
-    for a in &graph.assets {
-        a.id.0.hash(&mut h);
-        a.uri.hash(&mut h);
-    }
-    format!("{:016x}", h.finish())
+    crate::stage_cache::source_set_fingerprint(
+        graph
+            .assets
+            .iter()
+            .map(|asset| (asset.id.0.as_str(), asset.uri.as_str())),
+    )
 }
 
 /// Live fingerprints for each plan stage (same keys the runner uses).
@@ -2227,6 +2231,35 @@ mod tests {
         let again = execution_cache_key(&graph, &plan, &slow).unwrap();
         assert_ne!(a, b);
         assert_eq!(a, again);
+    }
+
+    #[test]
+    fn cache_key_tracks_source_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("in.mp4");
+        std::fs::write(&src, b"frame-a").unwrap();
+        let graph = RenderGraph {
+            version: RENDER_GRAPH_VERSION,
+            assets: vec![MediaAsset {
+                id: MediaAssetId("a".into()),
+                uri: src.to_string_lossy().into_owned(),
+                duration: None,
+                role: None,
+            }],
+            nodes: vec![],
+            outputs: vec![],
+        };
+        let plan = ExecutionPlan::default();
+        let options = GraphRunOptions::default();
+        let first = execution_cache_key(&graph, &plan, &options).unwrap();
+        let again = execution_cache_key(&graph, &plan, &options).unwrap();
+        assert_eq!(first, again);
+        std::fs::write(&src, b"frame-b").unwrap();
+        let changed = execution_cache_key(&graph, &plan, &options).unwrap();
+        assert_ne!(first, changed);
+        std::fs::write(&src, b"frame-a").unwrap();
+        let restored = execution_cache_key(&graph, &plan, &options).unwrap();
+        assert_eq!(first, restored);
     }
 
     #[test]

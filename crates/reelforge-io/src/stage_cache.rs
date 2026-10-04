@@ -5,9 +5,11 @@ use reelforge_render_graph::{
     CompiledOp, ExecutionPlan, RenderGraph, StageCacheKey, fingerprint_graph_run,
     fingerprint_stage, fingerprint_stage_key,
 };
+use sha2::{Digest, Sha256};
 use std::collections::hash_map::DefaultHasher;
 use std::fs;
 use std::hash::{Hash, Hasher};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -40,23 +42,27 @@ impl StageCache {
     }
 
     /// Path for a fingerprint + extension (e.g. `mp4` without dot).
+    ///
+    /// The filename is a hex digest of the key, so `|` and `:` in the logical
+    /// key stay off the filesystem.
     #[must_use]
     pub fn path_for(&self, fingerprint: &str, ext: &str) -> PathBuf {
         let ext = ext.trim_start_matches('.');
-        self.root.join(format!("{fingerprint}.{ext}"))
+        let name = sha256_hex(fingerprint.as_bytes());
+        self.root.join(format!("{name}.{ext}"))
     }
 
-    /// Return existing cache file when present and non-empty.
+    /// Return a cache file only when its bytes match the stored SHA-256.
     #[must_use]
     pub fn hit(&self, fingerprint: &str, ext: &str) -> Option<PathBuf> {
         let p = self.path_for(fingerprint, ext);
-        match fs::metadata(&p) {
-            Ok(m) if m.is_file() && m.len() > 0 => Some(p),
-            _ => None,
-        }
+        validated_file(&p)
     }
 
     /// Copy `src` into the cache slot for `fingerprint`.
+    ///
+    /// The bytes land in a partial file, then replace the slot together with a
+    /// SHA-256 sidecar. A reader never accepts a half-written artifact.
     ///
     /// # Errors
     ///
@@ -72,9 +78,27 @@ impl StageCache {
             fs::create_dir_all(parent)
                 .map_err(|e| IoError::message(format!("stage cache parent: {e}")))?;
         }
-        fs::copy(src.as_ref(), &dest)
-            .map_err(|e| IoError::message(format!("stage cache store: {e}")))?;
-        Ok(dest)
+        let ext = ext.trim_start_matches('.');
+        let safe = sha256_hex(fingerprint.as_bytes());
+        let tmp = self.root.join(format!(".{safe}.{ext}.partial"));
+        let tmp_side = self.root.join(format!(".{safe}.{ext}.sha256.partial"));
+        let stored = (|| {
+            fs::copy(src.as_ref(), &tmp)
+                .map_err(|e| IoError::message(format!("stage cache store: {e}")))?;
+            let digest = hash_file(&tmp).ok_or_else(|| {
+                IoError::message("stage cache store: could not hash the partial artifact")
+            })?;
+            fs::write(&tmp_side, format!("{digest}\n"))
+                .map_err(|e| IoError::message(format!("stage cache sidecar: {e}")))?;
+            replace_file(&tmp, &dest)?;
+            replace_file(&tmp_side, &sidecar(&dest))?;
+            Ok(dest)
+        })();
+        if stored.is_err() {
+            let _ = fs::remove_file(&tmp);
+            let _ = fs::remove_file(&tmp_side);
+        }
+        stored
     }
 
     /// Full-run fingerprint (graph + plan).
@@ -114,13 +138,15 @@ impl StageCache {
 
     /// Fingerprint an intermediate `FFmpeg` filter stage.
     ///
-    /// Includes source URI, filtergraph, node ids, and host `FFmpeg` version so a
-    /// tool upgrade does not reuse stale intermediates.
+    /// Includes source URI, source bytes, filtergraph, node ids, and host
+    /// `FFmpeg` version so a tool upgrade or a replaced file does not reuse a
+    /// stale intermediate.
     #[must_use]
     pub fn ffmpeg_prefix_key(source_uri: &str, vf: &str, node_ids: &[impl AsRef<str>]) -> String {
         let mut h = DefaultHasher::new();
-        "ffmpeg_prefix_v2".hash(&mut h);
+        "ffmpeg_prefix_v3".hash(&mut h);
         source_uri.hash(&mut h);
+        source_digest(source_uri).hash(&mut h);
         vf.hash(&mut h);
         for id in node_ids {
             id.as_ref().hash(&mut h);
@@ -155,6 +181,85 @@ impl StageCache {
 pub fn probe_ffmpeg_version_cached() -> &'static str {
     static VER: OnceLock<String> = OnceLock::new();
     VER.get_or_init(probe_ffmpeg_version).as_str()
+}
+
+/// SHA-256 of a source file, or `absent` when the URI is not a readable file.
+#[must_use]
+pub(crate) fn source_digest(uri: &str) -> String {
+    hash_file(Path::new(uri)).unwrap_or_else(|| "absent".into())
+}
+
+/// SHA-256 over asset ids, URIs, and source file bytes.
+#[must_use]
+pub(crate) fn source_set_fingerprint<'a>(
+    assets: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> String {
+    let mut hasher = Sha256::new();
+    for (id, uri) in assets {
+        hasher.update(len_le(id));
+        hasher.update(id.as_bytes());
+        hasher.update(len_le(uri));
+        hasher.update(uri.as_bytes());
+        let digest = source_digest(uri);
+        hasher.update(len_le(&digest));
+        hasher.update(digest.as_bytes());
+    }
+    hex_encode(&hasher.finalize())
+}
+
+fn len_le(text: &str) -> [u8; 8] {
+    u64::try_from(text.len()).unwrap_or(u64::MAX).to_le_bytes()
+}
+
+fn validated_file(path: &Path) -> Option<PathBuf> {
+    let meta = fs::metadata(path).ok()?;
+    if !meta.is_file() || meta.len() == 0 {
+        return None;
+    }
+    let expected = fs::read_to_string(sidecar(path)).ok()?;
+    let actual = hash_file(path)?;
+    if expected.trim() != actual {
+        return None;
+    }
+    Some(path.to_path_buf())
+}
+
+fn sidecar(artifact: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.sha256", artifact.display()))
+}
+
+fn hash_file(path: &Path) -> Option<String> {
+    let mut file = fs::File::open(path).ok()?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0_u8; 8192];
+    loop {
+        let n = file.read(&mut buf).ok()?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Some(hex_encode(&hasher.finalize()))
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    hex_encode(&Sha256::digest(bytes))
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
+fn replace_file(from: &Path, to: &Path) -> Result<()> {
+    if to.exists() {
+        fs::remove_file(to).map_err(|e| IoError::message(format!("stage cache replace: {e}")))?;
+    }
+    fs::rename(from, to).map_err(|e| IoError::message(format!("stage cache rename: {e}")))
 }
 
 fn probe_ffmpeg_version() -> String {
@@ -196,5 +301,30 @@ mod tests {
         assert_eq!(a, b);
         let c = StageCache::ffmpeg_prefix_key("in.mp4", "vflip", &["a", "b"]);
         assert_ne!(a, c);
+    }
+
+    #[test]
+    fn prefix_key_tracks_source_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("in.mp4");
+        fs::write(&src, b"aaaa").unwrap();
+        let uri = src.to_string_lossy();
+        let first = StageCache::ffmpeg_prefix_key(&uri, "hflip", &["a"]);
+        let again = StageCache::ffmpeg_prefix_key(&uri, "hflip", &["a"]);
+        assert_eq!(first, again);
+        fs::write(&src, b"bbbb").unwrap();
+        let changed = StageCache::ffmpeg_prefix_key(&uri, "hflip", &["a"]);
+        assert_ne!(first, changed);
+    }
+
+    #[test]
+    fn corrupt_artifact_is_a_miss() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = StageCache::open(dir.path()).unwrap();
+        let src = dir.path().join("blob.bin");
+        fs::write(&src, b"hello").unwrap();
+        let dest = cache.store_copy("abc123", "bin", &src).unwrap();
+        fs::write(&dest, b"tampered").unwrap();
+        assert!(cache.hit("abc123", "bin").is_none());
     }
 }

@@ -2,10 +2,11 @@
 
 use crate::control::{WriteControl, WriteProgress, WriteStage};
 use crate::error::{IoError, Result};
-use crate::graph_run::{GraphRunOptions, plan_stage_fingerprints, run_render_graph_with_manifest};
+use crate::graph_run::{
+    GraphRunOptions, execution_cache_key, plan_stage_fingerprints, run_render_graph_with_manifest,
+};
 use crate::job::{JobState, RenderJob};
 use crate::job_store::JobStore;
-use crate::stage_cache::StageCache;
 use crate::stage_resume::{StageCommit, restore_validated_prefix};
 use reelforge_render_graph::{ArtifactManifest, ExecutionPlan, RenderGraph, schedule_graph};
 use std::path::Path;
@@ -25,7 +26,7 @@ pub fn submit_render_job(
         .map_err(|e| IoError::message(e.to_string()))?;
     let plan =
         schedule_graph(graph, &options.registry).map_err(|e| IoError::message(e.to_string()))?;
-    let fp = StageCache::run_fingerprint(graph, &plan)?;
+    let fp = execution_cache_key(graph, &plan, options)?;
     let mut job = RenderJob::new(crate::job::JobId::generate()).with_fingerprint(fp);
     job.checkpoint.total_stages = u32::try_from(plan.stages.len()).unwrap_or(u32::MAX);
     if let Some(uri) = first_output_uri(graph) {
@@ -41,8 +42,9 @@ pub fn submit_render_job(
 /// persist [`JobState::Failed`]. Success persists [`JobState::Done`].
 ///
 /// Completed stages with a valid on-disk artifact are skipped. In-process
-/// stages without a file still re-run. A matching full-run [`StageCache`]
-/// hit skips encode. Capture owns retry / queue policy.
+/// stages without a file still re-run. A matching full-run [`crate::StageCache`]
+/// hit skips encode. The fingerprint includes encode options and source bytes.
+/// Capture owns retry / queue policy.
 ///
 /// # Errors
 ///
@@ -56,7 +58,7 @@ pub fn run_render_job(
 ) -> Result<ArtifactManifest> {
     let plan =
         schedule_graph(graph, &options.registry).map_err(|e| IoError::message(e.to_string()))?;
-    let fp = StageCache::run_fingerprint(graph, &plan)?;
+    let fp = execution_cache_key(graph, &plan, options)?;
     if job.state == JobState::Done
         && job.run_fingerprint.as_deref() == Some(fp.as_str())
         && output_ready(job)
@@ -276,6 +278,33 @@ mod tests {
         assert!(!manifest.outputs.is_empty());
         assert_eq!(store.load(&job.id).unwrap().state, JobState::Done);
         let _ = JobId::new("x");
+    }
+
+    #[test]
+    fn job_fingerprint_tracks_fps_and_source_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("in.bin");
+        std::fs::write(&src, b"aaa").unwrap();
+        let mut g = tiny_graph();
+        g.assets[0].uri = src.to_string_lossy().into_owned();
+        let store = JobStore::open(dir.path().join("jobs")).unwrap();
+        let slow = GraphRunOptions {
+            fps: Some(5.0),
+            ..GraphRunOptions::default()
+        };
+        let fast = GraphRunOptions {
+            fps: Some(10.0),
+            ..GraphRunOptions::default()
+        };
+        let slow_job = submit_render_job(&store, &g, &slow).unwrap();
+        let fast_job = submit_render_job(&store, &g, &fast).unwrap();
+        assert_ne!(slow_job.run_fingerprint, fast_job.run_fingerprint);
+        std::fs::write(&src, b"bbb").unwrap();
+        let changed = submit_render_job(&store, &g, &slow).unwrap();
+        assert_ne!(slow_job.run_fingerprint, changed.run_fingerprint);
+        std::fs::write(&src, b"aaa").unwrap();
+        let again = submit_render_job(&store, &g, &slow).unwrap();
+        assert_eq!(slow_job.run_fingerprint, again.run_fingerprint);
     }
 
     #[test]
