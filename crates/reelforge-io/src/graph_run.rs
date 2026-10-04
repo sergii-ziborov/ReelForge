@@ -167,6 +167,12 @@ pub struct GraphRunOptions {
     pub resume_from_stage: u32,
     /// Restored node clips from validated stage artifacts.
     pub restored_video: HashMap<String, Arc<dyn VideoClip>>,
+    /// Audio restored with each node, when the artifact had a stream.
+    pub restored_audio: HashMap<String, Arc<dyn AudioClip>>,
+    /// Masks from the artifact sidecar. A missing sidecar leaves this empty.
+    pub restored_masks: HashMap<String, reelforge_render_graph::MaskTimeline>,
+    /// Branch encode settings from the sidecar. A missing sidecar leaves this empty.
+    pub restored_encode: HashMap<String, crate::StageEncodeState>,
     /// Persist each completed stage under this directory.
     pub persist_stage_dir: Option<PathBuf>,
     /// Invoked after a stage is committed (fingerprint + artifacts).
@@ -188,6 +194,9 @@ impl Default for GraphRunOptions {
             gpu_registry: crate::GpuRegistry::with_builtins(),
             resume_from_stage: 0,
             restored_video: HashMap::new(),
+            restored_audio: HashMap::new(),
+            restored_masks: HashMap::new(),
+            restored_encode: HashMap::new(),
             persist_stage_dir: None,
             on_stage_committed: None,
         }
@@ -255,6 +264,9 @@ impl GraphRunOptions {
     pub fn with_stage_resume(mut self, plan: crate::StageResumePlan) -> Self {
         self.resume_from_stage = plan.start_stage;
         self.restored_video = plan.restored_video;
+        self.restored_audio = plan.restored_audio;
+        self.restored_masks = plan.restored_masks;
+        self.restored_encode = plan.restored_encode;
         self
     }
 
@@ -271,6 +283,9 @@ impl GraphRunOptions {
         crate::StageRunHooks {
             start_stage: self.resume_from_stage,
             restored_video: self.restored_video.clone(),
+            restored_audio: self.restored_audio.clone(),
+            restored_masks: self.restored_masks.clone(),
+            restored_encode: self.restored_encode.clone(),
             persist_dir: self.persist_stage_dir.clone(),
             on_committed: self.on_stage_committed.clone(),
         }
@@ -292,6 +307,9 @@ impl core::fmt::Debug for GraphRunOptions {
             .field("gpu_registry", &self.gpu_registry.len())
             .field("resume_from_stage", &self.resume_from_stage)
             .field("restored_video", &self.restored_video.len())
+            .field("restored_audio", &self.restored_audio.len())
+            .field("restored_masks", &self.restored_masks.len())
+            .field("restored_encode", &self.restored_encode.len())
             .field("persist_stage_dir", &self.persist_stage_dir)
             .field("on_stage_committed", &self.on_stage_committed.is_some())
             .finish()
@@ -740,10 +758,7 @@ pub fn materialize_execution_plan_with_adapters<S: BuildHasher, A: BuildHasher>(
 
     let mut ctx = MaterializeCtx::new(graph, registry, with_audio, adapters, gpu);
     if let Some(h) = hooks {
-        for (id, clip) in &h.restored_video {
-            ctx.produced
-                .insert(id.clone(), NodeMedia::new(Arc::clone(clip), None));
-        }
+        inject_restored(&mut ctx.produced, h);
     }
     let mut upstream_fp = asset_input_fingerprint(graph);
     let total_stages = plan.stages.len();
@@ -790,18 +805,8 @@ pub fn materialize_execution_plan_with_adapters<S: BuildHasher, A: BuildHasher>(
         if let Some(h) = hooks {
             let mut artifacts = Vec::new();
             if let Some(dir) = h.persist_dir.as_ref() {
-                for id in node_ids {
-                    let Some(media) = ctx.produced.get(&id.0) else {
-                        continue;
-                    };
-                    artifacts.push(crate::persist_stage_video(
-                        dir,
-                        u32::try_from(si).unwrap_or(u32::MAX),
-                        &stage_fp,
-                        &id.0,
-                        media.video.as_ref(),
-                    )?);
-                }
+                let ids = stage_frontier_ids(plan, si, node_ids);
+                artifacts = persist_finished_stage(dir, si, &stage_fp, &ids, &ctx.produced)?;
             }
             if let Some(cb) = &h.on_committed {
                 cb(crate::StageCommit {
@@ -817,6 +822,94 @@ pub fn materialize_execution_plan_with_adapters<S: BuildHasher, A: BuildHasher>(
     }
 
     ctx.finish_bundle()
+}
+
+fn inject_restored(produced: &mut HashMap<String, NodeMedia>, hooks: &crate::StageRunHooks) {
+    for (id, clip) in &hooks.restored_video {
+        let mut media = NodeMedia::new(Arc::clone(clip), hooks.restored_audio.get(id).cloned());
+        if let Some(masks) = hooks.restored_masks.get(id) {
+            media.masks = Some(masks.clone());
+        }
+        if let Some(encode) = hooks.restored_encode.get(id) {
+            media.encode = encode_from_state(encode);
+        }
+        produced.insert(id.clone(), media);
+    }
+}
+
+fn encode_from_state(state: &crate::StageEncodeState) -> OutputEncodeOptions {
+    OutputEncodeOptions {
+        fps: state.fps,
+        video_codec: state.video_codec.clone(),
+        crf: state.crf,
+        preserve_audio: state.preserve_audio,
+        path: state.path.clone(),
+    }
+}
+
+fn encode_state_of(encode: &OutputEncodeOptions) -> crate::StageEncodeState {
+    crate::StageEncodeState {
+        fps: encode.fps,
+        video_codec: encode.video_codec.clone(),
+        crf: encode.crf,
+        preserve_audio: encode.preserve_audio,
+        path: encode.path.clone(),
+    }
+}
+
+/// Nodes that leave the stage: a later stage or a graph output consumes them.
+///
+/// Plans without per-stage ports persist every node, which is the older path.
+fn stage_frontier_ids(
+    plan: &ExecutionPlan,
+    stage_index: usize,
+    node_ids: &[NodeId],
+) -> Vec<String> {
+    let Some(io) = plan.stage_io(stage_index) else {
+        return node_ids.iter().map(|id| id.0.clone()).collect();
+    };
+    if io.nodes.len() != node_ids.len() {
+        return node_ids.iter().map(|id| id.0.clone()).collect();
+    }
+    let mut out = Vec::new();
+    for port in &io.outputs {
+        let Some(pos) = io.nodes.iter().position(|node| *node == port.node) else {
+            continue;
+        };
+        if let Some(id) = node_ids.get(pos) {
+            out.push(id.0.clone());
+        }
+    }
+    out
+}
+
+fn persist_finished_stage(
+    dir: &Path,
+    stage_index: usize,
+    fingerprint: &str,
+    ids: &[String],
+    produced: &HashMap<String, NodeMedia>,
+) -> Result<Vec<crate::StageArtifactRecord>> {
+    let mut artifacts = Vec::new();
+    for id in ids {
+        let Some(media) = produced.get(id) else {
+            continue;
+        };
+        let encode = encode_state_of(&media.encode);
+        artifacts.push(crate::stage_resume::persist_stage_media(
+            dir,
+            u32::try_from(stage_index).unwrap_or(u32::MAX),
+            fingerprint,
+            id,
+            &crate::stage_resume::StageMediaParts {
+                video: media.video.as_ref(),
+                audio: media.audio.as_deref(),
+                masks: media.masks.as_ref(),
+                encode: &encode,
+            },
+        )?);
+    }
+    Ok(artifacts)
 }
 
 /// In-process materialize state shared by full-topo and stage runners.
@@ -1547,7 +1640,8 @@ mod tests {
     use super::*;
     use crate::ImageClip;
     use reelforge_core::{
-        ColorClip, Duration, Frame, FrameFormat, MediaTime, Rgb8, Rgba8, Size, Time,
+        AudioFormat, ColorClip, Duration, Frame, FrameFormat, MediaTime, Rgb8, Rgba8, SilenceClip,
+        Size, Time,
     };
     use reelforge_render_graph::{
         GraphOutput, MaskSample, MaskTimeline, MediaAsset, MediaAssetId, RENDER_GRAPH_VERSION,
@@ -1609,6 +1703,80 @@ mod tests {
                     inputs: vec![NodeId("enc".into())],
                 },
             ],
+            outputs: vec![GraphOutput {
+                name: "main".into(),
+                node: NodeId("out".into()),
+                uri: Some("out.mp4".into()),
+            }],
+        }
+    }
+
+    fn rust_chain_graph() -> RenderGraph {
+        chain_graph(vec![
+            RenderNode {
+                id: NodeId("invert".into()),
+                body: RenderNodeKind::Op {
+                    operation: OperationId::new("rf.color.invert"),
+                    params: serde_json::json!({}),
+                },
+                inputs: vec![NodeId("src".into())],
+            },
+            RenderNode {
+                id: NodeId("bw".into()),
+                body: RenderNodeKind::Op {
+                    operation: OperationId::new("rf.color.black_and_white"),
+                    params: serde_json::json!({}),
+                },
+                inputs: vec![NodeId("invert".into())],
+            },
+        ])
+    }
+
+    fn mask_resume_graph() -> RenderGraph {
+        chain_graph(vec![RenderNode {
+            id: NodeId("redact".into()),
+            body: RenderNodeKind::Redaction {
+                redaction: RegionRedaction {
+                    masks: MaskTimeline::new(),
+                    style: RedactionStyle::Solid {
+                        color: Rgba8::BLACK,
+                    },
+                },
+            },
+            inputs: vec![NodeId("src".into())],
+        }])
+    }
+
+    fn chain_graph(middle: Vec<RenderNode>) -> RenderGraph {
+        let mut nodes = vec![RenderNode {
+            id: NodeId("src".into()),
+            body: RenderNodeKind::Source {
+                asset: MediaAssetId("a".into()),
+            },
+            inputs: vec![],
+        }];
+        let last = if let Some(node) = middle.last() {
+            node.id.0.clone()
+        } else {
+            "src".into()
+        };
+        nodes.extend(middle);
+        nodes.push(RenderNode {
+            id: NodeId("out".into()),
+            body: RenderNodeKind::Output {
+                name: "main".into(),
+            },
+            inputs: vec![NodeId(last)],
+        });
+        RenderGraph {
+            version: RENDER_GRAPH_VERSION,
+            assets: vec![MediaAsset {
+                id: MediaAssetId("a".into()),
+                uri: "seed://color".into(),
+                duration: None,
+                role: Some("video".into()),
+            }],
+            nodes,
             outputs: vec![GraphOutput {
                 name: "main".into(),
                 node: NodeId("out".into()),
@@ -1785,8 +1953,7 @@ mod tests {
         let hooks = crate::StageRunHooks {
             start_stage: 1,
             restored_video: restored,
-            persist_dir: None,
-            on_committed: None,
+            ..crate::StageRunHooks::default()
         };
         let bundle = materialize_execution_plan_with_adapters(
             &g,
@@ -1804,6 +1971,149 @@ mod tests {
         .unwrap();
         assert!(bundle.video.duration().as_secs() > 0.0);
         let _ = bundle.video.frame_at(Time::ZERO).unwrap();
+    }
+
+    #[test]
+    fn checkpoint_frontier_omits_internal_nodes() {
+        let g = rust_chain_graph();
+        let registry = OperationRegistry::with_builtins();
+        let plan = schedule_graph(&g, &registry).unwrap();
+        let (index, stage) = plan
+            .stages
+            .iter()
+            .enumerate()
+            .find(|(_, stage)| stage.backend_tag() == "rust")
+            .expect("rust stage");
+        let ids: Vec<&str> = stage.node_ids().iter().map(|id| id.0.as_str()).collect();
+        assert!(ids.contains(&"invert"));
+        assert!(ids.contains(&"bw"));
+        let frontier = stage_frontier_ids(&plan, index, stage.node_ids());
+        assert!(frontier.iter().any(|id| id == "bw"));
+        assert!(!frontier.iter().any(|id| id == "invert"));
+    }
+
+    #[test]
+    fn checkpoint_persist_writes_frontier_only() {
+        if !crate::ffmpeg_available() {
+            return;
+        }
+        let g = rust_chain_graph();
+        let registry = OperationRegistry::with_builtins();
+        let plan = schedule_graph(&g, &registry).unwrap();
+        let seed: Arc<dyn VideoClip> = Arc::new(
+            ColorClip::new(Size::new(32, 32), Rgb8::WHITE, Duration::from_secs(0.4)).with_fps(10.0),
+        );
+        let mut seeds = HashMap::new();
+        seeds.insert(MediaAssetId("a".into()), seed);
+        let audio: HashMap<MediaAssetId, Arc<dyn AudioClip>> = HashMap::new();
+        let dir = tempfile::tempdir().unwrap();
+        let written = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let written2 = Arc::clone(&written);
+        let hooks = crate::StageRunHooks {
+            persist_dir: Some(dir.path().to_path_buf()),
+            on_committed: Some(Arc::new(move |commit| {
+                written2
+                    .lock()
+                    .unwrap()
+                    .extend(commit.artifacts.iter().map(|rec| rec.node_id.clone()));
+            })),
+            ..crate::StageRunHooks::default()
+        };
+        materialize_execution_plan_with_adapters(
+            &g,
+            &plan,
+            &registry,
+            &seeds,
+            &audio,
+            true,
+            None,
+            None,
+            crate::AdapterContext::default(),
+            crate::GpuContext::default(),
+            Some(&hooks),
+        )
+        .unwrap();
+        let ids = written.lock().unwrap().clone();
+        assert!(ids.iter().any(|id| id == "bw"));
+        assert!(ids.iter().any(|id| id == "src"));
+        assert!(!ids.iter().any(|id| id == "invert"));
+    }
+
+    #[test]
+    fn checkpoint_resume_keeps_audio_masks_and_encode() {
+        if !crate::ffmpeg_available() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let g = mask_resume_graph();
+        let registry = OperationRegistry::with_builtins();
+        let plan = schedule_graph(&g, &registry).unwrap();
+        let expected = plan_stage_fingerprints(&g, &plan, &registry).unwrap();
+        assert!(plan.stage_count() >= 2);
+        let duration = Duration::from_secs(0.4);
+        let video = ColorClip::new(Size::new(32, 32), Rgb8::WHITE, duration).with_fps(10.0);
+        let audio = SilenceClip::new(AudioFormat::STEREO_48K, duration);
+        let mut masks = MaskTimeline::new();
+        masks.push(MaskSample::ellipse(
+            MediaTime::new(0, 30).unwrap(),
+            16.0,
+            16.0,
+            8.0,
+        ));
+        let encode = crate::StageEncodeState {
+            crf: Some(21),
+            fps: Some(12.0),
+            preserve_audio: Some(true),
+            ..crate::StageEncodeState::default()
+        };
+        let rec = crate::stage_resume::persist_stage_media(
+            dir.path(),
+            0,
+            &expected[0],
+            "src",
+            &crate::stage_resume::StageMediaParts {
+                video: &video,
+                audio: Some(&audio),
+                masks: Some(&masks),
+                encode: &encode,
+            },
+        )
+        .unwrap();
+        let resume = crate::restore_validated_prefix(&[rec], &expected).unwrap();
+        assert_eq!(resume.start_stage, 1);
+        assert!(resume.restored_audio.contains_key("src"));
+        assert_eq!(resume.restored_masks.get("src"), Some(&masks));
+        assert_eq!(
+            resume
+                .restored_encode
+                .get("src")
+                .and_then(|state| state.crf),
+            Some(21)
+        );
+        let hooks = GraphRunOptions::new()
+            .with_stage_resume(resume)
+            .stage_hooks();
+        let seeds: HashMap<MediaAssetId, Arc<dyn VideoClip>> = HashMap::new();
+        let audio_seeds: HashMap<MediaAssetId, Arc<dyn AudioClip>> = HashMap::new();
+        let bundle = materialize_execution_plan_with_adapters(
+            &g,
+            &plan,
+            &registry,
+            &seeds,
+            &audio_seeds,
+            true,
+            None,
+            None,
+            crate::AdapterContext::default(),
+            crate::GpuContext::default(),
+            Some(&hooks),
+        )
+        .unwrap();
+        assert!(bundle.audio.is_some());
+        assert_eq!(bundle.hints.crf, Some(21));
+        let frame = bundle.video.frame_at(Time::ZERO).unwrap();
+        assert_eq!(rgb_at(&frame, 32, 16, 16), [0, 0, 0]);
+        assert_eq!(rgb_at(&frame, 32, 0, 0), [255, 255, 255]);
     }
 
     #[test]

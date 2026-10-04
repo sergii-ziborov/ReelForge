@@ -5,8 +5,10 @@ use crate::job::StageArtifactRecord;
 use crate::manifest_seal::fingerprint_file;
 use crate::options::WriteVideoOptions;
 use crate::video_file::open_video;
-use crate::write::write_video;
-use reelforge_core::VideoClip;
+use crate::write::{write_av, write_video};
+use reelforge_core::{AudioClip, VideoClip};
+use reelforge_render_graph::MaskTimeline;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -23,6 +25,56 @@ pub struct StageCommit {
     pub artifacts: Vec<StageArtifactRecord>,
 }
 
+/// Encode settings stored beside a stage artifact.
+///
+/// Absent fields fall back to the run. A checkpoint with no sidecar restores
+/// as [`Self::default`], so older records stay valid.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct StageEncodeState {
+    /// Frames per second for this branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fps: Option<f64>,
+    /// Video codec name (`libx264`, …).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_codec: Option<String>,
+    /// Constant-rate factor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub crf: Option<u8>,
+    /// Mux companion audio when `Some(true)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preserve_audio: Option<bool>,
+    /// Path recorded on the branch's encode node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
+impl StageEncodeState {
+    fn is_empty(&self) -> bool {
+        self.fps.is_none()
+            && self.video_codec.is_none()
+            && self.crf.is_none()
+            && self.preserve_audio.is_none()
+            && self.path.is_none()
+    }
+}
+
+/// Picture, audio, masks, and encode settings for one persisted node.
+#[derive(Clone, Copy)]
+pub(crate) struct StageMediaParts<'a> {
+    pub(crate) video: &'a dyn VideoClip,
+    pub(crate) audio: Option<&'a dyn AudioClip>,
+    pub(crate) masks: Option<&'a MaskTimeline>,
+    pub(crate) encode: &'a StageEncodeState,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct StageMediaSidecar {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    masks: Option<MaskTimeline>,
+    #[serde(default, skip_serializing_if = "StageEncodeState::is_empty")]
+    encode: StageEncodeState,
+}
+
 /// Optional resume / persist hooks for [`crate::materialize_execution_plan`].
 #[derive(Clone, Default)]
 pub struct StageRunHooks {
@@ -30,6 +82,12 @@ pub struct StageRunHooks {
     pub start_stage: u32,
     /// Restored clips keyed by graph node id.
     pub restored_video: HashMap<String, Arc<dyn VideoClip>>,
+    /// Audio restored with each node, when the artifact had a stream.
+    pub restored_audio: HashMap<String, Arc<dyn AudioClip>>,
+    /// Masks from the artifact sidecar. A missing sidecar leaves this empty.
+    pub restored_masks: HashMap<String, MaskTimeline>,
+    /// Branch encode settings from the sidecar. A missing sidecar leaves this empty.
+    pub restored_encode: HashMap<String, StageEncodeState>,
     /// When set, each completed stage is encoded under this directory.
     pub persist_dir: Option<PathBuf>,
     /// Called after a stage is evaluated (and persisted, when configured).
@@ -43,6 +101,12 @@ pub struct StageResumePlan {
     pub start_stage: u32,
     /// Node id → restored video from a validated artifact.
     pub restored_video: HashMap<String, Arc<dyn VideoClip>>,
+    /// Audio restored with each node, when the artifact had a stream.
+    pub restored_audio: HashMap<String, Arc<dyn AudioClip>>,
+    /// Masks from the artifact sidecar. A missing sidecar leaves this empty.
+    pub restored_masks: HashMap<String, MaskTimeline>,
+    /// Branch encode settings from the sidecar. A missing sidecar leaves this empty.
+    pub restored_encode: HashMap<String, StageEncodeState>,
 }
 
 /// True when the file exists, is non-empty, and matches the stored hash.
@@ -81,6 +145,10 @@ pub fn first_invalid_stage(artifacts: &[StageArtifactRecord], total_stages: u32)
 /// `expected_by_stage[i]` is the live fingerprint for stage `i`. A mismatch
 /// means the graph/plan/host changed and that stage must run again.
 ///
+/// A readable sidecar restores masks and encode settings. A missing sidecar
+/// (checkpoints written before that file existed) restores the picture only.
+/// A sidecar that does not parse stops the prefix so the stage runs again.
+///
 /// # Errors
 ///
 /// `open_video` failures on a record that passed [`artifact_is_valid`].
@@ -96,21 +164,48 @@ pub fn restore_validated_prefix(
             .iter()
             .filter(|a| a.stage_index == index && a.fingerprint == *expected)
             .collect();
-        if recs.is_empty() || recs.iter().any(|r| !artifact_is_valid(r)) {
+        if recs.is_empty()
+            || recs
+                .iter()
+                .any(|r| !artifact_is_valid(r) || !sidecar_allows_resume(&r.uri))
+        {
             plan.start_stage = index;
             return Ok(plan);
         }
         for rec in recs {
-            let clip = open_video(&crate::OpenVideoOptions::new(&rec.uri))?;
-            plan.restored_video
-                .insert(rec.node_id.clone(), Arc::new(clip));
+            restore_one(&mut plan, rec)?;
         }
         plan.start_stage = index.saturating_add(1);
     }
     Ok(plan)
 }
 
+fn restore_one(plan: &mut StageResumePlan, rec: &StageArtifactRecord) -> Result<()> {
+    let clip = open_video(&crate::OpenVideoOptions::new(&rec.uri))?;
+    let audio = clip
+        .audio()
+        .cloned()
+        .map(|track| Arc::new(track) as Arc<dyn AudioClip>);
+    let side = read_sidecar(Path::new(&rec.uri))?.unwrap_or_default();
+    if let Some(track) = audio {
+        plan.restored_audio.insert(rec.node_id.clone(), track);
+    }
+    if let Some(masks) = side.masks {
+        plan.restored_masks.insert(rec.node_id.clone(), masks);
+    }
+    if !side.encode.is_empty() {
+        plan.restored_encode
+            .insert(rec.node_id.clone(), side.encode);
+    }
+    plan.restored_video
+        .insert(rec.node_id.clone(), Arc::new(clip));
+    Ok(())
+}
+
 /// Write one stage output to `dir` and return its record.
+///
+/// Video only: no audio, masks, or encode settings. The runner stores the
+/// full frontier node, including audio and the sidecar.
 ///
 /// # Errors
 ///
@@ -122,6 +217,37 @@ pub fn persist_stage_video(
     node_id: &str,
     clip: &dyn VideoClip,
 ) -> Result<StageArtifactRecord> {
+    let encode = StageEncodeState::default();
+    persist_stage_media(
+        dir,
+        stage_index,
+        fingerprint,
+        node_id,
+        &StageMediaParts {
+            video: clip,
+            audio: None,
+            masks: None,
+            encode: &encode,
+        },
+    )
+}
+
+/// Write one frontier node, including audio and a media sidecar.
+///
+/// The picture is `CRF` 30. Companion audio is muxed when present. Masks and
+/// encode settings go in `{uri}.media.json`. A later resume treats a missing
+/// sidecar as "no masks, default encode".
+///
+/// # Errors
+///
+/// Encode, sidecar, or hash I/O.
+pub(crate) fn persist_stage_media(
+    dir: impl AsRef<Path>,
+    stage_index: u32,
+    fingerprint: &str,
+    node_id: &str,
+    media: &StageMediaParts<'_>,
+) -> Result<StageArtifactRecord> {
     let dir = dir.as_ref();
     fs::create_dir_all(dir)
         .map_err(|e| IoError::message(format!("stage persist mkdir {}: {e}", dir.display())))?;
@@ -131,17 +257,80 @@ pub fn persist_stage_video(
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
         .collect();
     let path: PathBuf = dir.join(format!("s{stage_index}-{safe_node}-{stem}.mp4"));
-    let fps = clip
+    let fps = media
+        .video
         .fps()
         .filter(|f| f.is_finite() && *f > 0.0)
         .unwrap_or(15.0);
     let uri = path.to_string_lossy().into_owned();
-    write_video(clip, &WriteVideoOptions::new(&uri, fps).with_crf(30))?;
+    let opts = WriteVideoOptions::new(&uri, fps).with_crf(30);
+    if let Some(audio) = media.audio {
+        write_av(media.video, audio, &opts)?;
+    } else {
+        write_video(media.video, &opts)?;
+    }
+    write_sidecar(
+        &path,
+        &StageMediaSidecar {
+            masks: media.masks.cloned(),
+            encode: media.encode.clone(),
+        },
+    )?;
     let file_fp = fingerprint_file(&path)?;
     Ok(
         StageArtifactRecord::new(stage_index, fingerprint, node_id, uri)
             .with_file_fingerprint(file_fp),
     )
+}
+
+fn sidecar_path(video: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.media.json", video.display()))
+}
+
+fn sidecar_allows_resume(uri: &str) -> bool {
+    let path = sidecar_path(Path::new(uri));
+    if !path.exists() {
+        return true;
+    }
+    fs::read(&path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<StageMediaSidecar>(&bytes).ok())
+        .is_some()
+}
+
+fn read_sidecar(video: &Path) -> Result<Option<StageMediaSidecar>> {
+    let path = sidecar_path(video);
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let bytes = fs::read(&path)
+        .map_err(|e| IoError::message(format!("stage sidecar read {}: {e}", path.display())))?;
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|e| IoError::message(format!("stage sidecar {}: {e}", path.display())))
+}
+
+fn write_sidecar(video: &Path, body: &StageMediaSidecar) -> Result<()> {
+    let path = sidecar_path(video);
+    let tmp = video.with_file_name(format!(
+        ".{}.media.json.partial",
+        video
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("stage")
+    ));
+    let text = serde_json::to_string(body)
+        .map_err(|e| IoError::message(format!("stage sidecar encode: {e}")))?;
+    fs::write(&tmp, text)
+        .map_err(|e| IoError::message(format!("stage sidecar write {}: {e}", tmp.display())))?;
+    if path.exists() {
+        fs::remove_file(&path).map_err(|e| {
+            IoError::message(format!("stage sidecar replace {}: {e}", path.display()))
+        })?;
+    }
+    fs::rename(&tmp, &path)
+        .map_err(|e| IoError::message(format!("stage sidecar rename {}: {e}", path.display())))?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -181,5 +370,19 @@ mod tests {
         let rec = StageArtifactRecord::new(0, "fp0", "n0", p0.to_string_lossy())
             .with_file_fingerprint("deadbeef");
         assert!(!artifact_is_valid(&rec));
+    }
+
+    #[test]
+    fn checkpoint_corrupt_sidecar_stops_the_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let p0 = dir.path().join("s0.mp4");
+        fs::write(&p0, b"hello").unwrap();
+        let hash = fingerprint_file(&p0).unwrap();
+        fs::write(sidecar_path(&p0), b"{not-json").unwrap();
+        let rec = StageArtifactRecord::new(0, "fp0", "n0", p0.to_string_lossy())
+            .with_file_fingerprint(hash);
+        let plan = restore_validated_prefix(&[rec], &["fp0".into()]).unwrap();
+        assert_eq!(plan.start_stage, 0);
+        assert!(plan.restored_video.is_empty());
     }
 }
