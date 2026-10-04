@@ -35,9 +35,10 @@ pub(crate) fn execute_compiled(
 ) -> Result<NodeMedia> {
     match compiled.params.executor_kind() {
         ExecutorKind::Nary => {
-            let media = execute_nary(compiled, inputs)?;
+            let mut media = execute_nary(compiled, inputs)?;
             if matches!(compiled.params, TypedParams::AudioMix { .. }) && media.audio.is_some() {
                 hints.preserve_audio = true;
+                media.encode.preserve_audio = Some(true);
             }
             Ok(media)
         }
@@ -75,6 +76,7 @@ fn execute_nary(compiled: &CompiledOp, inputs: Vec<NodeMedia>) -> Result<NodeMed
                 video,
                 audio,
                 masks: inputs.first().and_then(|m| m.masks.clone()),
+                encode: inputs.first().map(|m| m.encode.clone()).unwrap_or_default(),
             })
         }
         TypedParams::AudioMix { tracks } => apply_audio_mix(inputs, tracks),
@@ -92,6 +94,7 @@ fn apply_timeline_concat(inputs: Vec<NodeMedia>) -> Result<NodeMedia> {
             "rf.timeline.concat needs at least two inputs",
         ));
     }
+    let encode = inputs.first().map(|m| m.encode.clone()).unwrap_or_default();
     let mut videos = Vec::with_capacity(inputs.len());
     let mut audios = Vec::with_capacity(inputs.len());
     let mut all_audio = true;
@@ -112,6 +115,7 @@ fn apply_timeline_concat(inputs: Vec<NodeMedia>) -> Result<NodeMedia> {
         video,
         audio,
         masks: None,
+        encode,
     })
 }
 
@@ -130,6 +134,7 @@ fn execute_unary(
                 video: input.video,
                 audio,
                 masks: input.masks,
+                encode: input.encode,
             })
         }
         TypedParams::AudioDrop => {
@@ -138,32 +143,16 @@ fn execute_unary(
                 video: input.video,
                 audio: None,
                 masks: input.masks,
+                encode: input.encode,
             })
         }
         TypedParams::AudioPreserve => {
             hints.preserve_audio = true;
+            let mut input = input;
+            input.encode.preserve_audio = Some(true);
             Ok(input)
         }
-        TypedParams::Trim { start, duration } => {
-            let video = subclip_video(
-                Arc::clone(&input.video),
-                start.to_time(),
-                duration.to_duration(),
-            )
-            .map_err(IoError::from)?;
-            let audio = match input.audio {
-                Some(a) => Some(
-                    subclip_audio(a, start.to_time(), duration.to_duration())
-                        .map_err(IoError::from)?,
-                ),
-                None => None,
-            };
-            Ok(NodeMedia {
-                video,
-                audio,
-                masks: input.masks,
-            })
-        }
+        TypedParams::Trim { start, duration } => apply_trim(input, *start, *duration),
         TypedParams::Adapter { name, params } => {
             let request = AdapterRequest::new(name.clone(), params.clone())
                 .with_video(Arc::clone(&input.video));
@@ -176,6 +165,7 @@ fn execute_unary(
                 video: input.video,
                 audio: input.audio,
                 masks: out.masks.or(input.masks),
+                encode: input.encode,
             })
         }
         TypedParams::Gpu {
@@ -183,21 +173,21 @@ fn execute_unary(
             backend,
             params,
         } => execute_gpu_params(name, backend.as_deref(), params, input, hints),
-        TypedParams::Speed { factor } => {
-            let video = VideoEffect::apply(&Speed::new(*factor), Arc::clone(&input.video))
-                .map_err(IoError::from)?;
-            let audio = match input.audio {
-                Some(a) => {
-                    Some(AudioEffect::apply(&Speed::new(*factor), a).map_err(IoError::from)?)
-                }
-                None => None,
-            };
-            Ok(NodeMedia {
-                video,
-                audio,
-                masks: input.masks,
-            })
-        }
+        TypedParams::Speed { factor } => apply_speed(input, *factor),
+        TypedParams::EncodeH264 {
+            path,
+            crf,
+            codec,
+            fps,
+            preserve_audio,
+        } => Ok(encode_on_branch(
+            input,
+            path.as_deref(),
+            *crf,
+            codec.as_deref(),
+            *fps,
+            *preserve_audio,
+        )),
         TypedParams::ComposeLayers { .. } | TypedParams::AudioMix { .. } => Err(IoError::message(
             format!("{} must be executed as n-ary", compiled.id),
         )),
@@ -207,6 +197,7 @@ fn execute_unary(
                 video,
                 audio: input.audio,
                 masks: input.masks,
+                encode: input.encode,
             })
         }
     }
@@ -216,6 +207,7 @@ fn apply_audio_mix(inputs: Vec<NodeMedia>, track_value: &serde_json::Value) -> R
     if inputs.is_empty() {
         return Err(IoError::message("rf.audio.mix needs at least one input"));
     }
+    let encode = inputs[0].encode.clone();
     let video = Arc::clone(&inputs[0].video);
     let track_params = track_value.as_array();
     let mut tracks = Vec::new();
@@ -249,6 +241,7 @@ fn apply_audio_mix(inputs: Vec<NodeMedia>, track_value: &serde_json::Value) -> R
         video,
         audio: Some(mixed),
         masks: None,
+        encode,
     })
 }
 
@@ -448,6 +441,76 @@ fn apply_typed_video(
     }
 }
 
+fn apply_trim(input: NodeMedia, start: MediaTime, duration: MediaTime) -> Result<NodeMedia> {
+    let video = subclip_video(
+        Arc::clone(&input.video),
+        start.to_time(),
+        duration.to_duration(),
+    )
+    .map_err(IoError::from)?;
+    let audio = match input.audio {
+        Some(a) => {
+            Some(subclip_audio(a, start.to_time(), duration.to_duration()).map_err(IoError::from)?)
+        }
+        None => None,
+    };
+    Ok(NodeMedia {
+        video,
+        audio,
+        masks: input.masks,
+        encode: input.encode,
+    })
+}
+
+fn apply_speed(input: NodeMedia, factor: f64) -> Result<NodeMedia> {
+    let video =
+        VideoEffect::apply(&Speed::new(factor), Arc::clone(&input.video)).map_err(IoError::from)?;
+    let audio = match input.audio {
+        Some(a) => Some(AudioEffect::apply(&Speed::new(factor), a).map_err(IoError::from)?),
+        None => None,
+    };
+    Ok(NodeMedia {
+        video,
+        audio,
+        masks: input.masks,
+        encode: input.encode,
+    })
+}
+
+fn encode_on_branch(
+    input: NodeMedia,
+    path: Option<&str>,
+    crf: Option<u8>,
+    codec: Option<&str>,
+    fps: Option<f64>,
+    preserve_audio: Option<bool>,
+) -> NodeMedia {
+    let mut encode = input.encode;
+    if let Some(p) = path {
+        encode.path = Some(p.to_owned());
+    }
+    if let Some(c) = crf {
+        encode.crf = Some(c);
+    }
+    if let Some(name) = codec {
+        encode.video_codec = Some(name.to_owned());
+    } else {
+        encode.video_codec.get_or_insert_with(|| "libx264".into());
+    }
+    if let Some(f) = fps {
+        encode.fps = Some(f);
+    }
+    if let Some(pa) = preserve_audio {
+        encode.preserve_audio = Some(pa);
+    }
+    NodeMedia {
+        video: input.video,
+        audio: input.audio,
+        masks: input.masks,
+        encode,
+    }
+}
+
 fn execute_gpu_params(
     name: &str,
     backend: Option<&str>,
@@ -466,13 +529,16 @@ fn execute_gpu_params(
         registry: hints.gpu_registry.clone(),
     };
     let out = execute_gpu(&request, &ctx)?;
+    let mut encode = input.encode.clone();
     if let Some(codec) = out.video_codec {
-        hints.video_codec = Some(codec);
+        hints.video_codec = Some(codec.clone());
+        encode.video_codec = Some(codec);
     }
     Ok(NodeMedia {
         video: out.video.unwrap_or(input.video),
         audio: input.audio,
         masks: input.masks,
+        encode,
     })
 }
 

@@ -71,6 +71,24 @@ impl core::fmt::Debug for GraphEncodeHints {
     }
 }
 
+/// Encode settings that belong to one output branch.
+///
+/// Unset fields fall back to the run-level [`GraphEncodeHints`]. A sibling
+/// branch does not fill them in.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct OutputEncodeOptions {
+    /// Frames per second for this output.
+    pub fps: Option<f64>,
+    /// Video codec name (`libx264`, …).
+    pub video_codec: Option<String>,
+    /// Constant-rate factor.
+    pub crf: Option<u8>,
+    /// Mux this output's audio when `Some(true)`.
+    pub preserve_audio: Option<bool>,
+    /// Path recorded on this branch's encode node.
+    pub path: Option<String>,
+}
+
 /// One graph output bound to the media that node actually produced.
 #[derive(Clone)]
 pub struct GraphOutputMedia {
@@ -80,6 +98,8 @@ pub struct GraphOutputMedia {
     pub video: Arc<dyn VideoClip>,
     /// Audio for this output. Absent means a silent file, not another output's mix.
     pub audio: Option<Arc<dyn AudioClip>>,
+    /// Codec and rate for this output only.
+    pub encode: OutputEncodeOptions,
 }
 
 /// Materialized video (+ optional audio) from a [`RenderGraph`].
@@ -89,8 +109,10 @@ pub struct GraphBundle {
     pub video: Arc<dyn VideoClip>,
     /// Optional audio (source companion or graph audio ops).
     pub audio: Option<Arc<dyn AudioClip>>,
-    /// Encode / output hints.
+    /// Encode / output hints for the primary output.
     pub hints: GraphEncodeHints,
+    /// Hints from the walk, before the primary branch's encode was copied on top.
+    pub(crate) base_hints: GraphEncodeHints,
     /// Every `GraphOutput` that has a URI, each with its own media.
     pub outputs: Vec<GraphOutputMedia>,
 }
@@ -101,6 +123,7 @@ pub(crate) struct NodeMedia {
     pub(crate) video: Arc<dyn VideoClip>,
     pub(crate) audio: Option<Arc<dyn AudioClip>>,
     pub(crate) masks: Option<reelforge_render_graph::MaskTimeline>,
+    pub(crate) encode: OutputEncodeOptions,
 }
 
 impl NodeMedia {
@@ -109,6 +132,7 @@ impl NodeMedia {
             video,
             audio,
             masks: None,
+            encode: OutputEncodeOptions::default(),
         }
     }
 }
@@ -521,11 +545,12 @@ fn execute_plan_and_seal(
     } else {
         for out in &bundle.outputs {
             control.check_cancel()?;
+            let hints = hints_for_output(&bundle.base_hints, &out.encode, options);
             write_one_output(
                 &out.uri,
                 out.video.as_ref(),
                 out.audio.as_deref(),
-                &bundle.hints,
+                &hints,
                 control,
             )?;
         }
@@ -884,6 +909,7 @@ impl<'a> MaterializeCtx<'a> {
                     video: resolved,
                     audio: input.audio,
                     masks: input.masks,
+                    encode: input.encode,
                 }
             }
             RenderNodeKind::Output { .. } => {
@@ -912,9 +938,12 @@ impl<'a> MaterializeCtx<'a> {
                 uri,
                 video: Arc::clone(&c.video),
                 audio: c.audio.clone(),
+                encode: c.encode.clone(),
             });
         }
+        let base_hints = self.hints.clone();
         if let Some(first) = outputs.first() {
+            overlay_encode(&mut self.hints, &first.encode);
             self.hints
                 .output_path
                 .get_or_insert_with(|| first.uri.clone());
@@ -922,14 +951,17 @@ impl<'a> MaterializeCtx<'a> {
                 video: Arc::clone(&first.video),
                 audio: first.audio.clone(),
                 hints: self.hints,
+                base_hints,
                 outputs,
             });
         }
         if let Some(c) = self.primary_out {
+            overlay_encode(&mut self.hints, &c.encode);
             return Ok(GraphBundle {
                 video: c.video,
                 audio: c.audio,
                 hints: self.hints,
+                base_hints,
                 outputs,
             });
         }
@@ -1123,6 +1155,41 @@ fn multi_input_media(
         clips.push(c);
     }
     Ok(clips)
+}
+
+fn overlay_encode(hints: &mut GraphEncodeHints, encode: &OutputEncodeOptions) {
+    if let Some(fps) = encode.fps {
+        hints.fps = Some(fps);
+    }
+    if let Some(codec) = &encode.video_codec {
+        hints.video_codec = Some(codec.clone());
+    }
+    if let Some(crf) = encode.crf {
+        hints.crf = Some(crf);
+    }
+    if let Some(keep) = encode.preserve_audio {
+        hints.preserve_audio = keep;
+    }
+    if hints.output_path.is_none()
+        && let Some(path) = &encode.path
+    {
+        hints.output_path = Some(path.clone());
+    }
+}
+
+fn hints_for_output(
+    base: &GraphEncodeHints,
+    encode: &OutputEncodeOptions,
+    options: &GraphRunOptions,
+) -> GraphEncodeHints {
+    let mut hints = base.clone();
+    overlay_encode(&mut hints, encode);
+    // Call-site fps, codec, and crf win over the branch. preserve_audio stays
+    // on the branch because the run flag is already in `base`.
+    let preserve = hints.preserve_audio;
+    merge_option_hints(&mut hints, options);
+    hints.preserve_audio = preserve;
+    hints
 }
 
 fn merge_option_hints(hints: &mut GraphEncodeHints, options: &GraphRunOptions) {
@@ -2157,6 +2224,122 @@ mod tests {
         let again = execution_cache_key(&graph, &plan, &slow).unwrap();
         assert_ne!(a, b);
         assert_eq!(a, again);
+    }
+
+    #[test]
+    fn distinct_outputs_keep_their_picture_and_encode() {
+        let registry = OperationRegistry::with_builtins();
+        let video: Arc<dyn VideoClip> = Arc::new(ColorClip::new(
+            Size::new(4, 4),
+            Rgb8::WHITE,
+            Duration::from_secs(1.0),
+        ));
+        let g = RenderGraph {
+            version: RENDER_GRAPH_VERSION,
+            assets: vec![MediaAsset {
+                id: MediaAssetId("a".into()),
+                uri: "seed://a".into(),
+                duration: None,
+                role: Some("video".into()),
+            }],
+            nodes: vec![
+                RenderNode {
+                    id: NodeId("src".into()),
+                    body: RenderNodeKind::Source {
+                        asset: MediaAssetId("a".into()),
+                    },
+                    inputs: vec![],
+                },
+                RenderNode {
+                    id: NodeId("inv".into()),
+                    body: RenderNodeKind::Op {
+                        operation: OperationId::new("rf.color.invert"),
+                        params: serde_json::json!({}),
+                    },
+                    inputs: vec![NodeId("src".into())],
+                },
+                RenderNode {
+                    id: NodeId("enc_orig".into()),
+                    body: RenderNodeKind::Op {
+                        operation: OperationId::new("rf.encode.h264"),
+                        params: serde_json::json!({ "crf": 18, "fps": 10.0, "path": "orig.mp4" }),
+                    },
+                    inputs: vec![NodeId("src".into())],
+                },
+                RenderNode {
+                    id: NodeId("enc_inv".into()),
+                    body: RenderNodeKind::Op {
+                        operation: OperationId::new("rf.encode.h264"),
+                        params: serde_json::json!({ "crf": 40, "fps": 24.0, "path": "inv.mp4" }),
+                    },
+                    inputs: vec![NodeId("inv".into())],
+                },
+                RenderNode {
+                    id: NodeId("out_orig".into()),
+                    body: RenderNodeKind::Output {
+                        name: "original".into(),
+                    },
+                    inputs: vec![NodeId("enc_orig".into())],
+                },
+                RenderNode {
+                    id: NodeId("out_inv".into()),
+                    body: RenderNodeKind::Output {
+                        name: "invert".into(),
+                    },
+                    inputs: vec![NodeId("enc_inv".into())],
+                },
+            ],
+            outputs: vec![
+                GraphOutput {
+                    name: "original".into(),
+                    node: NodeId("out_orig".into()),
+                    uri: Some("orig.mp4".into()),
+                },
+                GraphOutput {
+                    name: "invert".into(),
+                    node: NodeId("out_inv".into()),
+                    uri: Some("inv.mp4".into()),
+                },
+            ],
+        };
+        let mut seeds = HashMap::new();
+        seeds.insert(MediaAssetId("a".into()), video);
+        let audio = HashMap::new();
+        let bundle = materialize_graph_bundle(&g, &registry, &seeds, &audio, true).unwrap();
+        assert_eq!(bundle.outputs.len(), 2);
+        let orig = &bundle.outputs[0];
+        let inv = &bundle.outputs[1];
+        assert_eq!(
+            &orig.video.frame_at(Time::ZERO).unwrap().data()[0..3],
+            &[255, 255, 255]
+        );
+        assert_eq!(
+            &inv.video.frame_at(Time::ZERO).unwrap().data()[0..3],
+            &[0, 0, 0]
+        );
+        assert_eq!(orig.encode.crf, Some(18));
+        assert_eq!(inv.encode.crf, Some(40));
+        assert!((orig.encode.fps.unwrap() - 10.0).abs() < 1e-9);
+        assert!((inv.encode.fps.unwrap() - 24.0).abs() < 1e-9);
+        assert_eq!(bundle.hints.crf, Some(18));
+        assert!((bundle.hints.fps.unwrap() - 10.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn run_options_override_branch_crf_only() {
+        let base = GraphEncodeHints::default();
+        let branch = OutputEncodeOptions {
+            crf: Some(40),
+            fps: Some(24.0),
+            ..OutputEncodeOptions::default()
+        };
+        let options = GraphRunOptions {
+            crf: Some(30),
+            ..GraphRunOptions::default()
+        };
+        let forced = hints_for_output(&base, &branch, &options);
+        assert_eq!(forced.crf, Some(30));
+        assert!((forced.fps.unwrap() - 24.0).abs() < 1e-9);
     }
 
     #[test]
