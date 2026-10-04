@@ -495,6 +495,15 @@ impl OperationRegistry {
             &["edit", "fade"],
         );
         transform(
+            "rf.transform.crossfade_in",
+            BackendClass::Rust,
+            serde_json::json!({
+                "type": "object",
+                "properties": { "duration": {} }
+            }),
+            &["edit", "fade"],
+        );
+        transform(
             "rf.transform.speed",
             BackendClass::Rust,
             serde_json::json!({

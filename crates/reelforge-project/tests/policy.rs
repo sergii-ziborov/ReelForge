@@ -160,6 +160,121 @@ fn nested_sequence_offsets_child() {
     );
 }
 
+fn assert_millis(ticks: i64, scale: u64, millis: i64) {
+    assert!(scale > 0, "ticks={ticks} scale={scale}");
+    assert_eq!(
+        ticks * 1_000,
+        millis * i64::try_from(scale).unwrap(),
+        "ticks={ticks} scale={scale}"
+    );
+}
+
+#[test]
+fn nested_duration_trims_layer_and_cue() {
+    let mut p = CaptureProject::new(ProjectId::new("p"), "nest-window");
+    p.media.push(media("a", "a.mp4"));
+    p.media.push(MediaRef {
+        id: MediaRefId::new("s"),
+        uri: "talk.srt".into(),
+        duration: None,
+        role: Some("subtitle".into()),
+    });
+    let mut child = Sequence::new(SequenceId::new("child"), "child");
+    let mut video = TimelineTrack::new(TimelineTrackId::new("cv"), TrackKind::Video);
+    video.items.push(clip("cc", "a", 0.0, 2.0));
+    let mut subs = TimelineTrack::new(TimelineTrackId::new("cs"), TrackKind::Subtitle);
+    subs.items.push(clip("sc", "s", 0.0, 2.0));
+    child.tracks.push(video);
+    child.tracks.push(subs);
+    let mut parent = Sequence::new(SequenceId::new("s"), "main");
+    let mut pt = TimelineTrack::new(TimelineTrackId::new("v0"), TrackKind::Video);
+    pt.items.push(TimelineItem::Nested(NestedSequence {
+        sequence: SequenceId::new("child"),
+        duration: Some(MediaTime::from_secs(0.5, 1_000).unwrap()),
+    }));
+    parent.tracks.push(pt);
+    p.sequences.push(parent);
+    p.sequences.push(child);
+    let out = compile_project(&p).unwrap();
+    let trimmed = out.graph.nodes.iter().any(|n| match &n.body {
+        RenderNodeKind::Op { operation, params } if operation.as_str() == "rf.transform.trim" => {
+            params.get("duration").is_some_and(|d| {
+                let ticks = d["ticks"].as_i64().unwrap_or(0);
+                let scale = d["timescale"].as_u64().unwrap_or(1);
+                ticks * 1_000 == 500 * i64::try_from(scale).unwrap_or(0)
+            })
+        }
+        _ => false,
+    });
+    assert!(trimmed, "nested window must trim the child clip");
+    let burn = out
+        .graph
+        .nodes
+        .iter()
+        .find_map(|n| match &n.body {
+            RenderNodeKind::Op { operation, params }
+                if operation.as_str() == "rf.subtitle.burn" =>
+            {
+                Some(params)
+            }
+            _ => None,
+        })
+        .expect("subtitle burn");
+    assert_eq!(burn["cues"].as_array().map(Vec::len), Some(1));
+    let duration = &burn["cues"][0]["duration"];
+    assert_millis(
+        duration["ticks"].as_i64().unwrap(),
+        duration["timescale"].as_u64().unwrap(),
+        500,
+    );
+    out.graph.validate().unwrap();
+}
+
+#[test]
+fn nested_duration_drops_clips_that_start_after_the_window() {
+    let mut p = CaptureProject::new(ProjectId::new("p"), "nest-drop");
+    p.media.push(media("a", "a.mp4"));
+    let mut child = Sequence::new(SequenceId::new("child"), "child");
+    let mut ct = TimelineTrack::new(TimelineTrackId::new("cv"), TrackKind::Video);
+    ct.items.push(TimelineItem::Gap(Gap {
+        duration: MediaTime::from_secs(1.0, 1_000).unwrap(),
+    }));
+    ct.items.push(clip("late", "a", 0.0, 1.0));
+    child.tracks.push(ct);
+    let mut parent = Sequence::new(SequenceId::new("s"), "main");
+    let mut pt = TimelineTrack::new(TimelineTrackId::new("v0"), TrackKind::Video);
+    pt.items.push(clip("keep", "a", 0.0, 2.0));
+    pt.items.push(TimelineItem::Nested(NestedSequence {
+        sequence: SequenceId::new("child"),
+        duration: Some(MediaTime::from_secs(0.5, 1_000).unwrap()),
+    }));
+    parent.tracks.push(pt);
+    p.sequences.push(parent);
+    p.sequences.push(child);
+    let out = compile_project(&p).unwrap();
+    let compose = out
+        .graph
+        .nodes
+        .iter()
+        .find_map(|n| match &n.body {
+            RenderNodeKind::Op { operation, params }
+                if operation.as_str() == "rf.compose.layers" =>
+            {
+                Some(params)
+            }
+            _ => None,
+        })
+        .expect("compose");
+    assert_eq!(compose["layers"].as_array().map(Vec::len), Some(1));
+    let duration = &compose["duration"];
+    assert_millis(
+        duration["ticks"].as_i64().unwrap(),
+        duration["timescale"].as_u64().unwrap(),
+        2_500,
+    );
+    out.graph.validate().unwrap();
+}
+
 #[test]
 fn wipe_compiles_to_opposing_slides() {
     let mut p = CaptureProject::new(ProjectId::new("p"), "wipe");

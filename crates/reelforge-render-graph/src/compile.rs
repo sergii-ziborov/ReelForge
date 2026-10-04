@@ -87,6 +87,12 @@ pub enum TypedParams {
         #[serde(deserialize_with = "de_media_time")]
         duration: MediaTime,
     },
+    /// `rf.transform.crossfade_in` — opacity 0→1, pixels stay intact.
+    CrossFadeIn {
+        /// Fade length (exact ticks).
+        #[serde(deserialize_with = "de_media_time")]
+        duration: MediaTime,
+    },
     /// `rf.adapter.sightloom` (or another registered adapter).
     Adapter {
         /// Adapter name (`sightloom`, …).
@@ -189,6 +195,9 @@ pub enum TypedParams {
         /// Optional background.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         background: Option<Value>,
+        /// Timeline length, including a trailing gap past the last layer.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration: Option<MediaTime>,
     },
     /// `rf.audio.gain`
     AudioGain {
@@ -281,6 +290,7 @@ pub fn is_executable_op_id(id: &str) -> bool {
             | "rf.transform.rotate"
             | "rf.transform.fade_in"
             | "rf.transform.fade_out"
+            | "rf.transform.crossfade_in"
             | "rf.transform.speed"
             | "rf.transform.freeze"
             | "rf.transform.loop"
@@ -621,6 +631,10 @@ fn parse_typed_params(id: &str, raw: &Value) -> Result<TypedParams> {
             duration: time_field(raw, "duration")
                 .unwrap_or_else(|| MediaTime::from_secs(0.5, MediaTime::HZ_1M).unwrap_or_default()),
         }),
+        "rf.transform.crossfade_in" => Ok(TypedParams::CrossFadeIn {
+            duration: time_field(raw, "duration")
+                .unwrap_or_else(|| MediaTime::from_secs(0.5, MediaTime::HZ_1M).unwrap_or_default()),
+        }),
         "rf.adapter.sightloom" => Ok(TypedParams::Adapter {
             name: raw
                 .get("adapter")
@@ -685,6 +699,7 @@ fn parse_typed_params(id: &str, raw: &Value) -> Result<TypedParams> {
                 .cloned()
                 .unwrap_or_else(|| Value::Array(vec![])),
             background: raw.get("background").cloned(),
+            duration: time_field(raw, "duration"),
         }),
         "rf.audio.gain" => {
             #[allow(clippy::cast_possible_truncation)]
@@ -920,6 +935,39 @@ mod tests {
         .unwrap();
         assert!(matches!(burn.params, TypedParams::SubtitleBurn { .. }));
         check_registry_executor_parity(&r).unwrap();
+    }
+
+    #[test]
+    fn compiles_crossfade_and_compose_span() {
+        let r = OperationRegistry::with_builtins();
+        let fade = compile_op(
+            &r,
+            &OperationId::new("rf.transform.crossfade_in"),
+            &serde_json::json!({ "duration": { "ticks": 500, "timescale": 1000 } }),
+        )
+        .unwrap();
+        match fade.params {
+            TypedParams::CrossFadeIn { duration } => {
+                assert_eq!(duration.ticks, 500);
+                assert_eq!(duration.timescale, 1000);
+            }
+            _ => panic!("expected CrossFadeIn"),
+        }
+        assert_eq!(fade.params.executor_kind(), crate::op::ExecutorKind::Unary);
+        let compose = compile_op(
+            &r,
+            &OperationId::new("rf.compose.layers"),
+            &serde_json::json!({ "duration": { "ticks": 3, "timescale": 1 } }),
+        )
+        .unwrap();
+        match compose.params {
+            TypedParams::ComposeLayers { duration, .. } => {
+                let duration = duration.expect("span");
+                assert_eq!(duration.ticks, 3);
+                assert_eq!(duration.timescale, 1);
+            }
+            _ => panic!("expected ComposeLayers"),
+        }
     }
 
     #[test]

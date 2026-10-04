@@ -8,7 +8,12 @@ use reelforge_render_graph::{MediaAsset, MediaAssetId, NodeId, RenderNode, Rende
 use serde_json::json;
 
 impl CompileCtx<'_> {
-    pub(crate) fn emit_clip(&mut self, clip: &TimelineClip) -> Result<(NodeId, MediaTime)> {
+    pub(crate) fn emit_clip(
+        &mut self,
+        clip: &TimelineClip,
+        track: usize,
+        picture: bool,
+    ) -> Result<(NodeId, MediaTime)> {
         let media = self.lookup_media(&clip.media)?;
         let asset_key = format!("m_{}", media.id.as_str());
         let asset = MediaAsset {
@@ -56,7 +61,7 @@ impl CompileCtx<'_> {
                 );
             }
         }
-        let overlap = self.apply_transition_in(clip, &mut node);
+        let overlap = self.apply_transition_in(clip, &mut node, track, picture);
         Ok((node, overlap))
     }
 
@@ -91,7 +96,13 @@ impl CompileCtx<'_> {
         }
     }
 
-    fn apply_transition_in(&mut self, clip: &TimelineClip, node: &mut NodeId) -> MediaTime {
+    fn apply_transition_in(
+        &mut self,
+        clip: &TimelineClip,
+        node: &mut NodeId,
+        track: usize,
+        picture: bool,
+    ) -> MediaTime {
         let Some(tr) = &clip.transition_in else {
             return MediaTime::zero(clip.source.duration.timescale.max(1));
         };
@@ -102,18 +113,12 @@ impl CompileCtx<'_> {
                 MediaTime::zero(tr.duration.timescale.max(1))
             }
             TransitionKind::Dissolve => {
-                if let Some(prev) = self.layers.last() {
-                    let faded = self.unary(
-                        "fout",
-                        "rf.transform.fade_out",
-                        fade.clone(),
-                        prev.node.clone(),
-                    );
-                    if let Some(last) = self.layers.last_mut() {
-                        last.node = faded;
-                    }
+                // Same-track incoming clip only. Opacity comes from the mask,
+                // so the previous clip stays visible underneath instead of
+                // fading through black.
+                if picture && self.layers.iter().any(|layer| layer.track == track) {
+                    *node = self.unary("xfin", "rf.transform.crossfade_in", fade, node.clone());
                 }
-                *node = self.unary("fin", "rf.transform.fade_in", fade, node.clone());
                 tr.duration
             }
             TransitionKind::Wipe => {

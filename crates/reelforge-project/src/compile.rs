@@ -19,6 +19,7 @@ pub struct ProjectCompile {
 /// Compile the active sequence.
 ///
 /// Video clips: `Source` → trim (ticks) → optional speed / fade / slide → compose.
+/// A same-track dissolve is `rf.transform.crossfade_in` on the incoming clip.
 /// Audio tracks: same chain, then `rf.audio.mix` onto the picture.
 /// Subtitle tracks compile to `rf.subtitle.burn` (file URI + record start).
 /// Project `semantic` refs compile to `rf.adapter.sightloom`. An empty
@@ -36,19 +37,21 @@ pub fn compile_project(project: &CaptureProject) -> Result<ProjectCompile> {
         warnings.push("markers are editorial and are not compiled into the graph".into());
     }
     let mut ctx = CompileCtx::new(project, warnings);
-    ctx.emit_sequence(seq)?;
+    let timeline_end = ctx.emit_sequence(seq)?;
     if ctx.layers.is_empty() {
         return Err(ProjectError::message(
             "active sequence has no video clips to compile",
         ));
     }
 
-    let mut picture =
-        if ctx.layers.len() == 1 && ctx.layers[0].start.is_zero() && seq.canvas.is_none() {
-            ctx.layers[0].node.clone()
-        } else {
-            ctx.emit_compose(seq.canvas)
-        };
+    let lone = ctx.layers.len() == 1 && ctx.layers[0].start.is_zero() && seq.canvas.is_none();
+    let layer_end = ctx.layers[0].start.saturating_add(ctx.layers[0].duration)?;
+    let trailing = crate::emit::time_is_after(timeline_end, layer_end);
+    let mut picture = if lone && !trailing {
+        ctx.layers[0].node.clone()
+    } else {
+        ctx.emit_compose(seq.canvas, Some(timeline_end))
+    };
     if !ctx.audio.is_empty() {
         picture = ctx.emit_audio_mix(picture);
     }

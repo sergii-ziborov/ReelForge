@@ -98,7 +98,7 @@ fn gcd_i128(mut a: i128, mut b: i128) -> i128 {
 
 use crate::error::{ProjectError, Result};
 use crate::ids::{MediaRefId, SequenceId};
-use crate::model::{SemanticRef, TimelineItem};
+use crate::model::{NestedSequence, SemanticRef, TimelineItem};
 use crate::project::{CaptureProject, Sequence, TimelineTrack, TrackKind};
 use reelforge_core::MediaTime;
 use reelforge_render_graph::{
@@ -110,12 +110,14 @@ use std::collections::{BTreeMap, BTreeSet};
 pub(crate) struct LayerRef {
     pub node: NodeId,
     pub start: MediaTime,
+    pub duration: MediaTime,
     pub track: usize,
 }
 
 pub(crate) struct AudioRef {
     pub node: NodeId,
     pub start: MediaTime,
+    pub duration: MediaTime,
 }
 
 pub(crate) struct SubtitleCueRef {
@@ -155,23 +157,40 @@ impl<'a> CompileCtx<'a> {
         }
     }
 
-    pub(crate) fn emit_sequence(&mut self, seq: &Sequence) -> Result<()> {
+    pub(crate) fn emit_sequence(&mut self, seq: &Sequence) -> Result<MediaTime> {
+        self.emit_sequence_from(seq, 0)
+    }
+
+    fn emit_sequence_from(&mut self, seq: &Sequence, track_base: usize) -> Result<MediaTime> {
         if !self.stack.insert(seq.id.0.clone()) {
             return Err(ProjectError::message(format!(
                 "nested sequence cycle at {}",
                 seq.id.as_str()
             )));
         }
+        let mut end = MediaTime::zero(1_000);
+        let mut saw_video = false;
         for (ti, track) in seq.tracks.iter().enumerate() {
+            let track_index = track_base + ti;
             match track.kind {
                 TrackKind::Video if track.muted => self
                     .warnings
                     .push(format!("video track {} is muted", track.id.as_str())),
-                TrackKind::Video => self.emit_picture_track(track, ti, false)?,
+                TrackKind::Video => {
+                    let track_end = self.emit_picture_track(track, track_index, false)?;
+                    end = if saw_video {
+                        end.max_time(track_end)?
+                    } else {
+                        track_end
+                    };
+                    saw_video = true;
+                }
                 TrackKind::Audio if track.muted => self
                     .warnings
                     .push(format!("audio track {} is muted", track.id.as_str())),
-                TrackKind::Audio => self.emit_picture_track(track, ti, true)?,
+                TrackKind::Audio => {
+                    self.emit_picture_track(track, track_index, true)?;
+                }
                 TrackKind::Subtitle if track.muted => self
                     .warnings
                     .push(format!("subtitle track {} is muted", track.id.as_str())),
@@ -179,7 +198,7 @@ impl<'a> CompileCtx<'a> {
             }
         }
         self.stack.remove(seq.id.0.as_str());
-        Ok(())
+        Ok(end)
     }
 
     fn emit_picture_track(
@@ -187,7 +206,7 @@ impl<'a> CompileCtx<'a> {
         track: &TimelineTrack,
         track_index: usize,
         audio_only: bool,
-    ) -> Result<()> {
+    ) -> Result<MediaTime> {
         let mut cursor = ExactCursor::zero();
         for item in &track.items {
             match item {
@@ -196,46 +215,32 @@ impl<'a> CompileCtx<'a> {
                 }
                 TimelineItem::Clip(clip) => {
                     let rec = crate::emit_clip::record_duration(clip)?;
-                    let (node, overlap) = self.emit_clip(clip)?;
+                    let (node, overlap) = self.emit_clip(clip, track_index, !audio_only)?;
                     cursor.sub(overlap);
                     let start = cursor.to_media();
                     if audio_only {
-                        self.audio.push(AudioRef { node, start });
+                        self.audio.push(AudioRef {
+                            node,
+                            start,
+                            duration: rec,
+                        });
                     } else {
                         self.layers.push(LayerRef {
                             node,
                             start,
+                            duration: rec,
                             track: track_index,
                         });
                     }
                     cursor.add(rec);
                 }
                 TimelineItem::Nested(nested) => {
-                    let child_id = nested.sequence.clone();
-                    let child = self.lookup_seq(&child_id)?.clone();
-                    let add = match nested.duration {
-                        Some(d) => d,
-                        None => child_span(&child)?,
-                    };
-                    let before_v = self.layers.len();
-                    let before_a = self.audio.len();
-                    let before_s = self.subtitles.len();
-                    self.emit_sequence(&child)?;
-                    let base = cursor;
-                    for layer in &mut self.layers[before_v..] {
-                        layer.start = base.offset(layer.start);
-                    }
-                    for layer in &mut self.audio[before_a..] {
-                        layer.start = base.offset(layer.start);
-                    }
-                    for cue in &mut self.subtitles[before_s..] {
-                        cue.start = base.offset(cue.start);
-                    }
+                    let add = self.place_nested(nested, cursor, Some(track_index))?;
                     cursor.add(add);
                 }
             }
         }
-        Ok(())
+        Ok(cursor.to_media())
     }
 
     fn emit_subtitle_track(&mut self, track: &TimelineTrack) -> Result<()> {
@@ -257,18 +262,7 @@ impl<'a> CompileCtx<'a> {
                     cursor.add(rec);
                 }
                 TimelineItem::Nested(nested) => {
-                    let child_id = nested.sequence.clone();
-                    let child = self.lookup_seq(&child_id)?.clone();
-                    let add = match nested.duration {
-                        Some(d) => d,
-                        None => child_span(&child)?,
-                    };
-                    let before_s = self.subtitles.len();
-                    self.emit_sequence(&child)?;
-                    let base = cursor;
-                    for cue in &mut self.subtitles[before_s..] {
-                        cue.start = base.offset(cue.start);
-                    }
+                    let add = self.place_nested(nested, cursor, None)?;
                     cursor.add(add);
                 }
             }
@@ -276,7 +270,143 @@ impl<'a> CompileCtx<'a> {
         Ok(())
     }
 
-    pub(crate) fn emit_compose(&mut self, canvas: Option<(u32, u32)>) -> NodeId {
+    /// Compile `nested` at `cursor` and keep its media inside the declared window.
+    ///
+    /// Child tracks use a high index while they compile, so a dissolve inside
+    /// the child cannot see a parent track. Picture nests then fold onto
+    /// `fold_track`.
+    fn place_nested(
+        &mut self,
+        nested: &NestedSequence,
+        cursor: ExactCursor,
+        fold_track: Option<usize>,
+    ) -> Result<MediaTime> {
+        let child = self.lookup_seq(&nested.sequence)?.clone();
+        let add = match nested.duration {
+            Some(d) => d,
+            None => child_span(&child)?,
+        };
+        let before_v = self.layers.len();
+        let before_a = self.audio.len();
+        let before_s = self.subtitles.len();
+        self.emit_sequence_from(&child, 1_000_000 + before_v)?;
+        let base = cursor;
+        for layer in &mut self.layers[before_v..] {
+            layer.start = base.offset(layer.start);
+        }
+        for layer in &mut self.audio[before_a..] {
+            layer.start = base.offset(layer.start);
+        }
+        for cue in &mut self.subtitles[before_s..] {
+            cue.start = base.offset(cue.start);
+        }
+        if let Some(window) = nested.duration {
+            let limit = base.offset(window);
+            self.clamp_layers(before_v, limit)?;
+            self.clamp_audio(before_a, limit)?;
+            self.clamp_cues(before_s, limit)?;
+        }
+        if let Some(track) = fold_track {
+            for layer in &mut self.layers[before_v..] {
+                layer.track = track;
+            }
+        }
+        Ok(add)
+    }
+
+    fn clamp_layers(&mut self, from: usize, limit: MediaTime) -> Result<()> {
+        let mut index = from;
+        while index < self.layers.len() {
+            let start = self.layers[index].start;
+            if cmp_time(start, limit) != std::cmp::Ordering::Less {
+                self.layers.remove(index);
+                continue;
+            }
+            let end = start.saturating_add(self.layers[index].duration)?;
+            if cmp_time(end, limit) == std::cmp::Ordering::Greater {
+                let visible = limit.saturating_sub(start)?;
+                if visible.is_zero() {
+                    self.layers.remove(index);
+                    continue;
+                }
+                let node = self.layers[index].node.clone();
+                let trimmed = self.unary(
+                    "hold",
+                    "rf.transform.trim",
+                    json!({
+                        "start": crate::emit_clip::media_time_json(MediaTime::zero(visible.timescale.max(1))),
+                        "duration": crate::emit_clip::media_time_json(visible),
+                    }),
+                    node,
+                );
+                self.layers[index].node = trimmed;
+                self.layers[index].duration = visible;
+            }
+            index += 1;
+        }
+        Ok(())
+    }
+
+    fn clamp_audio(&mut self, from: usize, limit: MediaTime) -> Result<()> {
+        let mut index = from;
+        while index < self.audio.len() {
+            let start = self.audio[index].start;
+            if cmp_time(start, limit) != std::cmp::Ordering::Less {
+                self.audio.remove(index);
+                continue;
+            }
+            let end = start.saturating_add(self.audio[index].duration)?;
+            if cmp_time(end, limit) == std::cmp::Ordering::Greater {
+                let visible = limit.saturating_sub(start)?;
+                if visible.is_zero() {
+                    self.audio.remove(index);
+                    continue;
+                }
+                let node = self.audio[index].node.clone();
+                let trimmed = self.unary(
+                    "hold",
+                    "rf.transform.trim",
+                    json!({
+                        "start": crate::emit_clip::media_time_json(MediaTime::zero(visible.timescale.max(1))),
+                        "duration": crate::emit_clip::media_time_json(visible),
+                    }),
+                    node,
+                );
+                self.audio[index].node = trimmed;
+                self.audio[index].duration = visible;
+            }
+            index += 1;
+        }
+        Ok(())
+    }
+
+    fn clamp_cues(&mut self, from: usize, limit: MediaTime) -> Result<()> {
+        let mut index = from;
+        while index < self.subtitles.len() {
+            let start = self.subtitles[index].start;
+            if cmp_time(start, limit) != std::cmp::Ordering::Less {
+                self.subtitles.remove(index);
+                continue;
+            }
+            let end = start.saturating_add(self.subtitles[index].duration)?;
+            if cmp_time(end, limit) == std::cmp::Ordering::Greater {
+                let visible = limit.saturating_sub(start)?;
+                if visible.is_zero() {
+                    self.subtitles.remove(index);
+                    continue;
+                }
+                self.subtitles[index].duration = visible;
+            }
+            index += 1;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn emit_compose(
+        &mut self,
+        canvas: Option<(u32, u32)>,
+        span: Option<MediaTime>,
+    ) -> NodeId {
         let id = self.fresh("comp");
         let layers: Vec<serde_json::Value> = self
             .layers
@@ -295,6 +425,9 @@ impl<'a> CompileCtx<'a> {
         if let Some((w, h)) = canvas {
             params["w"] = json!(w);
             params["h"] = json!(h);
+        }
+        if let Some(span) = span.filter(|span| !span.is_zero()) {
+            params["duration"] = crate::emit_clip::media_time_json(span);
         }
         self.nodes.push(RenderNode {
             id: id.clone(),
@@ -436,6 +569,16 @@ pub(crate) fn semantic_adapter_params(refs: &[SemanticRef]) -> serde_json::Value
         }
     }
     params
+}
+
+pub(crate) fn time_is_after(left: MediaTime, right: MediaTime) -> bool {
+    cmp_time(left, right) == std::cmp::Ordering::Greater
+}
+
+fn cmp_time(left: MediaTime, right: MediaTime) -> std::cmp::Ordering {
+    let lhs = i128::from(left.ticks) * i128::from(right.timescale.max(1));
+    let rhs = i128::from(right.ticks) * i128::from(left.timescale.max(1));
+    lhs.cmp(&rhs)
 }
 
 pub(crate) fn child_span(seq: &Sequence) -> Result<MediaTime> {

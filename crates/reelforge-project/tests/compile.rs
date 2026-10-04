@@ -42,6 +42,15 @@ fn ops(graph: &reelforge_render_graph::RenderGraph) -> Vec<&str> {
         .collect()
 }
 
+fn assert_millis(ticks: i64, scale: u64, millis: i64) {
+    assert!(scale > 0, "ticks={ticks} scale={scale}");
+    assert_eq!(
+        ticks * 1_000,
+        millis * i64::try_from(scale).unwrap(),
+        "ticks={ticks} scale={scale}"
+    );
+}
+
 #[test]
 fn migrate_zero_to_one() {
     let mut p = CaptureProject::new(ProjectId::new("p"), "demo");
@@ -191,9 +200,91 @@ fn dissolve_overlaps_and_fades() {
     p.sequences.push(seq);
     let out = compile_project(&p).unwrap();
     let names = ops(&out.graph);
-    assert!(names.contains(&"rf.transform.fade_in"));
-    assert!(names.contains(&"rf.transform.fade_out"));
+    assert!(names.contains(&"rf.transform.crossfade_in"), "{names:?}");
+    assert!(!names.contains(&"rf.transform.fade_in"), "{names:?}");
+    assert!(!names.contains(&"rf.transform.fade_out"), "{names:?}");
     assert!(names.contains(&"rf.compose.layers"));
+    let compose = out
+        .graph
+        .nodes
+        .iter()
+        .find_map(|n| match &n.body {
+            RenderNodeKind::Op { operation, params }
+                if operation.as_str() == "rf.compose.layers" =>
+            {
+                Some(params)
+            }
+            _ => None,
+        })
+        .expect("compose");
+    // 2s clip minus a 0.5s overlap. The cursor may reduce 1500/1000 to 3/2.
+    let start = &compose["layers"][1]["start"];
+    assert_millis(
+        start["ticks"].as_i64().unwrap(),
+        start["timescale"].as_u64().unwrap(),
+        1_500,
+    );
+}
+
+#[test]
+fn dissolve_on_a_fresh_track_does_not_fade_the_other() {
+    let mut p = CaptureProject::new(ProjectId::new("p"), "xf-tracks");
+    p.media.push(media("a", "a.mp4"));
+    let mut seq = Sequence::new(SequenceId::new("s"), "main");
+    let mut lower = TimelineTrack::new(TimelineTrackId::new("v0"), TrackKind::Video);
+    lower.items.push(clip("c1", "a", 0.0, 2.0));
+    let mut upper = TimelineTrack::new(TimelineTrackId::new("v1"), TrackKind::Video);
+    let TimelineItem::Clip(mut c2) = clip("c2", "a", 0.0, 2.0) else {
+        panic!("clip");
+    };
+    c2.transition_in = Some(Transition {
+        kind: TransitionKind::Dissolve,
+        duration: MediaTime::from_secs(0.5, 1_000).unwrap(),
+    });
+    upper.items.push(TimelineItem::Clip(c2));
+    seq.tracks.push(lower);
+    seq.tracks.push(upper);
+    p.sequences.push(seq);
+    let out = compile_project(&p).unwrap();
+    let names = ops(&out.graph);
+    assert!(!names.contains(&"rf.transform.fade_out"), "{names:?}");
+    assert!(!names.contains(&"rf.transform.fade_in"), "{names:?}");
+    assert!(!names.contains(&"rf.transform.crossfade_in"), "{names:?}");
+}
+
+#[test]
+fn trailing_gap_extends_compose_duration() {
+    let mut p = CaptureProject::new(ProjectId::new("p"), "tail");
+    p.media.push(media("a", "a.mp4"));
+    let mut seq = Sequence::new(SequenceId::new("s"), "main");
+    let mut tr = TimelineTrack::new(TimelineTrackId::new("v0"), TrackKind::Video);
+    tr.items.push(clip("c1", "a", 0.0, 2.0));
+    tr.items.push(TimelineItem::Gap(Gap {
+        duration: MediaTime::from_secs(1.0, 1_000).unwrap(),
+    }));
+    seq.tracks.push(tr);
+    p.sequences.push(seq);
+    let out = compile_project(&p).unwrap();
+    let compose = out
+        .graph
+        .nodes
+        .iter()
+        .find_map(|n| match &n.body {
+            RenderNodeKind::Op { operation, params }
+                if operation.as_str() == "rf.compose.layers" =>
+            {
+                Some(params)
+            }
+            _ => None,
+        })
+        .expect("a trailing gap must not take the single-clip shortcut");
+    let duration = &compose["duration"];
+    assert_millis(
+        duration["ticks"].as_i64().unwrap(),
+        duration["timescale"].as_u64().unwrap(),
+        3_000,
+    );
+    out.graph.validate().unwrap();
 }
 
 #[test]

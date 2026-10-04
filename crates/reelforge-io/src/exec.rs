@@ -8,7 +8,7 @@ use crate::gpu::{GpuContext, GpuRequest, execute_gpu};
 use crate::graph_run::{GraphEncodeHints, NodeMedia};
 use crate::mask_bridge::{apply_region_redaction, region_redaction_from_value};
 use reelforge_compose::{
-    CompositeLayer, MixTrack, composite_video, composite_video_with_background, concatenate_audio,
+    CompositeLayer, CompositeVideo, MixTrack, composite_video, concatenate_audio,
     concatenate_video, mix_audio,
 };
 use reelforge_core::{
@@ -16,8 +16,8 @@ use reelforge_core::{
     subclip_video,
 };
 use reelforge_fx::{
-    BlackAndWhite, Crop, EvenSize, FadeIn, FadeOut, Freeze, InvertColors, Loop, MirrorX, MirrorY,
-    Painting, Resize, Rotate, SlideIn, SlideOut, SlideSide, Speed, VolumeGain,
+    BlackAndWhite, Crop, CrossFadeIn, EvenSize, FadeIn, FadeOut, Freeze, InvertColors, Loop,
+    MirrorX, MirrorY, Painting, Resize, Rotate, SlideIn, SlideOut, SlideSide, Speed, VolumeGain,
 };
 use reelforge_render_graph::{CompiledOp, ExecutorKind, TypedParams};
 use reelforge_text::{BurnInOptions, burn_in_layers, parse_subtitles_path};
@@ -65,10 +65,12 @@ fn execute_nary(compiled: &CompiledOp, inputs: Vec<NodeMedia>) -> Result<NodeMed
             h,
             layers,
             background,
+            duration,
         } => {
             let videos: Vec<_> = inputs.iter().map(|m| Arc::clone(&m.video)).collect();
             let audio = inputs.first().and_then(|m| m.audio.clone());
-            let video = apply_compose_layers(videos, *w, *h, layers, background.as_ref())?;
+            let video =
+                apply_compose_layers(videos, *w, *h, layers, background.as_ref(), *duration)?;
             Ok(NodeMedia {
                 video,
                 audio,
@@ -257,6 +259,7 @@ fn apply_compose_layers(
     h: Option<u32>,
     layer_value: &serde_json::Value,
     background: Option<&serde_json::Value>,
+    span: Option<MediaTime>,
 ) -> Result<Arc<dyn VideoClip>> {
     if inputs.is_empty() {
         return Err(IoError::message("rf.compose.layers needs inputs"));
@@ -304,11 +307,25 @@ fn apply_compose_layers(
         let b = bg.get("b").and_then(serde_json::Value::as_u64).unwrap_or(0);
         #[allow(clippy::cast_possible_truncation)]
         let color = Rgb8::new(r as u8, g as u8, b as u8);
-        composite_video_with_background(size, color, layers)
-            .map_err(|e| IoError::message(e.to_string()))
+        Ok(finish_composite(
+            CompositeVideo::with_background(size, color, layers)
+                .map_err(|e| IoError::message(e.to_string()))?,
+            span,
+        ))
     } else {
-        composite_video(size, layers).map_err(|e| IoError::message(e.to_string()))
+        Ok(finish_composite(
+            CompositeVideo::new(size, layers).map_err(|e| IoError::message(e.to_string()))?,
+            span,
+        ))
     }
+}
+
+fn finish_composite(video: CompositeVideo, span: Option<MediaTime>) -> Arc<dyn VideoClip> {
+    let video = match span {
+        Some(span) => video.hold_until(span.to_duration()),
+        None => video,
+    };
+    Arc::new(video)
 }
 
 #[allow(clippy::too_many_lines, clippy::cast_possible_truncation)]
@@ -335,6 +352,9 @@ fn apply_typed_video(
             .apply(clip)
             .map_err(IoError::from),
         TypedParams::FadeOut { duration } => FadeOut::new(duration.to_duration())
+            .apply(clip)
+            .map_err(IoError::from),
+        TypedParams::CrossFadeIn { duration } => CrossFadeIn::new(duration.to_duration())
             .apply(clip)
             .map_err(IoError::from),
         TypedParams::SlideIn { duration, side } => {
@@ -592,5 +612,51 @@ mod tests {
             out.video.frame_at(Time::from_secs(1.2)).unwrap().data()[0],
             0
         );
+    }
+
+    #[test]
+    fn crossfade_in_mixes_over_the_opaque_clip() {
+        let red: Arc<dyn VideoClip> = Arc::new(ColorClip::new(
+            Size::new(1, 1),
+            Rgb8::RED,
+            Duration::from_secs(2.0),
+        ));
+        let blue: Arc<dyn VideoClip> = Arc::new(ColorClip::new(
+            Size::new(1, 1),
+            Rgb8::BLUE,
+            Duration::from_secs(2.0),
+        ));
+        let mut hints = GraphEncodeHints::default();
+        let faded = apply_typed_video(
+            blue,
+            &TypedParams::CrossFadeIn {
+                duration: MediaTime::from_secs(0.5, 1_000).unwrap(),
+            },
+            &mut hints,
+        )
+        .unwrap();
+        let under = CompositeLayer::new(red);
+        let over = CompositeLayer::new(faded)
+            .with_start(Time::from_secs(1.5))
+            .with_layer_index(1);
+        let comp = CompositeVideo::new(Size::new(1, 1), vec![under, over]).unwrap();
+        let opened = comp.frame_at(Time::from_secs(1.5)).unwrap();
+        assert_eq!(&opened.data()[0..3], &[255, 0, 0]);
+        let mid = comp.frame_at(Time::from_secs(1.75)).unwrap();
+        assert_eq!(&mid.data()[0..3], &[128, 0, 128]);
+    }
+
+    #[test]
+    fn compose_span_holds_the_background() {
+        let layer = CompositeLayer::new(Arc::new(ColorClip::new(
+            Size::new(1, 1),
+            Rgb8::RED,
+            Duration::from_secs(2.0),
+        )));
+        let video = CompositeVideo::new(Size::new(1, 1), vec![layer]).unwrap();
+        let held = finish_composite(video, Some(MediaTime::from_secs(3.0, 1_000).unwrap()));
+        assert!((held.duration().as_secs() - 3.0).abs() < 1e-6);
+        let tail = held.frame_at(Time::from_secs(2.5)).unwrap();
+        assert_eq!(&tail.data()[0..3], &[0, 0, 0]);
     }
 }

@@ -104,6 +104,18 @@ impl CompositeVideo {
     pub fn layers(&self) -> &[CompositeLayer] {
         &self.layers
     }
+
+    /// Keep the canvas up through `until` when that is later than the last layer.
+    ///
+    /// Frames after the last layer stay the background color. A shorter `until`
+    /// does not trim layers.
+    #[must_use]
+    pub fn hold_until(mut self, until: Duration) -> Self {
+        if until.as_secs() > self.duration.as_secs() {
+            self.duration = until;
+        }
+        self
+    }
 }
 
 impl VideoClip for CompositeVideo {
@@ -253,5 +265,30 @@ mod tests {
             CompositeVideo::with_background(Size::new(2, 2), Rgb8::BLACK, vec![layer]).unwrap();
         let f0 = comp.frame_at(Time::ZERO).unwrap();
         assert_eq!(&f0.data()[0..3], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn hold_until_keeps_background_after_the_last_layer() {
+        let layer = CompositeLayer::new(Arc::new(ColorClip::new(
+            Size::new(1, 1),
+            Rgb8::RED,
+            Duration::from_secs(1.0),
+        )));
+        let held = CompositeVideo::new(Size::new(1, 1), vec![layer])
+            .unwrap()
+            .hold_until(Duration::from_secs(2.5));
+        assert!((held.duration().as_secs() - 2.5).abs() < 1e-9);
+        let tail = held.frame_at(Time::from_secs(2.0)).unwrap();
+        assert_eq!(&tail.data()[0..3], &[0, 0, 0]);
+
+        let layer = CompositeLayer::new(Arc::new(ColorClip::new(
+            Size::new(1, 1),
+            Rgb8::RED,
+            Duration::from_secs(1.0),
+        )));
+        let same = CompositeVideo::new(Size::new(1, 1), vec![layer])
+            .unwrap()
+            .hold_until(Duration::from_secs(0.4));
+        assert!((same.duration().as_secs() - 1.0).abs() < 1e-9);
     }
 }
