@@ -11,8 +11,7 @@ use reelforge_core::{CoreError, Mask, Result, Size, Time, VideoClip};
 /// One step from a parent pixel space into the next one.
 ///
 /// List steps from the source toward the canvas. [`source_pixel`] walks them
-/// backwards. Nearest resize uses `(dst * src_len) / dst_len`, the same index
-/// as [`crate::raster::resize_nearest`].
+/// backwards. Nearest resize reads parent `(dx * src_width / dst_width, dy * src_height / dst_height)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PixelMap {
     /// Parent `(x + left, y + top)` is kept as `(x, y)`.
