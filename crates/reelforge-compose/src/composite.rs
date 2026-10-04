@@ -1,9 +1,11 @@
 //! Multi-layer video compositing.
 
-use crate::blit::{blit_over, solid_canvas};
+use crate::blit::{blit_over, blit_over_premul, solid_canvas};
 use crate::layer::CompositeLayer;
 use crate::{ComposeError, Result};
-use reelforge_core::{CoreError, Duration, Frame, Rgb8, Size, Time, VideoClip};
+use reelforge_core::{
+    AlphaMode, CoreError, Duration, Frame, FrameFormat, Rgb8, Size, Time, VideoClip,
+};
 use std::sync::Arc;
 
 /// Stacked video composition: background + ordered layers with positions.
@@ -11,11 +13,17 @@ use std::sync::Arc;
 /// Layers are drawn in ascending [`CompositeLayer::layer_index`] order (higher
 /// index on top). Each layer is active for
 /// `[start, start + clip.duration())` on the composite timeline.
+///
+/// A color background returns RGB. [`CompositeVideo::transparent`] returns
+/// premultiplied RGBA, so a group of parts can sit inside another scene
+/// without gaining an opaque rectangle.
 #[derive(Clone)]
 pub struct CompositeVideo {
     size: Size,
     duration: Duration,
     background: Rgb8,
+    /// Uncovered pixels stay transparent instead of [`Self::background`].
+    transparent: bool,
     layers: Vec<CompositeLayer>,
     fps: Option<f64>,
 }
@@ -82,9 +90,25 @@ impl CompositeVideo {
             size,
             duration,
             background,
+            transparent: false,
             layers,
             fps,
         })
+    }
+
+    /// Build a group whose uncovered pixels stay transparent.
+    ///
+    /// The sampled frame is premultiplied RGBA. Nest it in another composite
+    /// to keep the holes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ComposeError`] when size is invalid, no layers are given, or
+    /// duration would be zero.
+    pub fn transparent(size: Size, layers: Vec<CompositeLayer>) -> Result<Self> {
+        let mut video = Self::with_background(size, Rgb8::BLACK, layers)?;
+        video.transparent = true;
+        Ok(video)
     }
 
     /// Canvas size.
@@ -94,9 +118,17 @@ impl CompositeVideo {
     }
 
     /// Background fill color.
+    ///
+    /// Ignored when [`Self::is_transparent`] is set.
     #[must_use]
     pub const fn background(&self) -> Rgb8 {
         self.background
+    }
+
+    /// Whether uncovered pixels stay transparent.
+    #[must_use]
+    pub const fn is_transparent(&self) -> bool {
+        self.transparent
     }
 
     /// Layers in draw order (low → high).
@@ -107,8 +139,8 @@ impl CompositeVideo {
 
     /// Keep the canvas up through `until` when that is later than the last layer.
     ///
-    /// Frames after the last layer stay the background color. A shorter `until`
-    /// does not trim layers.
+    /// Frames after the last layer stay the background color, or transparent
+    /// when this group has no background. A shorter `until` does not trim layers.
     #[must_use]
     pub fn hold_until(mut self, until: Duration) -> Self {
         if until.as_secs() > self.duration.as_secs() {
@@ -139,9 +171,35 @@ impl VideoClip for CompositeVideo {
             });
         }
 
+        if self.transparent {
+            return self.paint_transparent(t);
+        }
+        self.paint_rgb(t)
+    }
+}
+
+impl CompositeVideo {
+    fn paint_rgb(&self, t: Time) -> reelforge_core::Result<Frame> {
         let mut canvas = solid_canvas(self.size, self.background)
             .map_err(|e| CoreError::invalid_frame(format!("composite canvas: {e}")))?;
+        self.paint_layers(t, &mut canvas, false)?;
+        Ok(canvas)
+    }
 
+    fn paint_transparent(&self, t: Time) -> reelforge_core::Result<Frame> {
+        let mut canvas = Frame::zeros(self.size, FrameFormat::Rgba8)
+            .map_err(|e| CoreError::invalid_frame(format!("composite canvas: {e}")))?
+            .with_alpha_mode(AlphaMode::Premultiplied)?;
+        self.paint_layers(t, &mut canvas, true)?;
+        Ok(canvas)
+    }
+
+    fn paint_layers(
+        &self,
+        t: Time,
+        canvas: &mut Frame,
+        premul: bool,
+    ) -> reelforge_core::Result<()> {
         for layer in &self.layers {
             if !layer.active_at(t) {
                 continue;
@@ -150,11 +208,14 @@ impl VideoClip for CompositeVideo {
             let frame = layer.clip.frame_at(local)?;
             let mask = layer.clip.mask_at(local)?;
             let (ox, oy) = layer.position.resolve(self.size, frame.size());
-            blit_over(&mut canvas, &frame, ox, oy, layer.opacity, mask.as_ref())
-                .map_err(|e| CoreError::invalid_frame(format!("blit: {e}")))?;
+            let painted = if premul {
+                blit_over_premul(canvas, &frame, ox, oy, layer.opacity, mask.as_ref())
+            } else {
+                blit_over(canvas, &frame, ox, oy, layer.opacity, mask.as_ref())
+            };
+            painted.map_err(|e| CoreError::invalid_frame(format!("blit: {e}")))?;
         }
-
-        Ok(canvas)
+        Ok(())
     }
 }
 
@@ -290,5 +351,33 @@ mod tests {
             .unwrap()
             .hold_until(Duration::from_secs(0.4));
         assert!((same.duration().as_secs() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn transparent_group_keeps_a_hole_over_blue() {
+        use reelforge_core::{AlphaMode, FrameFormat};
+        let part = Arc::new(ColorClip::new(
+            Size::new(1, 1),
+            Rgb8::RED,
+            Duration::from_secs(1.0),
+        ));
+        let group =
+            CompositeVideo::transparent(Size::new(2, 1), vec![CompositeLayer::new(part)]).unwrap();
+        assert!(group.is_transparent());
+        let grouped = group.frame_at(Time::ZERO).unwrap();
+        assert_eq!(grouped.format(), FrameFormat::Rgba8);
+        assert_eq!(grouped.alpha_mode(), AlphaMode::Premultiplied);
+        assert_eq!(&grouped.data()[0..4], &[255, 0, 0, 255]);
+        assert_eq!(&grouped.data()[4..8], &[0, 0, 0, 0]);
+
+        let nested = CompositeVideo::with_background(
+            Size::new(2, 1),
+            Rgb8::BLUE,
+            vec![CompositeLayer::new(Arc::new(group))],
+        )
+        .unwrap();
+        let painted = nested.frame_at(Time::ZERO).unwrap();
+        assert_eq!(&painted.data()[0..3], &[255, 0, 0]);
+        assert_eq!(&painted.data()[3..6], &[0, 0, 255]);
     }
 }

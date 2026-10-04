@@ -161,7 +161,7 @@ fn blit_offset(src: &Frame, ox: i32, oy: i32) -> Result<Frame> {
             }
         }
     }
-    Frame::from_raw(size, src.format(), out)
+    Frame::from_raw(size, src.format(), out)?.with_alpha_mode(src.alpha_mode())
 }
 
 #[cfg(test)]

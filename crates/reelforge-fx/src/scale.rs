@@ -3,6 +3,10 @@
 use rayon::prelude::*;
 use reelforge_core::{CoreError, Frame, Result, Size};
 
+fn with_source_alpha(source: &Frame, built: Frame) -> Result<Frame> {
+    built.with_alpha_mode(source.alpha_mode())
+}
+
 /// Sampling kernel used when resizing frames.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum ResizeFilter {
@@ -80,7 +84,7 @@ pub fn resize_bilinear(frame: &Frame, new_size: Size) -> Result<Frame> {
             }
         });
 
-    Frame::from_raw(new_size, frame.format(), out)
+    with_source_alpha(frame, Frame::from_raw(new_size, frame.format(), out)?)
 }
 
 /// Bicubic (Catmull–Rom) resize — higher quality for upscales/downscales.
@@ -177,7 +181,7 @@ pub fn resize_bicubic(frame: &Frame, new_size: Size) -> Result<Frame> {
             }
         });
 
-    Frame::from_raw(new_size, frame.format(), out)
+    with_source_alpha(frame, Frame::from_raw(new_size, frame.format(), out)?)
 }
 
 /// Catmull–Rom cubic weights for fractional offset `t` in `[0,1]`.
@@ -259,6 +263,17 @@ mod tests {
         let frame = Frame::solid_rgb(Size::new(8, 6), Rgb8::new(10, 20, 30)).unwrap();
         let out = resize_bilinear(&frame, Size::new(3, 2)).unwrap();
         assert_eq!(&out.data()[0..3], &[10, 20, 30]);
+    }
+
+    #[test]
+    fn bilinear_keeps_premultiplied_red() {
+        use reelforge_core::{AlphaMode, Rgba8};
+        let straight = Frame::solid_rgba(Size::new(2, 2), Rgba8::new(255, 0, 0, 128)).unwrap();
+        let premul = straight.premultiply().unwrap();
+        let out = resize_bilinear(&premul, Size::new(1, 1)).unwrap();
+        assert_eq!(out.alpha_mode(), AlphaMode::Premultiplied);
+        assert_eq!(out.data()[0], premul.data()[0]);
+        assert_eq!(out.data()[3], premul.data()[3]);
     }
 
     #[test]

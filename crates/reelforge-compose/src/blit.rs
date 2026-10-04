@@ -133,6 +133,124 @@ pub fn solid_canvas(size: Size, color: Rgb8) -> Result<Frame> {
     Frame::solid_rgb(size, color)
 }
 
+/// Paint `src` onto a premultiplied RGBA canvas.
+///
+/// Uncovered pixels stay transparent. Straight sources are associated before
+/// the over; premultiplied sources are not multiplied again.
+///
+/// # Errors
+///
+/// Returns [`CoreError::InvalidFrame`] when `dst` is not premultiplied RGBA,
+/// or when the mask size does not match `src`.
+#[allow(clippy::cast_sign_loss)]
+#[allow(clippy::similar_names)]
+#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+pub fn blit_over_premul(
+    dst: &mut Frame,
+    src: &Frame,
+    ox: i32,
+    oy: i32,
+    opacity: f32,
+    mask: Option<&Mask>,
+) -> Result<()> {
+    if dst.format() != FrameFormat::Rgba8 || dst.alpha_mode() != AlphaMode::Premultiplied {
+        return Err(CoreError::invalid_frame(
+            "premultiplied blit requires a Premultiplied Rgba8 canvas",
+        ));
+    }
+    let opacity = opacity.clamp(0.0, 1.0);
+    if opacity <= 0.0 {
+        return Ok(());
+    }
+    if let Some(m) = mask
+        && m.size() != src.size()
+    {
+        return Err(CoreError::invalid_frame(format!(
+            "mask size {:?} does not match source {:?}",
+            m.size(),
+            src.size()
+        )));
+    }
+
+    let canvas = dst.size();
+    let child = src.size();
+    let dst_data = dst.data_mut();
+    let cw = canvas.width as usize;
+    let sw = child.width as usize;
+    let canvas_w = canvas.width.cast_signed();
+    let canvas_h = canvas.height.cast_signed();
+    let mask_data = mask.map(Mask::data);
+
+    for sy in 0..child.height {
+        let cy = oy + sy.cast_signed();
+        if cy < 0 || cy >= canvas_h {
+            continue;
+        }
+        let cy_u = cy as usize;
+        let sy_u = sy as usize;
+        for sx in 0..child.width {
+            let cx = ox + sx.cast_signed();
+            if cx < 0 || cx >= canvas_w {
+                continue;
+            }
+            let cx_u = cx as usize;
+            let sx_u = sx as usize;
+            let mut extra = opacity;
+            if let Some(md) = mask_data {
+                extra *= md[sy_u * sw + sx_u].clamp(0.0, 1.0);
+            }
+            if extra <= 0.0 {
+                continue;
+            }
+            let sample = associated_rgb(src, sy_u * sw + sx_u);
+            let coverage = (sample[3] / 255.0) * extra;
+            if coverage <= 0.0 {
+                continue;
+            }
+            let di = (cy_u * cw + cx_u) * 4;
+            let inv = 1.0 - coverage;
+            for channel in 0..3 {
+                let v = sample[channel] * extra + f32::from(dst_data[di + channel]) * inv;
+                dst_data[di + channel] = v.round().clamp(0.0, 255.0) as u8;
+            }
+            let alpha = coverage * 255.0 + f32::from(dst_data[di + 3]) * inv;
+            dst_data[di + 3] = alpha.round().clamp(0.0, 255.0) as u8;
+        }
+    }
+    Ok(())
+}
+
+/// Associated RGB plus the stored alpha byte, both in 0..=255 space.
+fn associated_rgb(src: &Frame, pixel: usize) -> [f32; 4] {
+    let data = src.data();
+    match src.format() {
+        FrameFormat::Rgb8 => {
+            let i = pixel * 3;
+            [
+                f32::from(data[i]),
+                f32::from(data[i + 1]),
+                f32::from(data[i + 2]),
+                255.0,
+            ]
+        }
+        FrameFormat::Rgba8 => {
+            let i = pixel * 4;
+            let alpha = f32::from(data[i + 3]);
+            let scale = if src.alpha_mode() == AlphaMode::Premultiplied {
+                1.0
+            } else {
+                alpha / 255.0
+            };
+            [
+                f32::from(data[i]) * scale,
+                f32::from(data[i + 1]) * scale,
+                f32::from(data[i + 2]) * scale,
+                alpha,
+            ]
+        }
+    }
+}
+
 #[allow(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
@@ -203,5 +321,27 @@ mod tests {
         blit_over(&mut b, &premul, 0, 0, 1.0, None).unwrap();
         assert_eq!(a.data()[0], b.data()[0]);
         assert!((i16::from(a.data()[0]) - 128).abs() <= 1);
+    }
+
+    #[test]
+    fn premul_canvas_keeps_half_red_and_a_hole() {
+        let mut canvas = Frame::zeros(Size::new(2, 1), FrameFormat::Rgba8)
+            .unwrap()
+            .with_alpha_mode(AlphaMode::Premultiplied)
+            .unwrap();
+        let straight = Frame::solid_rgba(Size::new(1, 1), Rgba8::new(255, 0, 0, 128)).unwrap();
+        let premul = straight.premultiply().unwrap();
+        blit_over_premul(&mut canvas, &premul, 0, 0, 1.0, None).unwrap();
+        assert_eq!(canvas.alpha_mode(), AlphaMode::Premultiplied);
+        assert_eq!(canvas.data()[0], premul.data()[0]);
+        assert_eq!(canvas.data()[3], premul.data()[3]);
+        assert_eq!(&canvas.data()[4..8], &[0, 0, 0, 0]);
+
+        let mut rgb = solid_canvas(Size::new(2, 1), Rgb8::BLACK).unwrap();
+        blit_over(&mut rgb, &canvas, 0, 0, 1.0, None).unwrap();
+        let painted = i16::from(rgb.data()[0]);
+        let expected = i16::from(premul.data()[0]);
+        assert!((painted - expected).abs() <= 1, "painted {painted}");
+        assert_eq!(&rgb.data()[3..6], &[0, 0, 0]);
     }
 }

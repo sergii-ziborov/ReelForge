@@ -3,6 +3,14 @@
 use rayon::prelude::*;
 use reelforge_core::{CoreError, Frame, FrameFormat, Result, Rgb8, Size};
 
+/// Rebuild a frame and keep the source alpha tag.
+///
+/// Geometry copies pixels. It must not relabel premultiplied RGBA as straight,
+/// or a later composite multiplies the color by alpha again.
+fn with_source_alpha(source: &Frame, built: Frame) -> Result<Frame> {
+    built.with_alpha_mode(source.alpha_mode())
+}
+
 /// Crop a rectangular region (`x`, `y`, `width`, `height`) from `frame`.
 ///
 /// # Errors
@@ -32,7 +40,10 @@ pub fn crop_frame(frame: &Frame, x: u32, y: u32, width: u32, height: u32) -> Res
             let start = (y0 + row) * row_src + x_off;
             dst.copy_from_slice(&data[start..start + row_dst]);
         });
-    Frame::from_raw(Size::new(width, height), frame.format(), out)
+    with_source_alpha(
+        frame,
+        Frame::from_raw(Size::new(width, height), frame.format(), out)?,
+    )
 }
 
 /// Nearest-neighbor resize to `new_size`.
@@ -84,7 +95,7 @@ pub fn resize_nearest(frame: &Frame, new_size: Size) -> Result<Frame> {
         }
     }
 
-    Frame::from_raw(new_size, frame.format(), out)
+    with_source_alpha(frame, Frame::from_raw(new_size, frame.format(), out)?)
 }
 
 fn resize_rows_rgb(
@@ -154,7 +165,7 @@ pub fn mirror_x(frame: &Frame) -> Result<Frame> {
                 dst[dst_i..dst_i + bpp].copy_from_slice(&src[src_i..src_i + bpp]);
             }
         });
-    Frame::from_raw(size, frame.format(), out)
+    with_source_alpha(frame, Frame::from_raw(size, frame.format(), out)?)
 }
 
 /// Flip vertically.
@@ -175,7 +186,7 @@ pub fn mirror_y(frame: &Frame) -> Result<Frame> {
         let src = sy * row;
         dst.copy_from_slice(&data[src..src + row]);
     });
-    Frame::from_raw(size, frame.format(), out)
+    with_source_alpha(frame, Frame::from_raw(size, frame.format(), out)?)
 }
 
 /// Rotate 90° clockwise (width/height swap).
@@ -209,7 +220,10 @@ pub fn rotate_90_cw(frame: &Frame) -> Result<Frame> {
         });
     let width = u32::try_from(dw).map_err(|_| CoreError::invalid_frame("rotate width"))?;
     let height = u32::try_from(dh).map_err(|_| CoreError::invalid_frame("rotate height"))?;
-    Frame::from_raw(Size::new(width, height), frame.format(), out)
+    with_source_alpha(
+        frame,
+        Frame::from_raw(Size::new(width, height), frame.format(), out)?,
+    )
 }
 
 /// Rotate 180° (pixel reverse in place on a copy).
@@ -227,7 +241,7 @@ pub fn rotate_180(frame: &Frame) -> Result<Frame> {
         let src_i = (n - 1 - i) * bpp;
         dst.copy_from_slice(&data[src_i..src_i + bpp]);
     });
-    Frame::from_raw(size, frame.format(), out)
+    with_source_alpha(frame, Frame::from_raw(size, frame.format(), out)?)
 }
 
 /// Rotate 270° clockwise (90° counter-clockwise).
@@ -300,7 +314,7 @@ pub fn rotate_degrees(frame: &Frame, degrees: f32) -> Result<Frame> {
             }
         });
 
-    Frame::from_raw(size, frame.format(), out)
+    with_source_alpha(frame, Frame::from_raw(size, frame.format(), out)?)
 }
 
 /// Blend `frame` toward `color` by `amount` in `0.0..=1.0` (`1.0` = solid color).
@@ -408,6 +422,22 @@ pub fn resolve_resize_size(source: Size, width: Option<u32>, height: Option<u32>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn crop_keeps_premultiplied_red() {
+        use reelforge_core::{AlphaMode, Rgba8};
+        let straight = Frame::solid_rgba(Size::new(2, 1), Rgba8::new(255, 0, 0, 128)).unwrap();
+        let premul = straight.premultiply().unwrap();
+        let cropped = crop_frame(&premul, 0, 0, 1, 1).unwrap();
+        assert_eq!(cropped.alpha_mode(), AlphaMode::Premultiplied);
+        assert_eq!(cropped.data()[0], premul.data()[0]);
+        assert_eq!(cropped.data()[3], premul.data()[3]);
+        let turned = rotate_180(&premul).unwrap();
+        assert_eq!(turned.alpha_mode(), AlphaMode::Premultiplied);
+        let scaled = resize_nearest(&premul, Size::new(1, 1)).unwrap();
+        assert_eq!(scaled.alpha_mode(), AlphaMode::Premultiplied);
+        assert_eq!(scaled.data()[0], premul.data()[0]);
+    }
 
     #[test]
     fn crop_centerish() {

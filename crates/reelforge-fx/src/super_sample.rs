@@ -84,7 +84,9 @@ impl VideoClip for SsVideo {
                 }
             })
             .collect();
-        Frame::from_raw(self.inner.size(), self.inner.frame_at(t)?.format(), out)
+        let tagged = self.inner.frame_at(t)?;
+        Frame::from_raw(self.inner.size(), tagged.format(), out)?
+            .with_alpha_mode(tagged.alpha_mode())
     }
 }
 
