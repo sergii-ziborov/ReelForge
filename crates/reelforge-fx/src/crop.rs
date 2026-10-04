@@ -82,14 +82,16 @@ impl VideoClip for CroppedVideo {
     }
 
     fn mask_at(&self, t: Time) -> Result<Option<Mask>> {
-        match self.inner.mask_at(t)? {
-            None => Ok(None),
-            Some(mask) => {
-                // Spatial crop drops inherited masks; re-derive if needed.
-                let _ = mask;
-                Ok(None)
-            }
-        }
+        let Some(mask) = crate::mask_geom::picture_mask(self.inner.as_ref(), t)? else {
+            return Ok(None);
+        };
+        Ok(Some(crate::mask_geom::crop_mask(
+            &mask,
+            self.crop.x,
+            self.crop.y,
+            self.crop.width,
+            self.crop.height,
+        )?))
     }
 }
 

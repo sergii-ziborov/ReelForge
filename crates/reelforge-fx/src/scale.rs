@@ -185,7 +185,7 @@ pub fn resize_bicubic(frame: &Frame, new_size: Size) -> Result<Frame> {
 }
 
 /// Catmull–Rom cubic weights for fractional offset `t` in `[0,1]`.
-fn cubic_weights(t: f32) -> [f32; 4] {
+pub(crate) fn cubic_weights(t: f32) -> [f32; 4] {
     let t2 = t * t;
     let t3 = t2 * t;
     [
@@ -198,11 +198,11 @@ fn cubic_weights(t: f32) -> [f32; 4] {
 
 /// Axis sample: indices and weight of the left/top sample (`w0` in 0..=256).
 #[derive(Clone, Copy)]
-struct AxisLerp {
-    i0: usize,
-    i1: usize,
+pub(crate) struct AxisLerp {
+    pub(crate) i0: usize,
+    pub(crate) i1: usize,
     /// Weight for `i0` in 0..=256 (`i1` gets `256 - w0`).
-    w0: u16,
+    pub(crate) w0: u16,
 }
 
 /// Map destination index `d` in `0..dst` onto continuous source in `[0, src-1]`.
@@ -213,7 +213,7 @@ struct AxisLerp {
     clippy::cast_sign_loss,
     clippy::cast_precision_loss
 )]
-fn build_axis_lerps(src: usize, dst: usize) -> Vec<AxisLerp> {
+pub(crate) fn build_axis_lerps(src: usize, dst: usize) -> Vec<AxisLerp> {
     debug_assert!(src >= 1 && dst >= 1);
     if src == 1 {
         return (0..dst)

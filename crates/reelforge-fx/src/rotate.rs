@@ -83,6 +83,22 @@ impl VideoClip for RotatedVideo {
             Rotate::Degrees(d) => rotate_degrees(&frame, d),
         }
     }
+
+    fn mask_at(&self, t: Time) -> Result<Option<reelforge_core::Mask>> {
+        use crate::mask_geom::{
+            picture_mask, rotate_mask_180, rotate_mask_cw90, rotate_mask_degrees,
+        };
+        let Some(mask) = picture_mask(self.inner.as_ref(), t)? else {
+            return Ok(None);
+        };
+        let turned = match self.rotate {
+            Rotate::Cw90 => rotate_mask_cw90(&mask)?,
+            Rotate::Cw180 => rotate_mask_180(&mask)?,
+            Rotate::Cw270 => rotate_mask_cw90(&rotate_mask_180(&mask)?)?,
+            Rotate::Degrees(degrees) => rotate_mask_degrees(&mask, degrees)?,
+        };
+        Ok(Some(turned))
+    }
 }
 
 #[cfg(test)]

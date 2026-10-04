@@ -134,6 +134,17 @@ impl VideoClip for ResizedVideo {
             ResizeFilter::Bicubic => resize_bicubic(&frame, self.target),
         }
     }
+
+    fn mask_at(&self, t: Time) -> Result<Option<reelforge_core::Mask>> {
+        let Some(mask) = crate::mask_geom::picture_mask(self.inner.as_ref(), t)? else {
+            return Ok(None);
+        };
+        Ok(Some(crate::mask_geom::resize_mask(
+            &mask,
+            self.target,
+            self.filter,
+        )?))
+    }
 }
 
 #[cfg(test)]
