@@ -1,6 +1,7 @@
 //! Still-image video clips.
 
 use crate::error::{IoError, Result};
+use image::ImageDecoder;
 use reelforge_core::{CoreError, Duration, Frame, FrameFormat, Size, Time, VideoClip};
 use std::path::Path;
 
@@ -32,21 +33,25 @@ impl ImageClip {
         })
     }
 
-    /// Load an image file (PNG, JPEG, WebP, GIF first frame, BMP) as RGB8.
+    /// Load an image file (PNG, JPEG, WebP, GIF first frame, BMP).
+    ///
+    /// Files with an alpha channel stay [`FrameFormat::Rgba8`] straight alpha.
+    /// Opaque files stay [`FrameFormat::Rgb8`]. The decoder's orientation is
+    /// applied once, so preview and export share the same pixels.
     ///
     /// # Errors
     ///
     /// Returns image or timing errors.
     pub fn from_path(path: impl AsRef<Path>, duration: Duration) -> Result<Self> {
         let path = path.as_ref();
-        let img = image::open(path)
-            .map_err(|e| IoError::image(format!("open {}: {e}", path.display())))?
-            .to_rgb8();
-        let width = img.width();
-        let height = img.height();
-        let size = Size::new(width, height);
-        let frame =
-            Frame::from_raw(size, FrameFormat::Rgb8, img.into_raw()).map_err(IoError::from)?;
+        let img = load_oriented(path)?;
+        let size = Size::new(img.width(), img.height());
+        let frame = if img.color().has_alpha() {
+            Frame::from_raw(size, FrameFormat::Rgba8, img.to_rgba8().into_raw())
+        } else {
+            Frame::from_raw(size, FrameFormat::Rgb8, img.to_rgb8().into_raw())
+        }
+        .map_err(IoError::from)?;
         Self::from_frame(frame, duration)
     }
 
@@ -62,6 +67,23 @@ impl ImageClip {
     pub fn frame(&self) -> &Frame {
         &self.frame
     }
+}
+
+fn load_oriented(path: &Path) -> Result<image::DynamicImage> {
+    let reader = image::ImageReader::open(path)
+        .map_err(|e| IoError::image(format!("open {}: {e}", path.display())))?
+        .with_guessed_format()
+        .map_err(|e| IoError::image(format!("format {}: {e}", path.display())))?;
+    let mut decoder = reader
+        .into_decoder()
+        .map_err(|e| IoError::image(format!("decode {}: {e}", path.display())))?;
+    let orientation = decoder
+        .orientation()
+        .map_err(|e| IoError::image(format!("orientation {}: {e}", path.display())))?;
+    let mut img = image::DynamicImage::from_decoder(decoder)
+        .map_err(|e| IoError::image(format!("decode {}: {e}", path.display())))?;
+    img.apply_orientation(orientation);
+    Ok(img)
 }
 
 impl VideoClip for ImageClip {
@@ -91,7 +113,7 @@ impl VideoClip for ImageClip {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use reelforge_core::{Rgb8, VideoClip};
+    use reelforge_core::{FrameFormat, Rgb8, VideoClip};
     use std::io::Write;
 
     #[test]
@@ -123,6 +145,40 @@ mod tests {
         let clip = ImageClip::from_path(&path, Duration::from_secs(0.5)).unwrap();
         let f = clip.frame_at(Time::ZERO).unwrap();
         assert_eq!(f.size(), Size::new(2, 2));
+        assert_eq!(f.format(), FrameFormat::Rgb8);
         assert_eq!(&f.data()[0..3], &[0, 255, 0]);
+    }
+
+    #[test]
+    fn transparent_png_keeps_the_blue_background() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cut.png");
+        write_rgba(&path, 2, 1, &[[255, 0, 0, 255], [255, 0, 0, 0]]);
+        let clip = ImageClip::from_path(&path, Duration::from_secs(0.5)).unwrap();
+        let stored = clip.frame_at(Time::ZERO).unwrap();
+        assert_eq!(stored.format(), FrameFormat::Rgba8);
+        assert_eq!(stored.alpha_mode(), reelforge_core::AlphaMode::Straight);
+        assert_eq!(&stored.data()[0..8], &[255, 0, 0, 255, 255, 0, 0, 0]);
+
+        let layer = reelforge_compose::CompositeLayer::new(std::sync::Arc::new(clip));
+        let canvas = reelforge_compose::CompositeVideo::with_background(
+            Size::new(2, 1),
+            Rgb8::BLUE,
+            vec![layer],
+        )
+        .unwrap();
+        let painted = canvas.frame_at(Time::ZERO).unwrap();
+        assert_eq!(&painted.data()[0..3], &[255, 0, 0]);
+        assert_eq!(&painted.data()[3..6], &[0, 0, 255]);
+    }
+
+    fn write_rgba(path: &std::path::Path, width: u32, height: u32, pixels: &[[u8; 4]]) {
+        let mut img = image::RgbaImage::new(width, height);
+        for (i, px) in pixels.iter().enumerate() {
+            let x = u32::try_from(i).unwrap_or(u32::MAX) % width;
+            let y = u32::try_from(i).unwrap_or(u32::MAX) / width;
+            img.put_pixel(x, y, image::Rgba(*px));
+        }
+        img.save(path).unwrap();
     }
 }

@@ -628,8 +628,8 @@ fn restore_cached_outputs(graph: &RenderGraph, cached: &Path) -> Result<()> {
 
 /// Materialize the primary output clip in-process (no encode).
 ///
-/// Resolves file sources via [`open_video`]. For tests, prefer
-/// [`materialize_graph_with_seeds`].
+/// Resolves video files via [`open_video`] and still images via [`crate::ImageClip`].
+/// For tests, prefer [`materialize_graph_with_seeds`].
 ///
 /// # Errors
 ///
@@ -1184,6 +1184,10 @@ fn resolve_source<S: BuildHasher, A: BuildHasher>(
     if meta.role.as_deref() == Some("audio") {
         return resolve_audio_source(meta);
     }
+    if is_still_image(path) {
+        let clip = crate::ImageClip::from_path(path, still_hold(meta))?;
+        return Ok(NodeMedia::new(Arc::new(clip), None));
+    }
     let mut opts = OpenVideoOptions::new(&meta.uri);
     if !with_audio {
         opts = opts.video_only();
@@ -1197,6 +1201,26 @@ fn resolve_source<S: BuildHasher, A: BuildHasher>(
         }
         Err(_) => resolve_audio_source(meta),
     }
+}
+
+fn is_still_image(path: &Path) -> bool {
+    let Some(ext) = path.extension().and_then(|ext| ext.to_str()) else {
+        return false;
+    };
+    matches!(
+        ext.to_ascii_lowercase().as_str(),
+        "png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp"
+    )
+}
+
+fn still_hold(meta: &reelforge_render_graph::MediaAsset) -> reelforge_core::Duration {
+    if let Some(time) = meta.duration {
+        let duration = time.to_duration();
+        if duration.is_positive() {
+            return duration;
+        }
+    }
+    reelforge_core::Duration::from_secs(1.0)
 }
 
 fn resolve_audio_source(meta: &reelforge_render_graph::MediaAsset) -> Result<NodeMedia> {
@@ -1640,8 +1664,8 @@ mod tests {
     use super::*;
     use crate::ImageClip;
     use reelforge_core::{
-        AudioFormat, ColorClip, Duration, Frame, FrameFormat, MediaTime, Rgb8, Rgba8, SilenceClip,
-        Size, Time,
+        AlphaMode, AudioFormat, ColorClip, Duration, Frame, FrameFormat, MediaTime, Rgb8, Rgba8,
+        SilenceClip, Size, Time,
     };
     use reelforge_render_graph::{
         GraphOutput, MaskSample, MaskTimeline, MediaAsset, MediaAssetId, RENDER_GRAPH_VERSION,
@@ -2928,5 +2952,61 @@ mod tests {
             &line,
             &[NodeId("src".into()), NodeId("h".into())]
         ));
+    }
+
+    #[test]
+    fn still_source_holds_its_duration_and_alpha() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cut.png");
+        let mut img = image::RgbaImage::new(2, 1);
+        img.put_pixel(0, 0, image::Rgba([255, 0, 0, 255]));
+        img.put_pixel(1, 0, image::Rgba([255, 0, 0, 0]));
+        img.save(&path).unwrap();
+        let graph = RenderGraph {
+            version: RENDER_GRAPH_VERSION,
+            assets: vec![MediaAsset {
+                id: MediaAssetId("photo".into()),
+                uri: path.to_string_lossy().into_owned(),
+                duration: Some(MediaTime::from_secs(1.5, 1_000).unwrap()),
+                role: Some("image".into()),
+            }],
+            nodes: vec![
+                RenderNode {
+                    id: NodeId("src".into()),
+                    body: RenderNodeKind::Source {
+                        asset: MediaAssetId("photo".into()),
+                    },
+                    inputs: vec![],
+                },
+                RenderNode {
+                    id: NodeId("out".into()),
+                    body: RenderNodeKind::Output {
+                        name: "main".into(),
+                    },
+                    inputs: vec![NodeId("src".into())],
+                },
+            ],
+            outputs: vec![GraphOutput {
+                name: "main".into(),
+                node: NodeId("out".into()),
+                uri: None,
+            }],
+        };
+        let clip = materialize_graph(&graph).unwrap();
+        let held = clip.duration().as_secs();
+        assert!((held - 1.5).abs() < 1e-9, "held {held}");
+        let frame = clip.frame_at(Time::from_secs(1.4)).unwrap();
+        assert_eq!(frame.format(), FrameFormat::Rgba8);
+        assert_eq!(frame.alpha_mode(), AlphaMode::Straight);
+        assert_eq!(&frame.data()[0..8], &[255, 0, 0, 255, 255, 0, 0, 0]);
+        assert!(clip.frame_at(Time::from_secs(1.5)).is_err());
+
+        let mut unset = graph.clone();
+        unset.assets[0].duration = None;
+        let fallback = materialize_graph(&unset).unwrap().duration().as_secs();
+        assert!((fallback - 1.0).abs() < 1e-9, "fallback {fallback}");
+        unset.assets[0].duration = Some(MediaTime::zero(1_000));
+        let zero = materialize_graph(&unset).unwrap().duration().as_secs();
+        assert!((zero - 1.0).abs() < 1e-9, "zero {zero}");
     }
 }
