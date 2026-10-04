@@ -5,7 +5,7 @@ use reelforge_io::{
     ffmpeg_available, optimize_plan, probe_audio, probe_has_audio, require_full_ffmpeg,
     run_filtergraph, run_render_plan,
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn skip_without_ffmpeg() -> bool {
@@ -309,4 +309,81 @@ fn privacy_tracked_blur_plan_applies() {
         err.contains("not found") || err.contains("unknown"),
         "unexpected err: {err}"
     );
+}
+
+#[test]
+fn pure_plan_honors_output_fps() {
+    if skip_without_ffmpeg() {
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let input = dir.path().join("src.mp4");
+    let output = dir.path().join("out.mp4");
+    let status = Command::new("ffmpeg")
+        .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=red:s=64x64:d=1.0:r=10",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:v",
+            "libx264",
+            "-crf",
+            "18",
+            "-an",
+        ])
+        .arg(&input)
+        .status()
+        .expect("ffmpeg");
+    assert!(status.success());
+    let plan = RenderPlan::from_file(input.to_string_lossy())
+        .then(PlanOp::HFlip)
+        .with_output(PlanOutput {
+            path: output.to_string_lossy().into_owned(),
+            fps: Some(5.0),
+            video_codec: Some("libx264".into()),
+            crf: Some(18),
+        });
+    assert!(extract_ffmpeg(&plan).fully_ffmpeg);
+    run_render_plan(&plan).expect("pure fps");
+    let tools = FfmpegTools::discover().expect("tools");
+    let rate = avg_frame_rate(&tools, &output);
+    let dur = format_duration(&tools, &output);
+    assert!(
+        (4.5..=5.5).contains(&rate),
+        "10 fps source at plan fps 5 should land near 5, got {rate}"
+    );
+    assert!(
+        (0.8..=1.2).contains(&dur),
+        "rate change should keep the one-second span, got {dur}"
+    );
+}
+
+fn probe_entry(tools: &FfmpegTools, path: &Path, entries: &str) -> String {
+    let out = Command::new(&tools.ffprobe)
+        .args(["-v", "error", "-show_entries", entries, "-of", "csv=p=0"])
+        .arg(path)
+        .output()
+        .expect("ffprobe");
+    assert!(out.status.success(), "ffprobe {entries} failed");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+fn avg_frame_rate(tools: &FfmpegTools, path: &Path) -> f64 {
+    let text = probe_entry(tools, path, "stream=avg_frame_rate");
+    let (num, den) = text.split_once('/').unwrap_or((text.as_str(), "1"));
+    let num: f64 = num.trim().parse().expect("fps numerator");
+    let den: f64 = den.trim().parse().expect("fps denominator");
+    num / den
+}
+
+fn format_duration(tools: &FfmpegTools, path: &Path) -> f64 {
+    probe_entry(tools, path, "format=duration")
+        .parse()
+        .expect("duration")
 }

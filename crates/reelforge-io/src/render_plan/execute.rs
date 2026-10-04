@@ -64,6 +64,12 @@ fn run_pure_ffmpeg(plan: &RenderPlan, control: &WriteControl) -> Result<()> {
     if let Some(crf) = output.crf {
         opts = opts.with_crf(crf);
     }
+    if let Some(fps) = output.fps {
+        if !fps.is_finite() || fps <= 0.0 {
+            return Err(IoError::message(format!("invalid plan output.fps {fps}")));
+        }
+        opts = opts.with_fps(fps);
+    }
     run_filtergraph_with(input, &output.path, &graph, &opts)?;
     control.report(crate::control::WriteProgress::new(
         crate::control::WriteStage::Done,
@@ -164,5 +170,22 @@ mod tests {
         let text = explain_plan(&plan);
         assert!(text.contains("mode: ffmpeg"));
         assert!(text.contains("fully_ffmpeg: true"));
+    }
+
+    #[test]
+    fn pure_plan_rejects_bad_fps() {
+        let plan = RenderPlan::from_file("missing.mp4")
+            .then(PlanOp::HFlip)
+            .with_output(PlanOutput {
+                path: "out.mp4".into(),
+                fps: Some(f64::NAN),
+                video_codec: None,
+                crf: None,
+            });
+        let err = run_render_plan(&plan).unwrap_err().to_string();
+        assert!(
+            err.contains("invalid plan output.fps"),
+            "bad fps should fail before encode, got {err}"
+        );
     }
 }

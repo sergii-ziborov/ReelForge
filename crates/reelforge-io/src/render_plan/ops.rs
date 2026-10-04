@@ -190,7 +190,7 @@ fn custom_to_filter_op(name: &str) -> Option<FilterOp> {
 pub struct PlanOutput {
     /// Destination path.
     pub path: String,
-    /// Target fps when the runner needs it (optional for pure filtergraph).
+    /// Output frame rate. A pure filtergraph applies it with the `fps` filter.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fps: Option<f64>,
     /// Video codec override (default libx264 via runner).

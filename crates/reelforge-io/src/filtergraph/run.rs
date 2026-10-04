@@ -29,6 +29,8 @@ pub struct FiltergraphRunOptions {
     pub extra_args: Vec<String>,
     /// Output `-t` seconds (caps both video and audio).
     pub duration_secs: Option<f64>,
+    /// Output frame rate applied with the `fps` filter. Absent keeps source timing.
+    pub fps: Option<f64>,
     /// Audio policy (default [`AudioCopyMode::Preserve`]).
     pub audio: AudioCopyMode,
     /// Audio codec when re-encoding (`atrim`, or copy fallback). Default `aac`.
@@ -81,6 +83,13 @@ impl FiltergraphRunOptions {
     #[must_use]
     pub fn with_duration_secs(mut self, secs: f64) -> Self {
         self.duration_secs = Some(secs);
+        self
+    }
+
+    /// Set the output frame rate.
+    #[must_use]
+    pub fn with_fps(mut self, fps: f64) -> Self {
+        self.fps = Some(fps);
         self
     }
 
@@ -156,6 +165,20 @@ pub fn mux_copy_audio(
     spawn_mux(&tools, video, audio_src, output, false)
 }
 
+fn with_output_fps(vf: &str, fps: Option<f64>) -> Result<String> {
+    let Some(fps) = fps else {
+        return Ok(vf.to_string());
+    };
+    if !fps.is_finite() || fps <= 0.0 {
+        return Err(IoError::message(format!("invalid filtergraph fps {fps}")));
+    }
+    if vf.is_empty() {
+        Ok(format!("fps={fps}"))
+    } else {
+        Ok(format!("{vf},fps={fps}"))
+    }
+}
+
 fn spawn_filtergraph(
     tools: &FfmpegTools,
     input: &Path,
@@ -171,11 +194,12 @@ fn spawn_filtergraph(
     let preserve = options.audio == AudioCopyMode::Preserve && has_audio;
     let af = if preserve { graph.to_af() } else { None };
     let copy_audio = preserve && af.is_none();
+    let rated = with_output_fps(vf, options.fps)?;
 
     let mut cmd = Command::new(&tools.ffmpeg);
     cmd.args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
         .arg(input)
-        .args(["-vf", vf, "-c:v", codec, "-pix_fmt", pix]);
+        .args(["-vf", &rated, "-c:v", codec, "-pix_fmt", pix]);
     if let Some(crf) = options.crf {
         cmd.args(["-crf", &crf.to_string()]);
     }
@@ -221,12 +245,13 @@ fn spawn_filtergraph_recode(
     let codec = options.video_codec.as_deref().unwrap_or("libx264");
     let pix = options.pixel_format.as_deref().unwrap_or("yuv420p");
     let audio_codec = options.audio_codec.as_deref().unwrap_or("aac");
+    let rated = with_output_fps(vf, options.fps)?;
     let mut cmd = Command::new(&tools.ffmpeg);
     cmd.args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
         .arg(input)
         .args([
             "-vf",
-            vf,
+            &rated,
             "-c:v",
             codec,
             "-pix_fmt",
