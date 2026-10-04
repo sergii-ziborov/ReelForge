@@ -1541,7 +1541,10 @@ pub fn node_backend(node: &RenderNode, registry: &OperationRegistry) -> Option<B
 #[cfg(test)]
 mod tests {
     use super::*;
-    use reelforge_core::{ColorClip, Duration, MediaTime, Rgb8, Rgba8, Size, Time};
+    use crate::ImageClip;
+    use reelforge_core::{
+        ColorClip, Duration, Frame, FrameFormat, MediaTime, Rgb8, Rgba8, Size, Time,
+    };
     use reelforge_render_graph::{
         GraphOutput, MaskSample, MaskTimeline, MediaAsset, MediaAssetId, RENDER_GRAPH_VERSION,
         RedactionStyle, RegionRedaction, RenderNode,
@@ -2340,6 +2343,201 @@ mod tests {
         let forced = hints_for_output(&base, &branch, &options);
         assert_eq!(forced.crf, Some(30));
         assert!((forced.fps.unwrap() - 24.0).abs() < 1e-9);
+    }
+
+    fn split_seed() -> Arc<dyn VideoClip> {
+        let mut data = vec![0_u8; 4 * 2 * 3];
+        for y in 0..2 {
+            for x in 0..4 {
+                let i = (y * 4 + x) * 3;
+                if x < 2 {
+                    data[i] = 255;
+                } else {
+                    data[i + 2] = 255;
+                }
+            }
+        }
+        let frame = Frame::from_raw(Size::new(4, 2), FrameFormat::Rgb8, data).unwrap();
+        Arc::new(ImageClip::from_frame(frame, Duration::from_secs(1.0)).unwrap())
+    }
+
+    fn rgb_at(frame: &Frame, width: u32, x: u32, y: u32) -> [u8; 3] {
+        let i = (y as usize * width as usize + x as usize) * 3;
+        let data = frame.data();
+        [data[i], data[i + 1], data[i + 2]]
+    }
+
+    fn source_node() -> RenderNode {
+        RenderNode {
+            id: NodeId("src".into()),
+            body: RenderNodeKind::Source {
+                asset: MediaAssetId("a".into()),
+            },
+            inputs: vec![],
+        }
+    }
+
+    #[test]
+    fn diamond_branches_keep_distinct_pixels() {
+        let registry = OperationRegistry::with_builtins();
+        let g = RenderGraph {
+            version: RENDER_GRAPH_VERSION,
+            assets: vec![MediaAsset {
+                id: MediaAssetId("a".into()),
+                uri: "seed://a".into(),
+                duration: None,
+                role: Some("video".into()),
+            }],
+            nodes: vec![
+                source_node(),
+                RenderNode {
+                    id: NodeId("h".into()),
+                    body: RenderNodeKind::Op {
+                        operation: OperationId::new("rf.transform.hflip"),
+                        params: serde_json::json!({}),
+                    },
+                    inputs: vec![NodeId("src".into())],
+                },
+                RenderNode {
+                    id: NodeId("v".into()),
+                    body: RenderNodeKind::Op {
+                        operation: OperationId::new("rf.transform.vflip"),
+                        params: serde_json::json!({}),
+                    },
+                    inputs: vec![NodeId("src".into())],
+                },
+                RenderNode {
+                    id: NodeId("mix".into()),
+                    body: RenderNodeKind::Op {
+                        operation: OperationId::new("rf.compose.layers"),
+                        params: serde_json::json!({
+                            "w": 8,
+                            "h": 2,
+                            "layers": [{ "x": 0 }, { "x": 4 }]
+                        }),
+                    },
+                    inputs: vec![NodeId("v".into()), NodeId("h".into())],
+                },
+                RenderNode {
+                    id: NodeId("out".into()),
+                    body: RenderNodeKind::Output {
+                        name: "main".into(),
+                    },
+                    inputs: vec![NodeId("mix".into())],
+                },
+            ],
+            outputs: vec![GraphOutput {
+                name: "main".into(),
+                node: NodeId("out".into()),
+                uri: Some("out.mp4".into()),
+            }],
+        };
+        g.validate().unwrap();
+        let mut seeds = HashMap::new();
+        seeds.insert(MediaAssetId("a".into()), split_seed());
+        let audio = HashMap::new();
+        let bundle = materialize_graph_bundle(&g, &registry, &seeds, &audio, true).unwrap();
+        let frame = bundle.video.frame_at(Time::ZERO).unwrap();
+        assert_eq!(rgb_at(&frame, 8, 0, 0), [255, 0, 0]);
+        assert_eq!(rgb_at(&frame, 8, 2, 0), [0, 0, 255]);
+        assert_eq!(rgb_at(&frame, 8, 4, 0), [0, 0, 255]);
+        assert_eq!(rgb_at(&frame, 8, 6, 0), [255, 0, 0]);
+    }
+
+    #[test]
+    fn repeated_upstream_paints_both_ports() {
+        let registry = OperationRegistry::with_builtins();
+        let g = RenderGraph {
+            version: RENDER_GRAPH_VERSION,
+            assets: vec![MediaAsset {
+                id: MediaAssetId("a".into()),
+                uri: "seed://a".into(),
+                duration: None,
+                role: Some("video".into()),
+            }],
+            nodes: vec![
+                source_node(),
+                RenderNode {
+                    id: NodeId("mix".into()),
+                    body: RenderNodeKind::Op {
+                        operation: OperationId::new("rf.compose.layers"),
+                        params: serde_json::json!({
+                            "w": 8,
+                            "h": 2,
+                            "layers": [{ "x": 0 }, { "x": 4 }]
+                        }),
+                    },
+                    inputs: vec![NodeId("src".into()), NodeId("src".into())],
+                },
+                RenderNode {
+                    id: NodeId("out".into()),
+                    body: RenderNodeKind::Output {
+                        name: "main".into(),
+                    },
+                    inputs: vec![NodeId("mix".into())],
+                },
+            ],
+            outputs: vec![GraphOutput {
+                name: "main".into(),
+                node: NodeId("out".into()),
+                uri: Some("out.mp4".into()),
+            }],
+        };
+        g.validate().unwrap();
+        let mut seeds = HashMap::new();
+        seeds.insert(MediaAssetId("a".into()), split_seed());
+        let audio = HashMap::new();
+        let bundle = materialize_graph_bundle(&g, &registry, &seeds, &audio, true).unwrap();
+        let frame = bundle.video.frame_at(Time::ZERO).unwrap();
+        assert_eq!(rgb_at(&frame, 8, 0, 0), [255, 0, 0]);
+        assert_eq!(rgb_at(&frame, 8, 4, 0), [255, 0, 0]);
+        assert_eq!(rgb_at(&frame, 8, 6, 0), [0, 0, 255]);
+    }
+
+    #[test]
+    fn stripped_diamond_keeps_a_repeated_upstream() {
+        let g = RenderGraph {
+            version: RENDER_GRAPH_VERSION,
+            assets: vec![MediaAsset {
+                id: MediaAssetId("a".into()),
+                uri: "seed://a".into(),
+                duration: None,
+                role: Some("video".into()),
+            }],
+            nodes: vec![
+                source_node(),
+                RenderNode {
+                    id: NodeId("h".into()),
+                    body: RenderNodeKind::Op {
+                        operation: OperationId::new("rf.transform.hflip"),
+                        params: serde_json::json!({}),
+                    },
+                    inputs: vec![NodeId("src".into())],
+                },
+                RenderNode {
+                    id: NodeId("v".into()),
+                    body: RenderNodeKind::Op {
+                        operation: OperationId::new("rf.transform.vflip"),
+                        params: serde_json::json!({}),
+                    },
+                    inputs: vec![NodeId("src".into())],
+                },
+                RenderNode {
+                    id: NodeId("mix".into()),
+                    body: RenderNodeKind::Op {
+                        operation: OperationId::new("rf.compose.layers"),
+                        params: serde_json::json!({}),
+                    },
+                    inputs: vec![NodeId("v".into()), NodeId("h".into())],
+                },
+            ],
+            outputs: vec![],
+        };
+        let reduced = strip_and_rewire(&g, &HashSet::from(["h".into(), "v".into()]));
+        let mix = reduced.nodes.iter().find(|n| n.id.0 == "mix").unwrap();
+        assert_eq!(mix.inputs[0].0, "src");
+        assert_eq!(mix.inputs[1].0, "src");
+        reduced.validate().unwrap();
     }
 
     #[test]

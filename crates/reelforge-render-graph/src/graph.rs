@@ -232,12 +232,18 @@ impl RenderGraph {
         let mut adj: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
         for n in &self.nodes {
             indeg.entry(n.id.0.as_str()).or_insert(0);
+            // The same upstream on two ports is one dependency. Counting both
+            // ports against a deduped edge reports a cycle that is not there.
+            let mut seen_up = BTreeSet::new();
             for inp in &n.inputs {
+                indeg.entry(inp.0.as_str()).or_insert(0);
+                if !seen_up.insert(inp.0.as_str()) {
+                    continue;
+                }
                 adj.entry(inp.0.as_str())
                     .or_default()
                     .insert(n.id.0.as_str());
                 *indeg.entry(n.id.0.as_str()).or_insert(0) += 1;
-                indeg.entry(inp.0.as_str()).or_insert(0);
             }
         }
         // BinaryHeap is max-heap; store Reverse-like by using inverted string key
@@ -399,6 +405,130 @@ mod tests {
         };
         assert!(matches!(g.validate(), Err(GraphError::Cycle)));
         assert_eq!(g.validate().unwrap_err().code_str(), "RFGRAPH_CYCLE");
+    }
+
+    #[test]
+    fn repeated_upstream_is_not_a_cycle() {
+        let g = RenderGraph {
+            version: 1,
+            assets: vec![MediaAsset {
+                id: MediaAssetId("asset0".into()),
+                uri: "in.mp4".into(),
+                duration: None,
+                role: None,
+            }],
+            nodes: vec![
+                RenderNode {
+                    id: NodeId("src".into()),
+                    body: RenderNodeKind::Source {
+                        asset: MediaAssetId("asset0".into()),
+                    },
+                    inputs: vec![],
+                },
+                RenderNode {
+                    id: NodeId("mix".into()),
+                    body: RenderNodeKind::Op {
+                        operation: OperationId::new("rf.compose.layers"),
+                        params: serde_json::json!({ "w": 8, "h": 2 }),
+                    },
+                    inputs: vec![NodeId("src".into()), NodeId("src".into())],
+                },
+                RenderNode {
+                    id: NodeId("out".into()),
+                    body: RenderNodeKind::Output {
+                        name: "main".into(),
+                    },
+                    inputs: vec![NodeId("mix".into())],
+                },
+            ],
+            outputs: vec![GraphOutput {
+                name: "main".into(),
+                node: NodeId("out".into()),
+                uri: Some("out.mp4".into()),
+            }],
+        };
+        g.validate().unwrap();
+        let order = g.topo_order().unwrap();
+        assert_eq!(order.len(), g.nodes.len());
+        assert!(order.iter().any(|id| id.0 == "mix"));
+        schedule_graph(&g, &OperationRegistry::with_builtins()).unwrap();
+
+        let looped = RenderGraph {
+            version: 1,
+            assets: vec![],
+            nodes: vec![RenderNode {
+                id: NodeId("a".into()),
+                body: RenderNodeKind::Output { name: "x".into() },
+                inputs: vec![NodeId("a".into()), NodeId("a".into())],
+            }],
+            outputs: vec![],
+        };
+        assert!(matches!(looped.validate(), Err(GraphError::Cycle)));
+    }
+
+    #[test]
+    fn joined_diamond_schedules() {
+        let g = RenderGraph {
+            version: 1,
+            assets: vec![MediaAsset {
+                id: MediaAssetId("asset0".into()),
+                uri: "in.mp4".into(),
+                duration: None,
+                role: None,
+            }],
+            nodes: vec![
+                RenderNode {
+                    id: NodeId("src".into()),
+                    body: RenderNodeKind::Source {
+                        asset: MediaAssetId("asset0".into()),
+                    },
+                    inputs: vec![],
+                },
+                RenderNode {
+                    id: NodeId("h".into()),
+                    body: RenderNodeKind::Op {
+                        operation: OperationId::new("rf.transform.hflip"),
+                        params: serde_json::json!({}),
+                    },
+                    inputs: vec![NodeId("src".into())],
+                },
+                RenderNode {
+                    id: NodeId("v".into()),
+                    body: RenderNodeKind::Op {
+                        operation: OperationId::new("rf.transform.vflip"),
+                        params: serde_json::json!({}),
+                    },
+                    inputs: vec![NodeId("src".into())],
+                },
+                RenderNode {
+                    id: NodeId("mix".into()),
+                    body: RenderNodeKind::Op {
+                        operation: OperationId::new("rf.compose.layers"),
+                        params: serde_json::json!({
+                            "w": 8,
+                            "h": 2,
+                            "layers": [{ "x": 0 }, { "x": 4 }]
+                        }),
+                    },
+                    inputs: vec![NodeId("v".into()), NodeId("h".into())],
+                },
+                RenderNode {
+                    id: NodeId("out".into()),
+                    body: RenderNodeKind::Output {
+                        name: "main".into(),
+                    },
+                    inputs: vec![NodeId("mix".into())],
+                },
+            ],
+            outputs: vec![GraphOutput {
+                name: "main".into(),
+                node: NodeId("out".into()),
+                uri: Some("out.mp4".into()),
+            }],
+        };
+        g.validate().unwrap();
+        let plan = schedule_graph(&g, &OperationRegistry::with_builtins()).unwrap();
+        assert!(plan.stages.len() >= 2);
     }
 
     #[test]
