@@ -552,28 +552,7 @@ fn execute_plan_and_seal(
         Some(&options.stage_hooks()),
     )?;
     merge_option_hints(&mut bundle.hints, options);
-    if bundle.outputs.is_empty() {
-        write_graph_outputs(
-            graph,
-            bundle.video.as_ref(),
-            bundle.audio.as_deref(),
-            &bundle.hints,
-            control,
-        )?;
-    } else {
-        for out in &bundle.outputs {
-            control.check_cancel()?;
-            let hints = hints_for_output(&bundle.base_hints, &out.encode, options);
-            write_one_output(
-                &out.uri,
-                out.video.as_ref(),
-                out.audio.as_deref(),
-                &hints,
-                control,
-            )?;
-        }
-        control.report(WriteProgress::new(WriteStage::Done, 1, 1));
-    }
+    write_bundle_outputs(graph, &bundle, options, control, true)?;
     let written = resolve_output_path(graph).or(bundle.hints.output_path.clone());
     if let (Some(cache), Some(fp)) = (&options.cache, &run_fp)
         && let Some(out) = &written
@@ -1325,6 +1304,39 @@ fn merge_option_hints(hints: &mut GraphEncodeHints, options: &GraphRunOptions) {
     }
 }
 
+/// Write each materialized branch.
+///
+/// `include_audio` stays false on the video-only hybrid prefix. That prefix
+/// has already dropped companion audio, and one branch must not reuse another's.
+fn write_bundle_outputs(
+    graph: &RenderGraph,
+    bundle: &GraphBundle,
+    options: &GraphRunOptions,
+    control: &WriteControl,
+    include_audio: bool,
+) -> Result<()> {
+    if bundle.outputs.is_empty() {
+        let audio = if include_audio {
+            bundle.audio.as_deref()
+        } else {
+            None
+        };
+        return write_graph_outputs(graph, bundle.video.as_ref(), audio, &bundle.hints, control);
+    }
+    for out in &bundle.outputs {
+        control.check_cancel()?;
+        let hints = hints_for_output(&bundle.base_hints, &out.encode, options);
+        let audio = if include_audio {
+            out.audio.as_deref()
+        } else {
+            None
+        };
+        write_one_output(&out.uri, out.video.as_ref(), audio, &hints, control)?;
+    }
+    control.report(WriteProgress::new(WriteStage::Done, 1, 1));
+    Ok(())
+}
+
 fn write_graph_outputs(
     graph: &RenderGraph,
     clip: &dyn VideoClip,
@@ -1571,7 +1583,7 @@ fn try_hybrid_ffmpeg_prefix(
             materialize_graph_bundle(&reduced, &options.registry, &seeds, &audio_seeds, false)?;
         bundle.hints.output_path = Some(out_path);
         merge_option_hints(&mut bundle.hints, options);
-        write_graph_outputs(graph, bundle.video.as_ref(), None, &bundle.hints, control)
+        write_bundle_outputs(graph, &bundle, options, control, false)
     })();
 
     let _ = std::fs::remove_file(&mid);
