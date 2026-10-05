@@ -48,3 +48,15 @@ pid!(
     /// Media library entry id.
     MediaRefId
 );
+pid!(
+    /// Editable scene document id.
+    SceneId
+);
+pid!(
+    /// One part inside a scene.
+    PartId
+);
+pid!(
+    /// A group of scene parts.
+    GroupId
+);

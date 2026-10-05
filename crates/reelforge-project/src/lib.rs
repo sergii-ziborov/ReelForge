@@ -14,12 +14,19 @@ mod error;
 mod ids;
 mod model;
 mod project;
+mod scene;
 
 pub use compile::{ProjectCompile, compile_project};
 pub use error::{ProjectError, Result};
-pub use ids::{MediaRefId, ProjectId, SequenceId, TimelineClipId, TimelineTrackId};
+pub use ids::{
+    GroupId, MediaRefId, PartId, ProjectId, SceneId, SequenceId, TimelineClipId, TimelineTrackId,
+};
 pub use model::{
     CropRect, Gap, Marker, MediaRef, Metadata, NestedSequence, Retiming, SemanticRef, SourceRange,
     TimelineClip, TimelineItem, Transition, TransitionKind,
 };
 pub use project::{CAPTURE_PROJECT_VERSION, CaptureProject, Sequence, TimelineTrack, TrackKind};
+pub use scene::{
+    MotionChannel, MotionKey, MotionProperty, MotionTimeline, PartAnchor, SCENE_DOCUMENT_VERSION,
+    SceneDocument, SceneGroup, ScenePart, ScenePoint, SourceLink,
+};
