@@ -109,9 +109,9 @@ pub use render_plan::{
 };
 pub use stage_cache::StageCache;
 pub use stage_resume::{
-    CheckpointFidelity, FinalMediaComponents, StageCommit, StageEncodeState, StageResumePlan,
-    StageRunHooks, artifact_is_valid, artifact_serves, first_invalid_stage,
-    first_invalid_stage_for, persist_stage_video, restore_validated_prefix,
+    CheckpointFidelity, FinalAudioRef, FinalFrameRef, FinalMediaComponents, StageCommit,
+    StageEncodeState, StageResumePlan, StageRunHooks, artifact_is_valid, artifact_serves,
+    first_invalid_stage, first_invalid_stage_for, persist_stage_video, restore_validated_prefix,
     restore_validated_prefix_for, restore_validated_prefix_members,
 };
 pub use tracks_json::{

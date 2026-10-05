@@ -337,6 +337,7 @@ impl GraphRunOptions {
             restored_masks: self.restored_masks.clone(),
             restored_encode: self.restored_encode.clone(),
             persist_dir: self.persist_stage_dir.clone(),
+            checkpoint_fidelity: self.checkpoint_fidelity,
             on_committed: self.on_stage_committed.clone(),
         }
     }
@@ -897,7 +898,14 @@ fn materialize_plan_admitted<S: BuildHasher, A: BuildHasher>(
             let mut artifacts = Vec::new();
             if let Some(dir) = h.persist_dir.as_ref() {
                 let ids = stage_frontier_ids(plan, si, node_ids);
-                artifacts = persist_finished_stage(dir, si, &stage_fp, &ids, &ctx.produced)?;
+                artifacts = persist_finished_stage(
+                    dir,
+                    si,
+                    &stage_fp,
+                    &ids,
+                    &ctx.produced,
+                    h.checkpoint_fidelity,
+                )?;
             }
             if let Some(cb) = &h.on_committed {
                 cb(crate::StageCommit {
@@ -980,6 +988,7 @@ fn persist_finished_stage(
     fingerprint: &str,
     ids: &[String],
     produced: &HashMap<String, NodeMedia>,
+    fidelity: crate::stage_resume::CheckpointFidelity,
 ) -> Result<Vec<crate::StageArtifactRecord>> {
     let mut artifacts = Vec::new();
     for id in ids {
@@ -997,6 +1006,7 @@ fn persist_finished_stage(
                 audio: media.audio.as_deref(),
                 masks: media.masks.as_ref(),
                 encode: &encode,
+                fidelity,
             },
         )?);
     }
@@ -2360,6 +2370,7 @@ mod tests {
                 audio: Some(&audio),
                 masks: Some(&masks),
                 encode: &encode,
+                fidelity: crate::stage_resume::CheckpointFidelity::PreviewLossy,
             },
         )
         .unwrap();
