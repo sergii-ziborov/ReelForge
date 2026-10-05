@@ -98,7 +98,7 @@ fn gcd_i128(mut a: i128, mut b: i128) -> i128 {
 
 use crate::error::{ProjectError, Result};
 use crate::ids::{MediaRefId, SequenceId};
-use crate::model::{NestedSequence, SemanticRef, TimelineItem};
+use crate::model::{NestedSequence, SemanticRef, TimelineClip, TimelineItem, TransitionKind};
 use crate::project::{CaptureProject, Sequence, TimelineTrack, TrackKind};
 use reelforge_core::MediaTime;
 use reelforge_render_graph::{
@@ -284,7 +284,7 @@ impl<'a> CompileCtx<'a> {
         let child = self.lookup_seq(&nested.sequence)?.clone();
         let add = match nested.duration {
             Some(d) => d,
-            None => child_span(&child)?,
+            None => child_span(&child, self.sequences)?,
         };
         let before_v = self.layers.len();
         let before_a = self.audio.len();
@@ -581,22 +581,77 @@ fn cmp_time(left: MediaTime, right: MediaTime) -> std::cmp::Ordering {
     lhs.cmp(&rhs)
 }
 
-pub(crate) fn child_span(seq: &Sequence) -> Result<MediaTime> {
-    let mut best = MediaTime::zero(1_000);
+pub(crate) fn child_span(seq: &Sequence, sequences: &[Sequence]) -> Result<MediaTime> {
+    let mut stack = BTreeSet::new();
+    child_span_in(seq, sequences, &mut stack)
+}
+
+fn child_span_in(
+    seq: &Sequence,
+    sequences: &[Sequence],
+    stack: &mut BTreeSet<String>,
+) -> Result<MediaTime> {
+    if !stack.insert(seq.id.0.clone()) {
+        return Err(ProjectError::message(format!(
+            "nested sequence cycle at {}",
+            seq.id.as_str()
+        )));
+    }
+    let mut best: Option<ExactCursor> = None;
     for track in &seq.tracks {
         if track.kind != TrackKind::Video {
             continue;
         }
-        let mut span = MediaTime::zero(1_000);
+        let mut cursor = ExactCursor::zero();
         for item in &track.items {
-            let add = match item {
-                TimelineItem::Gap(g) => g.duration,
-                TimelineItem::Clip(c) => crate::emit_clip::record_duration(c)?,
-                TimelineItem::Nested(n) => n.duration.unwrap_or_else(|| MediaTime::zero(1_000)),
-            };
-            span = span.saturating_add(add)?;
+            match item {
+                TimelineItem::Gap(g) => cursor.add(g.duration),
+                TimelineItem::Clip(clip) => {
+                    if let Some(overlap) = incoming_overlap(clip) {
+                        cursor.sub(overlap);
+                    }
+                    cursor.add(crate::emit_clip::record_duration(clip)?);
+                }
+                TimelineItem::Nested(nested) => {
+                    cursor.add(nested_advance(nested, sequences, stack)?);
+                }
+            }
         }
-        best = best.max_time(span)?;
+        best = Some(match best {
+            Some(current) if cursor_is_after(current, cursor) => current,
+            _ => cursor,
+        });
     }
-    Ok(best)
+    stack.remove(seq.id.0.as_str());
+    Ok(best.map_or_else(|| MediaTime::zero(1_000), ExactCursor::to_media))
+}
+
+fn nested_advance(
+    nested: &NestedSequence,
+    sequences: &[Sequence],
+    stack: &mut BTreeSet<String>,
+) -> Result<MediaTime> {
+    if let Some(duration) = nested.duration {
+        return Ok(duration);
+    }
+    let child = sequences
+        .iter()
+        .find(|candidate| candidate.id.as_str() == nested.sequence.as_str())
+        .ok_or_else(|| {
+            ProjectError::message(format!("unknown sequence {}", nested.sequence.as_str()))
+        })?;
+    child_span_in(child, sequences, stack)
+}
+
+/// Dissolve and wipe pull the next item back. A fade does not.
+fn incoming_overlap(clip: &TimelineClip) -> Option<MediaTime> {
+    let transition = clip.transition_in.as_ref()?;
+    match transition.kind {
+        TransitionKind::Dissolve | TransitionKind::Wipe => Some(transition.duration),
+        TransitionKind::Fade => None,
+    }
+}
+
+fn cursor_is_after(left: ExactCursor, right: ExactCursor) -> bool {
+    left.num.saturating_mul(right.den) > right.num.saturating_mul(left.den)
 }

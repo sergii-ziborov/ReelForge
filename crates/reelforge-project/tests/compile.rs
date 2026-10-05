@@ -2,10 +2,10 @@
 
 use reelforge_core::MediaTime;
 use reelforge_project::{
-    CAPTURE_PROJECT_VERSION, CaptureProject, Gap, MediaRef, MediaRefId, Metadata, ProjectId,
-    Retiming, SemanticRef, Sequence, SequenceId, SourceRange, TimelineClip, TimelineClipId,
-    TimelineItem, TimelineTrack, TimelineTrackId, TrackKind, Transition, TransitionKind,
-    compile_project,
+    CAPTURE_PROJECT_VERSION, CaptureProject, Gap, MediaRef, MediaRefId, Metadata, NestedSequence,
+    ProjectId, Retiming, SemanticRef, Sequence, SequenceId, SourceRange, TimelineClip,
+    TimelineClipId, TimelineItem, TimelineTrack, TimelineTrackId, TrackKind, Transition,
+    TransitionKind, compile_project,
 };
 use reelforge_render_graph::RenderNodeKind;
 
@@ -449,5 +449,172 @@ fn ntsc_clips_do_not_accumulate_millisecond_error() {
     assert!(
         (secs - exact).abs() < 1e-6,
         "last clip starts at {secs}, expected {exact}"
+    );
+}
+
+fn ntsc_frame() -> MediaTime {
+    MediaTime {
+        ticks: 1001,
+        timescale: 30_000,
+    }
+}
+
+fn ntsc_clip(id: &str) -> TimelineItem {
+    TimelineItem::Clip(TimelineClip {
+        id: TimelineClipId::new(id),
+        media: MediaRefId::new("a"),
+        source: SourceRange {
+            start: MediaTime {
+                ticks: 0,
+                timescale: 30_000,
+            },
+            duration: ntsc_frame(),
+        },
+        retiming: Retiming::Identity,
+        transition_in: None,
+        crop: None,
+        scale_to: None,
+        metadata: Metadata::default(),
+    })
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn layer_start_secs(graph: &reelforge_render_graph::RenderGraph, index: usize) -> f64 {
+    let compose = graph
+        .nodes
+        .iter()
+        .find_map(|n| match &n.body {
+            RenderNodeKind::Op { operation, params }
+                if operation.as_str() == "rf.compose.layers" =>
+            {
+                Some(params)
+            }
+            _ => None,
+        })
+        .expect("compose");
+    let layers = compose["layers"].as_array().expect("layers");
+    let start = &layers[index]["start"];
+    let ticks = start["ticks"].as_i64().unwrap();
+    let scale = start["timescale"].as_u64().unwrap();
+    ticks as f64 / scale as f64
+}
+
+#[test]
+fn nested_ntsc_does_not_shift_the_next_clip() {
+    let mut p = CaptureProject::new(ProjectId::new("p"), "nested-ntsc");
+    p.media.push(MediaRef {
+        id: MediaRefId::new("a"),
+        uri: "a.mp4".into(),
+        duration: Some(MediaTime {
+            ticks: 120,
+            timescale: 1,
+        }),
+        role: Some("video".into()),
+    });
+    let mut child = Sequence::new(SequenceId::new("child"), "child");
+    let mut ct = TimelineTrack::new(TimelineTrackId::new("cv"), TrackKind::Video);
+    for i in 0..1000 {
+        ct.items.push(ntsc_clip(&format!("c{i}")));
+    }
+    child.tracks.push(ct);
+    let mut parent = Sequence::new(SequenceId::new("s"), "main");
+    let mut pt = TimelineTrack::new(TimelineTrackId::new("v0"), TrackKind::Video);
+    pt.items.push(TimelineItem::Nested(NestedSequence {
+        sequence: SequenceId::new("child"),
+        duration: None,
+    }));
+    pt.items.push(clip("after", "a", 0.0, 1.0));
+    parent.tracks.push(pt);
+    p.sequences.push(parent);
+    p.sequences.push(child);
+    let out = compile_project(&p).unwrap();
+    let exact = 1_000.0 * 1_001.0 / 30_000.0;
+    let secs = layer_start_secs(&out.graph, 1_000);
+    assert!(
+        (secs - exact).abs() < 1e-6,
+        "clip after the nest starts at {secs}, expected {exact}"
+    );
+}
+
+#[test]
+fn nested_grandchild_keeps_the_ntsc_span() {
+    let mut p = CaptureProject::new(ProjectId::new("p"), "nested-grandchild");
+    p.media.push(media("a", "a.mp4"));
+    let mut grand = Sequence::new(SequenceId::new("grand"), "grand");
+    let mut gt = TimelineTrack::new(TimelineTrackId::new("gv"), TrackKind::Video);
+    gt.items.push(ntsc_clip("frame"));
+    grand.tracks.push(gt);
+    let mut child = Sequence::new(SequenceId::new("child"), "child");
+    let mut ct = TimelineTrack::new(TimelineTrackId::new("cv"), TrackKind::Video);
+    ct.items.push(TimelineItem::Nested(NestedSequence {
+        sequence: SequenceId::new("grand"),
+        duration: None,
+    }));
+    child.tracks.push(ct);
+    let mut parent = Sequence::new(SequenceId::new("s"), "main");
+    let mut pt = TimelineTrack::new(TimelineTrackId::new("v0"), TrackKind::Video);
+    pt.items.push(TimelineItem::Nested(NestedSequence {
+        sequence: SequenceId::new("child"),
+        duration: None,
+    }));
+    pt.items.push(clip("after", "a", 0.0, 1.0));
+    parent.tracks.push(pt);
+    p.sequences.push(parent);
+    p.sequences.push(child);
+    p.sequences.push(grand);
+    let out = compile_project(&p).unwrap();
+    let exact = 1_001.0 / 30_000.0;
+    let secs = layer_start_secs(&out.graph, 1);
+    assert!(
+        (secs - exact).abs() < 1e-9,
+        "clip after the grandchild starts at {secs}, expected {exact}"
+    );
+}
+
+#[test]
+fn nested_dissolve_shortens_the_following_clip() {
+    let mut p = CaptureProject::new(ProjectId::new("p"), "nested-dissolve");
+    p.media.push(media("a", "a.mp4"));
+    let mut child = Sequence::new(SequenceId::new("child"), "child");
+    let mut ct = TimelineTrack::new(TimelineTrackId::new("cv"), TrackKind::Video);
+    ct.items.push(clip("c1", "a", 0.0, 2.0));
+    let TimelineItem::Clip(mut c2) = clip("c2", "a", 0.0, 2.0) else {
+        panic!("clip");
+    };
+    c2.transition_in = Some(Transition {
+        kind: TransitionKind::Dissolve,
+        duration: MediaTime::from_secs(0.5, 1_000).unwrap(),
+    });
+    ct.items.push(TimelineItem::Clip(c2));
+    child.tracks.push(ct);
+    let mut parent = Sequence::new(SequenceId::new("s"), "main");
+    let mut pt = TimelineTrack::new(TimelineTrackId::new("v0"), TrackKind::Video);
+    pt.items.push(TimelineItem::Nested(NestedSequence {
+        sequence: SequenceId::new("child"),
+        duration: None,
+    }));
+    pt.items.push(clip("after", "a", 0.0, 1.0));
+    parent.tracks.push(pt);
+    p.sequences.push(parent);
+    p.sequences.push(child);
+    let out = compile_project(&p).unwrap();
+    let compose = out
+        .graph
+        .nodes
+        .iter()
+        .find_map(|n| match &n.body {
+            RenderNodeKind::Op { operation, params }
+                if operation.as_str() == "rf.compose.layers" =>
+            {
+                Some(params)
+            }
+            _ => None,
+        })
+        .expect("compose");
+    let start = &compose["layers"][2]["start"];
+    assert_millis(
+        start["ticks"].as_i64().unwrap(),
+        start["timescale"].as_u64().unwrap(),
+        3_500,
     );
 }
