@@ -206,6 +206,8 @@ pub struct GraphRunOptions {
     pub on_stage_committed: Option<std::sync::Arc<dyn Fn(crate::StageCommit) + Send + Sync>>,
     /// How incomplete source metadata is admitted. Defaults to legacy.
     pub source_admission: SourceAdmission,
+    /// Which checkpoint class this run may resume. Defaults to lossy preview.
+    pub checkpoint_fidelity: crate::stage_resume::CheckpointFidelity,
 }
 
 impl Default for GraphRunOptions {
@@ -229,6 +231,7 @@ impl Default for GraphRunOptions {
             persist_stage_dir: None,
             on_stage_committed: None,
             source_admission: SourceAdmission::Legacy,
+            checkpoint_fidelity: crate::stage_resume::CheckpointFidelity::PreviewLossy,
         }
     }
 }
@@ -265,6 +268,16 @@ impl GraphRunOptions {
     #[must_use]
     pub fn with_source_admission(mut self, admission: SourceAdmission) -> Self {
         self.source_admission = admission;
+        self
+    }
+
+    /// Resume only checkpoints of this fidelity. Final does not reuse CRF 30 preview.
+    #[must_use]
+    pub fn with_checkpoint_fidelity(
+        mut self,
+        fidelity: crate::stage_resume::CheckpointFidelity,
+    ) -> Self {
+        self.checkpoint_fidelity = fidelity;
         self
     }
 
@@ -350,6 +363,7 @@ impl core::fmt::Debug for GraphRunOptions {
             .field("persist_stage_dir", &self.persist_stage_dir)
             .field("on_stage_committed", &self.on_stage_committed.is_some())
             .field("source_admission", &self.source_admission)
+            .field("checkpoint_fidelity", &self.checkpoint_fidelity)
             .finish()
     }
 }
@@ -1161,8 +1175,12 @@ pub(crate) fn execution_cache_key(
         SourceAdmission::Legacy => "legacy",
         SourceAdmission::Strict => "strict",
     };
+    let fidelity = match options.checkpoint_fidelity {
+        crate::stage_resume::CheckpointFidelity::PreviewLossy => "preview_lossy",
+        crate::stage_resume::CheckpointFidelity::FinalLossless => "final_lossless",
+    };
     Ok(format!(
-        "{base}|fps={}|codec={}|crf={}|audio={}|admit={admission}|src={sources}",
+        "{base}|fps={}|codec={}|crf={}|audio={}|admit={admission}|fidelity={fidelity}|src={sources}",
         options
             .fps
             .map(|fps| format!("{fps:.6}"))
@@ -3436,5 +3454,23 @@ mod tests {
         assert_ne!(legacy_key, strict_key);
         assert!(legacy_key.contains("admit=legacy"), "{legacy_key}");
         assert!(strict_key.contains("admit=strict"), "{strict_key}");
+    }
+
+    #[test]
+    fn checkpoint_fidelity_changes_the_cache_key() {
+        let graph = RenderGraph::default();
+        let plan = ExecutionPlan::default();
+        let preview = GraphRunOptions::new();
+        let final_run = preview
+            .clone()
+            .with_checkpoint_fidelity(crate::stage_resume::CheckpointFidelity::FinalLossless);
+        let preview_key = execution_cache_key(&graph, &plan, &preview).unwrap();
+        let final_key = execution_cache_key(&graph, &plan, &final_run).unwrap();
+        assert_ne!(preview_key, final_key);
+        assert!(
+            preview_key.contains("fidelity=preview_lossy"),
+            "{preview_key}"
+        );
+        assert!(final_key.contains("fidelity=final_lossless"), "{final_key}");
     }
 }

@@ -71,6 +71,36 @@ pub(crate) struct StageMediaParts<'a> {
 /// were written at this version.
 const STAGE_MEDIA_SIDECAR_VERSION: u32 = 1;
 
+/// What a checkpoint is allowed to stand in for.
+///
+/// The stage writer still emits CRF 30 preview bytes and labels them
+/// [`Self::PreviewLossy`]. [`Self::FinalLossless`] is admitted only when the
+/// sidecar names a separate picture file and its hash matches. A preview file
+/// is never treated as that picture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckpointFidelity {
+    /// Lossy preview. Safe to resume a preview. Not a final master.
+    #[default]
+    PreviewLossy,
+    /// Declared final picture bundle. The current CRF 30 writer does not emit this.
+    FinalLossless,
+}
+
+/// Picture proof required before a checkpoint may resume a final render.
+///
+/// The file is a sibling of the preview container. Its hash is the same
+/// fingerprint the resume gate stores on stage records.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FinalMediaComponents {
+    /// File name in the checkpoint directory. Not a path.
+    pub picture: String,
+    /// [`fingerprint_file`](crate::fingerprint_file) of `picture`.
+    pub picture_sha256: String,
+    /// `straight`, `premultiplied`, or `none`.
+    pub alpha_mode: String,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct StageMediaSidecar {
     /// `0` on checkpoints written before the field existed.
@@ -80,6 +110,12 @@ struct StageMediaSidecar {
     masks: Option<MaskTimeline>,
     #[serde(default, skip_serializing_if = "StageEncodeState::is_empty")]
     encode: StageEncodeState,
+    /// Missing on older sidecars, which are preview encodes.
+    #[serde(default)]
+    fidelity: CheckpointFidelity,
+    /// Set only by a final bundle. Preview writes omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    final_components: Option<FinalMediaComponents>,
 }
 
 /// Optional resume / persist hooks for [`crate::materialize_execution_plan`].
@@ -123,6 +159,27 @@ pub struct StageResumePlan {
 /// is allowed, and a present sidecar must still parse.
 #[must_use]
 pub fn artifact_is_valid(rec: &StageArtifactRecord) -> bool {
+    artifact_serves(rec, CheckpointFidelity::PreviewLossy)
+}
+
+/// True when `rec` is intact and may resume a render of `required` fidelity.
+///
+/// Preview accepts a legacy record and a CRF 30 sidecar. Final accepts only a
+/// sidecar that says [`CheckpointFidelity::FinalLossless`] and points at a
+/// sibling picture whose fingerprint matches. The preview container itself
+/// cannot be that picture.
+#[must_use]
+pub fn artifact_serves(rec: &StageArtifactRecord, required: CheckpointFidelity) -> bool {
+    if !preview_bytes_match(rec) {
+        return false;
+    }
+    match required {
+        CheckpointFidelity::PreviewLossy => true,
+        CheckpointFidelity::FinalLossless => final_picture_matches(rec),
+    }
+}
+
+fn preview_bytes_match(rec: &StageArtifactRecord) -> bool {
     let path = Path::new(&rec.uri);
     if !file_matches_hash(path, rec.file_fingerprint.as_deref()) {
         return false;
@@ -131,6 +188,47 @@ pub fn artifact_is_valid(rec: &StageArtifactRecord) -> bool {
         Some(expected) => file_matches_hash(&sidecar_path(path), Some(expected)),
         None => sidecar_legacy_ok(&rec.uri),
     }
+}
+
+fn final_picture_matches(rec: &StageArtifactRecord) -> bool {
+    let Ok(Some(side)) = read_sidecar(Path::new(&rec.uri)) else {
+        return false;
+    };
+    if side.fidelity != CheckpointFidelity::FinalLossless {
+        return false;
+    }
+    let Some(parts) = side.final_components else {
+        return false;
+    };
+    if !known_alpha_mode(&parts.alpha_mode) {
+        return false;
+    }
+    let Some(picture) = component_file(Path::new(&rec.uri), &parts.picture) else {
+        return false;
+    };
+    fingerprint_file(&picture).is_ok_and(|got| got == parts.picture_sha256)
+}
+
+fn known_alpha_mode(mode: &str) -> bool {
+    matches!(mode, "straight" | "premultiplied" | "none")
+}
+
+fn component_file(video: &Path, name: &str) -> Option<PathBuf> {
+    if name.is_empty() {
+        return None;
+    }
+    let relative = Path::new(name);
+    let single = relative.components().count() == 1
+        && relative
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)));
+    if !single {
+        return None;
+    }
+    if relative.file_name() == video.file_name() {
+        return None;
+    }
+    Some(video.parent()?.join(relative))
 }
 
 fn file_matches_hash(path: &Path, expected: Option<&str>) -> bool {
@@ -147,13 +245,23 @@ fn file_matches_hash(path: &Path, expected: Option<&str>) -> bool {
 /// Walk completed records in stage order. Stop at the first missing / stale slot.
 #[must_use]
 pub fn first_invalid_stage(artifacts: &[StageArtifactRecord], total_stages: u32) -> u32 {
+    first_invalid_stage_for(artifacts, total_stages, CheckpointFidelity::PreviewLossy)
+}
+
+/// Like [`first_invalid_stage`] for a preview or a final resume.
+#[must_use]
+pub fn first_invalid_stage_for(
+    artifacts: &[StageArtifactRecord],
+    total_stages: u32,
+    fidelity: CheckpointFidelity,
+) -> u32 {
     let mut expected = 0_u32;
     while expected < total_stages {
         let recs: Vec<&StageArtifactRecord> = artifacts
             .iter()
             .filter(|a| a.stage_index == expected)
             .collect();
-        if recs.is_empty() || recs.iter().any(|r| !artifact_is_valid(r)) {
+        if recs.is_empty() || recs.iter().any(|record| !artifact_serves(record, fidelity)) {
             return expected;
         }
         expected += 1;
@@ -199,6 +307,28 @@ pub fn restore_validated_prefix_members(
     expected_by_stage: &[String],
     required_nodes: &[Vec<String>],
 ) -> Result<StageResumePlan> {
+    restore_validated_prefix_for(
+        artifacts,
+        expected_by_stage,
+        required_nodes,
+        CheckpointFidelity::PreviewLossy,
+    )
+}
+
+/// Like [`restore_validated_prefix_members`] for a preview or a final resume.
+///
+/// A final resume stops at the first preview or legacy record and leaves that
+/// stage to be computed again.
+///
+/// # Errors
+///
+/// `open_video` failures on a record that passed [`artifact_serves`].
+pub fn restore_validated_prefix_for(
+    artifacts: &[StageArtifactRecord],
+    expected_by_stage: &[String],
+    required_nodes: &[Vec<String>],
+    fidelity: CheckpointFidelity,
+) -> Result<StageResumePlan> {
     let mut plan = StageResumePlan::default();
     for (si, expected) in expected_by_stage.iter().enumerate() {
         #[allow(clippy::cast_possible_truncation)]
@@ -211,7 +341,7 @@ pub fn restore_validated_prefix_members(
             Some(nodes) => nodes.as_slice(),
             None => &[],
         };
-        if !stage_records_complete(&recs, required) {
+        if !stage_records_complete(&recs, required, fidelity) {
             plan.start_stage = index;
             return Ok(plan);
         }
@@ -223,8 +353,12 @@ pub fn restore_validated_prefix_members(
     Ok(plan)
 }
 
-fn stage_records_complete(recs: &[&StageArtifactRecord], required: &[String]) -> bool {
-    if recs.is_empty() || recs.iter().any(|record| !artifact_is_valid(record)) {
+fn stage_records_complete(
+    recs: &[&StageArtifactRecord],
+    required: &[String],
+    fidelity: CheckpointFidelity,
+) -> bool {
+    if recs.is_empty() || recs.iter().any(|record| !artifact_serves(record, fidelity)) {
         return false;
     }
     required
@@ -286,9 +420,11 @@ pub fn persist_stage_video(
 
 /// Write one frontier node, including audio and a media sidecar.
 ///
-/// The picture is `CRF` 30. Companion audio is muxed when present. Masks and
-/// encode settings go in `{uri}.media.json`. The record stores that file's
-/// hash, so a later resume does not treat a missing sidecar as "no masks".
+/// The picture is `CRF` 30 and the sidecar records
+/// [`CheckpointFidelity::PreviewLossy`]. Companion audio is muxed when present.
+/// Masks and encode settings go in `{uri}.media.json`. The record stores that
+/// file's hash, so a later resume does not treat a missing sidecar as "no masks".
+/// This checkpoint cannot resume a final render.
 ///
 /// # Errors
 ///
@@ -327,6 +463,8 @@ pub(crate) fn persist_stage_media(
             version: STAGE_MEDIA_SIDECAR_VERSION,
             masks: media.masks.cloned(),
             encode: media.encode.clone(),
+            fidelity: CheckpointFidelity::PreviewLossy,
+            final_components: None,
         },
     )?;
     let file_fp = fingerprint_file(&path)?;
@@ -506,5 +644,91 @@ mod tests {
         .unwrap();
         assert_eq!(plan.start_stage, 0);
         assert!(plan.restored_video.is_empty());
+    }
+
+    fn write_sidecar(video: &Path, body: impl AsRef<[u8]>) -> StageArtifactRecord {
+        fs::write(video, b"preview-mp4").unwrap();
+        let side = sidecar_path(video);
+        fs::write(&side, body).unwrap();
+        StageArtifactRecord::new(0, "fp0", "n0", video.to_string_lossy())
+            .with_file_fingerprint(fingerprint_file(video).unwrap())
+            .with_sidecar_fingerprint(fingerprint_file(&side).unwrap())
+    }
+
+    #[test]
+    fn preview_checkpoint_does_not_resume_a_final_render() {
+        let dir = tempfile::tempdir().unwrap();
+        let video = dir.path().join("stage.mp4");
+        let legacy = write_sidecar(&video, br#"{"version":1,"encode":{"fps":5.0}}"#);
+        assert!(artifact_serves(&legacy, CheckpointFidelity::PreviewLossy));
+        assert!(!artifact_serves(&legacy, CheckpointFidelity::FinalLossless));
+        assert_eq!(
+            first_invalid_stage_for(
+                std::slice::from_ref(&legacy),
+                1,
+                CheckpointFidelity::FinalLossless
+            ),
+            0
+        );
+        let plan = restore_validated_prefix_for(
+            &[legacy],
+            &["fp0".into()],
+            &[],
+            CheckpointFidelity::FinalLossless,
+        )
+        .unwrap();
+        assert_eq!(plan.start_stage, 0);
+        assert!(plan.restored_video.is_empty());
+
+        let labeled = write_sidecar(
+            &video,
+            br#"{"version":1,"fidelity":"preview_lossy","encode":{"fps":5.0}}"#,
+        );
+        assert!(artifact_serves(&labeled, CheckpointFidelity::PreviewLossy));
+        assert!(!artifact_serves(
+            &labeled,
+            CheckpointFidelity::FinalLossless
+        ));
+
+        let bare_label = write_sidecar(&video, br#"{"version":1,"fidelity":"final_lossless"}"#);
+        assert!(!artifact_serves(
+            &bare_label,
+            CheckpointFidelity::FinalLossless
+        ));
+
+        let self_picture = write_sidecar(
+            &video,
+            br#"{"version":1,"fidelity":"final_lossless","final_components":{"picture":"stage.mp4","picture_sha256":"ignored","alpha_mode":"straight"}}"#,
+        );
+        assert!(!artifact_serves(
+            &self_picture,
+            CheckpointFidelity::FinalLossless
+        ));
+    }
+
+    #[test]
+    fn final_resume_accepts_a_matching_sibling_picture() {
+        let dir = tempfile::tempdir().unwrap();
+        let video = dir.path().join("stage.mp4");
+        let picture = dir.path().join("stage.png");
+        fs::write(&picture, b"rgba-frame").unwrap();
+        let picture_hash = fingerprint_file(&picture).unwrap();
+        let body = format!(
+            r#"{{"version":1,"fidelity":"final_lossless","final_components":{{"picture":"stage.png","picture_sha256":"{picture_hash}","alpha_mode":"straight"}}}}"#
+        );
+        let rec = write_sidecar(&video, body.as_bytes());
+        assert!(artifact_serves(&rec, CheckpointFidelity::FinalLossless));
+        assert_eq!(
+            first_invalid_stage_for(
+                std::slice::from_ref(&rec),
+                2,
+                CheckpointFidelity::FinalLossless
+            ),
+            1
+        );
+
+        fs::write(&picture, b"changed").unwrap();
+        assert!(!artifact_serves(&rec, CheckpointFidelity::FinalLossless));
+        assert!(artifact_serves(&rec, CheckpointFidelity::PreviewLossy));
     }
 }

@@ -9,7 +9,7 @@ use crate::graph_run::{
 use crate::job::{JobOutputRecord, JobState, RenderJob};
 use crate::job_store::JobStore;
 use crate::manifest_seal::fingerprint_file;
-use crate::stage_resume::{StageCommit, restore_validated_prefix_members};
+use crate::stage_resume::{StageCommit, restore_validated_prefix_for};
 use reelforge_render_graph::{ArtifactManifest, ExecutionPlan, RenderGraph, schedule_graph};
 use std::fs;
 use std::path::Path;
@@ -87,8 +87,12 @@ pub fn run_render_job(
         .enumerate()
         .map(|(index, stage)| stage_frontier_ids(&plan, index, stage.node_ids()))
         .collect::<Vec<_>>();
-    let resume =
-        restore_validated_prefix_members(&job.checkpoint.stage_artifacts, &expected, &required)?;
+    let resume = restore_validated_prefix_for(
+        &job.checkpoint.stage_artifacts,
+        &expected,
+        &required,
+        options.checkpoint_fidelity,
+    )?;
     job.checkpoint.next_stage = resume.start_stage;
 
     let mut options = options.clone();
