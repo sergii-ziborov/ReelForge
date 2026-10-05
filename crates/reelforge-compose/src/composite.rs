@@ -208,10 +208,14 @@ impl CompositeVideo {
             let frame = layer.clip.frame_at(local)?;
             let mask = layer.clip.mask_at(local)?;
             let (ox, oy) = layer.position.resolve(self.size, frame.size());
+            let opacity = layer
+                .opacity_at
+                .as_ref()
+                .map_or(layer.opacity, |sample| sample(t).clamp(0.0, 1.0));
             let painted = if premul {
-                blit_over_premul(canvas, &frame, ox, oy, layer.opacity, mask.as_ref())
+                blit_over_premul(canvas, &frame, ox, oy, opacity, mask.as_ref())
             } else {
-                blit_over(canvas, &frame, ox, oy, layer.opacity, mask.as_ref())
+                blit_over(canvas, &frame, ox, oy, opacity, mask.as_ref())
             };
             painted.map_err(|e| CoreError::invalid_frame(format!("blit: {e}")))?;
         }

@@ -16,6 +16,8 @@ pub struct CompositeLayer {
     pub layer_index: i32,
     /// Constant opacity multiplier in `0.0..=1.0` (default `1.0`).
     pub opacity: f32,
+    /// Sampled opacity at composite time. When set, it replaces [`Self::opacity`].
+    pub opacity_at: Option<Arc<dyn Fn(Time) -> f32 + Send + Sync>>,
 }
 
 impl CompositeLayer {
@@ -28,6 +30,7 @@ impl CompositeLayer {
             start: Time::ZERO,
             layer_index: 0,
             opacity: 1.0,
+            opacity_at: None,
         }
     }
 
@@ -56,6 +59,14 @@ impl CompositeLayer {
     #[must_use]
     pub fn with_opacity(mut self, opacity: f32) -> Self {
         self.opacity = opacity.clamp(0.0, 1.0);
+        self.opacity_at = None;
+        self
+    }
+
+    /// Sample opacity from composite time. The callback replaces the constant.
+    #[must_use]
+    pub fn with_opacity_at(mut self, sample: Arc<dyn Fn(Time) -> f32 + Send + Sync>) -> Self {
+        self.opacity_at = Some(sample);
         self
     }
 

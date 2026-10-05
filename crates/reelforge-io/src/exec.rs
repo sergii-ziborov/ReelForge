@@ -19,7 +19,7 @@ use reelforge_fx::{
     BlackAndWhite, Crop, CrossFadeIn, EvenSize, FadeIn, FadeOut, Freeze, InvertColors, Loop,
     MirrorX, MirrorY, Painting, Resize, Rotate, SlideIn, SlideOut, SlideSide, Speed, VolumeGain,
 };
-use reelforge_render_graph::{CompiledOp, ExecutorKind, TypedParams};
+use reelforge_render_graph::{Animated, CompiledOp, ExecutorKind, TypedParams};
 use reelforge_text::{BurnInOptions, burn_in_layers, parse_subtitles_path};
 use std::sync::Arc;
 
@@ -276,11 +276,8 @@ fn apply_compose_layers(
             {
                 layer = layer.with_position(Position::absolute(x as i32, y as i32));
             }
-            if let Some(op) = lp.get("opacity").and_then(serde_json::Value::as_f64) {
-                #[allow(clippy::cast_possible_truncation)]
-                {
-                    layer = layer.with_opacity(op as f32);
-                }
+            if let Some(value) = lp.get("opacity") {
+                layer = apply_layer_opacity(layer, value)?;
             }
             if let Some(start) = lp.get("start").and_then(json_as_time) {
                 layer = layer.with_start(start);
@@ -311,6 +308,22 @@ fn apply_compose_layers(
             span,
         ))
     }
+}
+
+fn apply_layer_opacity(layer: CompositeLayer, value: &serde_json::Value) -> Result<CompositeLayer> {
+    if let Some(opacity) = value.as_f64() {
+        #[allow(clippy::cast_possible_truncation)]
+        return Ok(layer.with_opacity(opacity as f32));
+    }
+    let animated: Animated<f32> = serde_json::from_value(value.clone())
+        .map_err(|err| IoError::message(format!("unknown opacity parameter: {err}")))?;
+    Ok(layer.with_opacity_at(Arc::new(move |time: Time| {
+        let sampled = match MediaTime::from_secs(time.as_secs(), MediaTime::HZ_1M) {
+            Ok(mt) => animated.sample_f32(mt),
+            Err(_) => 1.0,
+        };
+        sampled.clamp(0.0, 1.0)
+    })))
 }
 
 fn finish_composite(video: CompositeVideo, span: Option<MediaTime>) -> Arc<dyn VideoClip> {
@@ -724,5 +737,46 @@ mod tests {
         assert!((held.duration().as_secs() - 3.0).abs() < 1e-6);
         let tail = held.frame_at(Time::from_secs(2.5)).unwrap();
         assert_eq!(&tail.data()[0..3], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn opacity_keyframes_change_the_frame_and_seek_repeats() {
+        use reelforge_render_graph::Keyframe;
+        let white = Arc::new(ColorClip::new(
+            Size::new(1, 1),
+            Rgb8::new(255, 255, 255),
+            Duration::from_secs(2.0),
+        ));
+        let animated = Animated::keyframes(vec![
+            Keyframe::new(MediaTime::new(0, 1).unwrap(), 0.0),
+            Keyframe::new(MediaTime::new(1, 1).unwrap(), 1.0),
+        ]);
+        let opacity = serde_json::to_value(&animated).unwrap();
+        let layers = serde_json::json!([{ "opacity": opacity }]);
+        let clip =
+            apply_compose_layers(vec![white], Some(1), Some(1), &layers, None, None).unwrap();
+        let sample = |t: f64| clip.frame_at(Time::from_secs(t)).unwrap().data()[0];
+        assert_eq!(sample(0.0), 0);
+        assert_eq!(sample(1.0), 255);
+        let mid = sample(0.5);
+        assert!((100..=160).contains(&mid), "mid opacity pixel {mid}");
+        assert_eq!(mid, sample(0.5));
+
+        let bad = serde_json::json!([{ "opacity": { "kind": "spline" } }]);
+        let Err(err) = apply_compose_layers(
+            vec![Arc::new(ColorClip::new(
+                Size::new(1, 1),
+                Rgb8::new(255, 255, 255),
+                Duration::from_secs(1.0),
+            ))],
+            Some(1),
+            Some(1),
+            &bad,
+            None,
+            None,
+        ) else {
+            panic!("unknown opacity was accepted");
+        };
+        assert!(err.to_string().contains("unknown opacity"));
     }
 }
