@@ -4,11 +4,14 @@ use crate::control::{WriteControl, WriteProgress, WriteStage};
 use crate::error::{IoError, Result};
 use crate::graph_run::{
     GraphRunOptions, execution_cache_key, plan_stage_fingerprints, run_render_graph_with_manifest,
+    stage_frontier_ids,
 };
-use crate::job::{JobState, RenderJob};
+use crate::job::{JobOutputRecord, JobState, RenderJob};
 use crate::job_store::JobStore;
-use crate::stage_resume::{StageCommit, restore_validated_prefix};
+use crate::manifest_seal::fingerprint_file;
+use crate::stage_resume::{StageCommit, restore_validated_prefix_members};
 use reelforge_render_graph::{ArtifactManifest, ExecutionPlan, RenderGraph, schedule_graph};
+use std::fs;
 use std::path::Path;
 
 /// Create a queued job with the graph+plan fingerprint filled in.
@@ -61,7 +64,7 @@ pub fn run_render_job(
     let fp = execution_cache_key(graph, &plan, options)?;
     if job.state == JobState::Done
         && job.run_fingerprint.as_deref() == Some(fp.as_str())
-        && output_ready(job)
+        && outputs_ready(job, graph)
     {
         return already_done_manifest(graph, &plan);
     }
@@ -78,7 +81,14 @@ pub fn run_render_job(
     store.save(job)?;
 
     let expected = plan_stage_fingerprints(graph, &plan, &options.registry)?;
-    let resume = restore_validated_prefix(&job.checkpoint.stage_artifacts, &expected)?;
+    let required = plan
+        .stages
+        .iter()
+        .enumerate()
+        .map(|(index, stage)| stage_frontier_ids(&plan, index, stage.node_ids()))
+        .collect::<Vec<_>>();
+    let resume =
+        restore_validated_prefix_members(&job.checkpoint.stage_artifacts, &expected, &required)?;
     job.checkpoint.next_stage = resume.start_stage;
 
     let mut options = options.clone();
@@ -108,6 +118,17 @@ pub fn run_render_job(
             if let Ok(live) = store.load(&job.id) {
                 job.checkpoint = live.checkpoint;
             }
+            let outputs = match seal_job_outputs(graph) {
+                Ok(outputs) => outputs,
+                Err(e) => {
+                    job.state = JobState::Failed;
+                    job.error = Some(e.to_string());
+                    job.touch();
+                    store.save(job)?;
+                    return Err(e);
+                }
+            };
+            job.outputs = outputs;
             job.state = JobState::Done;
             job.checkpoint.next_stage = job.checkpoint.total_stages;
             job.output_uri = first_output_uri(graph).or(job.output_uri.clone());
@@ -187,6 +208,55 @@ fn output_ready(job: &RenderJob) -> bool {
     job.output_uri
         .as_ref()
         .is_some_and(|u| Path::new(u).is_file())
+}
+
+/// Jobs sealed with [`JobOutputRecord`] must match every declared output.
+/// Older Done jobs, which have an empty manifest, keep the single-file check.
+fn outputs_ready(job: &RenderJob, graph: &RenderGraph) -> bool {
+    if job.outputs.is_empty() {
+        return output_ready(job);
+    }
+    let declared: Vec<&str> = graph
+        .outputs
+        .iter()
+        .filter_map(|output| output.uri.as_deref())
+        .collect();
+    if declared.is_empty() {
+        return output_ready(job);
+    }
+    declared.iter().all(|uri| {
+        job.outputs.iter().any(|record| {
+            record.uri == *uri && sealed_file_matches(&record.uri, &record.file_fingerprint)
+        })
+    })
+}
+
+fn sealed_file_matches(uri: &str, expected: &str) -> bool {
+    let path = Path::new(uri);
+    match fs::metadata(path) {
+        Ok(meta) if meta.is_file() && meta.len() > 0 => {}
+        _ => return false,
+    }
+    fingerprint_file(path).is_ok_and(|got| got == expected)
+}
+
+fn seal_job_outputs(graph: &RenderGraph) -> Result<Vec<JobOutputRecord>> {
+    let mut sealed = Vec::new();
+    for output in &graph.outputs {
+        let Some(uri) = output.uri.as_deref() else {
+            continue;
+        };
+        let path = Path::new(uri);
+        if !path.is_file() {
+            return Err(IoError::message(format!("render output missing: {uri}")));
+        }
+        sealed.push(JobOutputRecord {
+            name: output.name.clone(),
+            uri: uri.to_string(),
+            file_fingerprint: fingerprint_file(path)?,
+        });
+    }
+    Ok(sealed)
 }
 
 fn already_done_manifest(graph: &RenderGraph, plan: &ExecutionPlan) -> Result<ArtifactManifest> {
@@ -278,6 +348,63 @@ mod tests {
         assert!(!manifest.outputs.is_empty());
         assert_eq!(store.load(&job.id).unwrap().state, JobState::Done);
         let _ = JobId::new("x");
+    }
+
+    fn two_output_graph(primary: &std::path::Path, secondary: &std::path::Path) -> RenderGraph {
+        let mut graph = tiny_graph();
+        graph.nodes.push(RenderNode {
+            id: NodeId("out_b".into()),
+            body: RenderNodeKind::Output { name: "alt".into() },
+            inputs: vec![NodeId("src".into())],
+        });
+        graph.outputs[0].uri = Some(primary.to_string_lossy().into());
+        graph.outputs.push(GraphOutput {
+            name: "alt".into(),
+            node: NodeId("out_b".into()),
+            uri: Some(secondary.to_string_lossy().into()),
+        });
+        graph
+    }
+
+    #[test]
+    fn done_shortcut_rejects_a_broken_primary_and_a_missing_secondary() {
+        let dir = tempfile::tempdir().unwrap();
+        let primary = dir.path().join("primary.mp4");
+        let secondary = dir.path().join("secondary.mp4");
+        std::fs::write(&primary, b"primary-bytes").unwrap();
+        std::fs::write(&secondary, b"secondary-bytes").unwrap();
+        let store = JobStore::open(dir.path().join("jobs")).unwrap();
+        let graph = two_output_graph(&primary, &secondary);
+        let opts = GraphRunOptions::default();
+        let mut job = submit_render_job(&store, &graph, &opts).unwrap();
+        job.state = JobState::Done;
+        job.output_uri = Some(primary.to_string_lossy().into());
+        job.outputs = vec![
+            crate::JobOutputRecord {
+                name: "main".into(),
+                uri: primary.to_string_lossy().into(),
+                file_fingerprint: crate::fingerprint_file(&primary).unwrap(),
+            },
+            crate::JobOutputRecord {
+                name: "alt".into(),
+                uri: secondary.to_string_lossy().into(),
+                file_fingerprint: crate::fingerprint_file(&secondary).unwrap(),
+            },
+        ];
+        store.save(&job).unwrap();
+        let manifest =
+            run_render_job(&store, &mut job, &graph, &WriteControl::default(), &opts).unwrap();
+        assert!(!manifest.outputs.is_empty());
+        assert_eq!(store.load(&job.id).unwrap().state, JobState::Done);
+
+        std::fs::write(&primary, b"broken").unwrap();
+        std::fs::remove_file(&secondary).unwrap();
+        let err =
+            run_render_job(&store, &mut job, &graph, &WriteControl::default(), &opts).unwrap_err();
+        assert!(!matches!(err, IoError::Cancelled), "{err}");
+        assert_eq!(std::fs::read(&primary).unwrap(), b"broken");
+        assert!(!secondary.is_file());
+        assert_ne!(store.load(&job.id).unwrap().state, JobState::Done);
     }
 
     #[test]

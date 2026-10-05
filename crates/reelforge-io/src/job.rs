@@ -77,6 +77,12 @@ pub struct StageArtifactRecord {
     /// SHA-style content hash of `uri` after write.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file_fingerprint: Option<String>,
+    /// SHA-style hash of the `{uri}.media.json` sidecar.
+    ///
+    /// `None` is a checkpoint from before sidecars were sealed. `Some` must
+    /// match the sidecar bytes; a missing file does not resume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sidecar_fingerprint: Option<String>,
 }
 
 impl StageArtifactRecord {
@@ -94,6 +100,7 @@ impl StageArtifactRecord {
             node_id: node_id.into(),
             uri: uri.into(),
             file_fingerprint: None,
+            sidecar_fingerprint: None,
         }
     }
 
@@ -103,6 +110,24 @@ impl StageArtifactRecord {
         self.file_fingerprint = Some(hash.into());
         self
     }
+
+    /// Attach the sidecar content hash.
+    #[must_use]
+    pub fn with_sidecar_fingerprint(mut self, hash: impl Into<String>) -> Self {
+        self.sidecar_fingerprint = Some(hash.into());
+        self
+    }
+}
+
+/// One finished graph output, sealed by the bytes on disk.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JobOutputRecord {
+    /// Graph output name.
+    pub name: String,
+    /// Destination path written by the run.
+    pub uri: String,
+    /// Content hash of `uri` after a successful run.
+    pub file_fingerprint: String,
 }
 
 /// Progress snapshot after the last completed plan stage.
@@ -136,8 +161,15 @@ pub struct RenderJob {
     #[serde(default)]
     pub checkpoint: JobCheckpoint,
     /// Final output URI when done.
+    ///
+    /// The first graph output. [`Self::outputs`] is the full sealed manifest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_uri: Option<String>,
+    /// Every graph output from the run that marked this job done.
+    ///
+    /// Empty on jobs finished before output hashes were stored.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outputs: Vec<JobOutputRecord>,
     /// Failure message.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -159,6 +191,7 @@ impl RenderJob {
             run_fingerprint: None,
             checkpoint: JobCheckpoint::default(),
             output_uri: None,
+            outputs: Vec::new(),
             error: None,
             created_unix_ms: now,
             updated_unix_ms: now,

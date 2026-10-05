@@ -67,8 +67,15 @@ pub(crate) struct StageMediaParts<'a> {
     pub(crate) encode: &'a StageEncodeState,
 }
 
+/// Sidecar schema. Records that store [`StageArtifactRecord::sidecar_fingerprint`]
+/// were written at this version.
+const STAGE_MEDIA_SIDECAR_VERSION: u32 = 1;
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct StageMediaSidecar {
+    /// `0` on checkpoints written before the field existed.
+    #[serde(default)]
+    version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     masks: Option<MaskTimeline>,
     #[serde(default, skip_serializing_if = "StageEncodeState::is_empty")]
@@ -109,16 +116,30 @@ pub struct StageResumePlan {
     pub restored_encode: HashMap<String, StageEncodeState>,
 }
 
-/// True when the file exists, is non-empty, and matches the stored hash.
+/// True when the video exists, is non-empty, and matches every stored hash.
+///
+/// A record with [`StageArtifactRecord::sidecar_fingerprint`] also requires
+/// the sidecar file. A record without that hash is legacy: a missing sidecar
+/// is allowed, and a present sidecar must still parse.
 #[must_use]
 pub fn artifact_is_valid(rec: &StageArtifactRecord) -> bool {
     let path = Path::new(&rec.uri);
+    if !file_matches_hash(path, rec.file_fingerprint.as_deref()) {
+        return false;
+    }
+    match rec.sidecar_fingerprint.as_deref() {
+        Some(expected) => file_matches_hash(&sidecar_path(path), Some(expected)),
+        None => sidecar_legacy_ok(&rec.uri),
+    }
+}
+
+fn file_matches_hash(path: &Path, expected: Option<&str>) -> bool {
     match fs::metadata(path) {
-        Ok(m) if m.is_file() && m.len() > 0 => {}
+        Ok(meta) if meta.is_file() && meta.len() > 0 => {}
         _ => return false,
     }
-    let Some(expected) = rec.file_fingerprint.as_deref() else {
-        return path.is_file();
+    let Some(expected) = expected else {
+        return true;
     };
     fingerprint_file(path).is_ok_and(|got| got == expected)
 }
@@ -145,9 +166,14 @@ pub fn first_invalid_stage(artifacts: &[StageArtifactRecord], total_stages: u32)
 /// `expected_by_stage[i]` is the live fingerprint for stage `i`. A mismatch
 /// means the graph/plan/host changed and that stage must run again.
 ///
-/// A readable sidecar restores masks and encode settings. A missing sidecar
-/// (checkpoints written before that file existed) restores the picture only.
-/// A sidecar that does not parse stops the prefix so the stage runs again.
+/// A readable sidecar restores masks and encode settings. A record that
+/// stores a sidecar hash must still have those bytes. A record without that
+/// hash is a checkpoint from before sidecars were sealed: a missing file
+/// restores the picture only. A sidecar that does not parse, or whose hash
+/// does not match, stops the prefix.
+///
+/// `required_nodes` is empty here, so any non-empty valid record set can
+/// certify a stage. [`restore_validated_prefix_members`] checks the frontier.
 ///
 /// # Errors
 ///
@@ -155,6 +181,23 @@ pub fn first_invalid_stage(artifacts: &[StageArtifactRecord], total_stages: u32)
 pub fn restore_validated_prefix(
     artifacts: &[StageArtifactRecord],
     expected_by_stage: &[String],
+) -> Result<StageResumePlan> {
+    restore_validated_prefix_members(artifacts, expected_by_stage, &[])
+}
+
+/// Restore a prefix whose stages contain every required frontier node.
+///
+/// `required_nodes[i]` is the node set stage `i` must have persisted. An
+/// empty entry keeps the older rule: any non-empty set of valid records.
+/// A missing required node stops the prefix even when the other files match.
+///
+/// # Errors
+///
+/// `open_video` failures on a record that passed [`artifact_is_valid`].
+pub fn restore_validated_prefix_members(
+    artifacts: &[StageArtifactRecord],
+    expected_by_stage: &[String],
+    required_nodes: &[Vec<String>],
 ) -> Result<StageResumePlan> {
     let mut plan = StageResumePlan::default();
     for (si, expected) in expected_by_stage.iter().enumerate() {
@@ -164,11 +207,11 @@ pub fn restore_validated_prefix(
             .iter()
             .filter(|a| a.stage_index == index && a.fingerprint == *expected)
             .collect();
-        if recs.is_empty()
-            || recs
-                .iter()
-                .any(|r| !artifact_is_valid(r) || !sidecar_allows_resume(&r.uri))
-        {
+        let required = match required_nodes.get(si) {
+            Some(nodes) => nodes.as_slice(),
+            None => &[],
+        };
+        if !stage_records_complete(&recs, required) {
             plan.start_stage = index;
             return Ok(plan);
         }
@@ -178,6 +221,15 @@ pub fn restore_validated_prefix(
         plan.start_stage = index.saturating_add(1);
     }
     Ok(plan)
+}
+
+fn stage_records_complete(recs: &[&StageArtifactRecord], required: &[String]) -> bool {
+    if recs.is_empty() || recs.iter().any(|record| !artifact_is_valid(record)) {
+        return false;
+    }
+    required
+        .iter()
+        .all(|id| recs.iter().any(|record| &record.node_id == id))
 }
 
 fn restore_one(plan: &mut StageResumePlan, rec: &StageArtifactRecord) -> Result<()> {
@@ -235,8 +287,8 @@ pub fn persist_stage_video(
 /// Write one frontier node, including audio and a media sidecar.
 ///
 /// The picture is `CRF` 30. Companion audio is muxed when present. Masks and
-/// encode settings go in `{uri}.media.json`. A later resume treats a missing
-/// sidecar as "no masks, default encode".
+/// encode settings go in `{uri}.media.json`. The record stores that file's
+/// hash, so a later resume does not treat a missing sidecar as "no masks".
 ///
 /// # Errors
 ///
@@ -272,14 +324,17 @@ pub(crate) fn persist_stage_media(
     write_sidecar(
         &path,
         &StageMediaSidecar {
+            version: STAGE_MEDIA_SIDECAR_VERSION,
             masks: media.masks.cloned(),
             encode: media.encode.clone(),
         },
     )?;
     let file_fp = fingerprint_file(&path)?;
+    let sidecar_fp = fingerprint_file(sidecar_path(&path))?;
     Ok(
         StageArtifactRecord::new(stage_index, fingerprint, node_id, uri)
-            .with_file_fingerprint(file_fp),
+            .with_file_fingerprint(file_fp)
+            .with_sidecar_fingerprint(sidecar_fp),
     )
 }
 
@@ -287,9 +342,9 @@ fn sidecar_path(video: &Path) -> PathBuf {
     PathBuf::from(format!("{}.media.json", video.display()))
 }
 
-fn sidecar_allows_resume(uri: &str) -> bool {
+fn sidecar_legacy_ok(uri: &str) -> bool {
     let path = sidecar_path(Path::new(uri));
-    if !path.exists() {
+    if !path.is_file() {
         return true;
     }
     fs::read(&path)
@@ -382,6 +437,73 @@ mod tests {
         let rec = StageArtifactRecord::new(0, "fp0", "n0", p0.to_string_lossy())
             .with_file_fingerprint(hash);
         let plan = restore_validated_prefix(&[rec], &["fp0".into()]).unwrap();
+        assert_eq!(plan.start_stage, 0);
+        assert!(plan.restored_video.is_empty());
+    }
+
+    fn sealed_record(
+        dir: &Path,
+        name: &str,
+        node: &str,
+        stage: u32,
+        fp: &str,
+    ) -> StageArtifactRecord {
+        let video = dir.join(name);
+        fs::write(&video, b"video-bytes").unwrap();
+        let side = sidecar_path(&video);
+        fs::write(&side, br#"{"version":1,"encode":{"fps":5.0}}"#).unwrap();
+        StageArtifactRecord::new(stage, fp, node, video.to_string_lossy())
+            .with_file_fingerprint(fingerprint_file(&video).unwrap())
+            .with_sidecar_fingerprint(fingerprint_file(&side).unwrap())
+    }
+
+    #[test]
+    fn legacy_record_without_sidecar_hash_stays_valid() {
+        let dir = tempfile::tempdir().unwrap();
+        let video = dir.path().join("old.mp4");
+        fs::write(&video, b"video").unwrap();
+        let rec = StageArtifactRecord::new(0, "fp", "n", video.to_string_lossy())
+            .with_file_fingerprint(fingerprint_file(&video).unwrap());
+        assert!(artifact_is_valid(&rec));
+    }
+
+    #[test]
+    fn sealed_sidecar_must_exist() {
+        let dir = tempfile::tempdir().unwrap();
+        let rec = sealed_record(dir.path(), "vision.mp4", "vision", 0, "fp0");
+        assert!(artifact_is_valid(&rec));
+        fs::remove_file(sidecar_path(Path::new(&rec.uri))).unwrap();
+        assert!(!artifact_is_valid(&rec));
+        let plan = restore_validated_prefix(&[rec], &["fp0".into()]).unwrap();
+        assert_eq!(plan.start_stage, 0);
+        assert!(plan.restored_masks.is_empty());
+    }
+
+    #[test]
+    fn changed_sidecar_does_not_resume() {
+        let dir = tempfile::tempdir().unwrap();
+        let rec = sealed_record(dir.path(), "out_a.mp4", "out_a", 0, "fp0");
+        fs::write(
+            sidecar_path(Path::new(&rec.uri)),
+            br#"{"version":1,"encode":{"fps":3.0}}"#,
+        )
+        .unwrap();
+        assert!(!artifact_is_valid(&rec));
+        let plan = restore_validated_prefix(&[rec], &["fp0".into()]).unwrap();
+        assert_eq!(plan.start_stage, 0);
+        assert!(plan.restored_encode.is_empty());
+    }
+
+    #[test]
+    fn incomplete_frontier_stops_the_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let other = sealed_record(dir.path(), "other.mp4", "other", 0, "fp0");
+        let plan = restore_validated_prefix_members(
+            &[other],
+            &["fp0".into()],
+            &[vec!["inv_again".into(), "other".into()]],
+        )
+        .unwrap();
         assert_eq!(plan.start_stage, 0);
         assert!(plan.restored_video.is_empty());
     }

@@ -860,7 +860,7 @@ fn encode_state_of(encode: &OutputEncodeOptions) -> crate::StageEncodeState {
 /// Nodes that leave the stage: a later stage or a graph output consumes them.
 ///
 /// Plans without per-stage ports persist every node, which is the older path.
-fn stage_frontier_ids(
+pub(crate) fn stage_frontier_ids(
     plan: &ExecutionPlan,
     stage_index: usize,
     node_ids: &[NodeId],

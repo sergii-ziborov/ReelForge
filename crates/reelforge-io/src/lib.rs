@@ -73,7 +73,10 @@ pub use graph_run::{
     run_render_graph_with, run_render_graph_with_manifest,
 };
 pub use image_clip::ImageClip;
-pub use job::{JobCheckpoint, JobId, JobState, RENDER_JOB_VERSION, RenderJob, StageArtifactRecord};
+pub use job::{
+    JobCheckpoint, JobId, JobOutputRecord, JobState, RENDER_JOB_VERSION, RenderJob,
+    StageArtifactRecord,
+};
 pub use job_run::{resume_render_job, run_render_job, submit_render_job};
 pub use job_store::JobStore;
 pub use manifest_seal::{fingerprint_file, seal_manifest_on_disk};
@@ -108,6 +111,7 @@ pub use stage_cache::StageCache;
 pub use stage_resume::{
     StageCommit, StageEncodeState, StageResumePlan, StageRunHooks, artifact_is_valid,
     first_invalid_stage, persist_stage_video, restore_validated_prefix,
+    restore_validated_prefix_members,
 };
 pub use tracks_json::{
     SampleJson, TRACKS_JSON_VERSION, TrackJson, TracksDocument, load_track_set, parse_track_set,
