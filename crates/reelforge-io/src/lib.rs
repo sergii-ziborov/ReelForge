@@ -65,8 +65,8 @@ pub use filtergraph::{
 pub use gpu::{GpuContext, GpuExecutor, GpuHost, GpuOutput, GpuRequest, execute_gpu};
 pub use gpu_registry::{GpuPassthroughExecutor, GpuRegistry, HwEncodeExecutor};
 pub use graph_run::{
-    GraphBundle, GraphEncodeHints, GraphRunOptions, explain_render_graph,
-    explain_render_graph_with, is_executable_op, materialize_execution_plan,
+    GraphBundle, GraphEncodeHints, GraphRunOptions, LEGACY_STILL_HOLD, SourceAdmission,
+    explain_render_graph, explain_render_graph_with, is_executable_op, materialize_execution_plan,
     materialize_execution_plan_with_adapters, materialize_graph, materialize_graph_bundle,
     materialize_graph_with_seeds, node_backend, plan_stage_fingerprints, run_execution_plan,
     run_execution_plan_with, run_execution_plan_with_manifest, run_render_graph,

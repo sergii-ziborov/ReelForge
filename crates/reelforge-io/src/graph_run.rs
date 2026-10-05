@@ -29,8 +29,35 @@ use reelforge_render_graph::{
 };
 use std::collections::{HashMap, HashSet};
 use std::hash::BuildHasher;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+/// How a source with incomplete metadata is admitted.
+///
+/// Legacy callers keep their historical defaults. Strict production must not
+/// turn those defaults into authored timeline decisions.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Default)]
+pub enum SourceAdmission {
+    /// A still with no positive duration holds for [`LEGACY_STILL_HOLD`].
+    /// GIF and other animated containers open as one still frame.
+    #[default]
+    Legacy,
+    /// A still must declare a positive duration. An animated file is rejected
+    /// instead of being opened as a still, and the extension must match the
+    /// sniffed signature. This mode does not take the `FFmpeg` prefix, so the
+    /// declared hold is the duration that is sampled.
+    Strict,
+}
+
+/// Hold used only by [`SourceAdmission::Legacy`] when a still has no positive
+/// duration. Strict admission never substitutes this value.
+pub const LEGACY_STILL_HOLD: reelforge_core::Duration = reelforge_core::Duration::from_secs(1.0);
+
+/// Bytes of a PNG prefix scanned for an `acTL` animation chunk.
+const RASTER_SCAN_BYTES: usize = 65_536;
+/// PNG file signature.
+const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n'];
 
 /// Encode / output hints collected while walking the graph.
 #[derive(Clone, Default)]
@@ -177,6 +204,8 @@ pub struct GraphRunOptions {
     pub persist_stage_dir: Option<PathBuf>,
     /// Invoked after a stage is committed (fingerprint + artifacts).
     pub on_stage_committed: Option<std::sync::Arc<dyn Fn(crate::StageCommit) + Send + Sync>>,
+    /// How incomplete source metadata is admitted. Defaults to legacy.
+    pub source_admission: SourceAdmission,
 }
 
 impl Default for GraphRunOptions {
@@ -199,6 +228,7 @@ impl Default for GraphRunOptions {
             restored_encode: HashMap::new(),
             persist_stage_dir: None,
             on_stage_committed: None,
+            source_admission: SourceAdmission::Legacy,
         }
     }
 }
@@ -228,6 +258,13 @@ impl GraphRunOptions {
     #[must_use]
     pub fn video_only(mut self) -> Self {
         self.with_audio = false;
+        self
+    }
+
+    /// Choose legacy defaults or strict production admission.
+    #[must_use]
+    pub fn with_source_admission(mut self, admission: SourceAdmission) -> Self {
+        self.source_admission = admission;
         self
     }
 
@@ -312,6 +349,7 @@ impl core::fmt::Debug for GraphRunOptions {
             .field("restored_encode", &self.restored_encode.len())
             .field("persist_stage_dir", &self.persist_stage_dir)
             .field("on_stage_committed", &self.on_stage_committed.is_some())
+            .field("source_admission", &self.source_admission)
             .finish()
     }
 }
@@ -517,8 +555,10 @@ fn execute_plan_and_seal(
         return finish_manifest(compiled, plan, None);
     }
 
-    // Hybrid FFmpeg prefix is video-only; skip when we want companion audio.
-    if !options.with_audio
+    // Hybrid FFmpeg prefix is video-only and does not apply declared still
+    // holds. Strict admission stays on the in-process source path.
+    if options.source_admission == SourceAdmission::Legacy
+        && !options.with_audio
         && can_use_ffmpeg_prefix(graph, plan)
         && let Some(()) = try_hybrid_ffmpeg_prefix(graph, plan, control, options)?
     {
@@ -532,7 +572,7 @@ fn execute_plan_and_seal(
 
     let seeds = HashMap::new();
     let audio_seeds = HashMap::new();
-    let mut bundle = materialize_execution_plan_with_adapters(
+    let mut bundle = materialize_plan_admitted(
         graph,
         plan,
         &options.registry,
@@ -550,6 +590,7 @@ fn execute_plan_and_seal(
             registry: options.gpu_registry.clone(),
         },
         Some(&options.stage_hooks()),
+        options.source_admission,
     )?;
     merge_option_hints(&mut bundle.hints, options);
     write_bundle_outputs(graph, &bundle, options, control, true)?;
@@ -651,6 +692,24 @@ pub fn materialize_graph_bundle<S: BuildHasher, A: BuildHasher>(
     audio_seeds: &HashMap<MediaAssetId, Arc<dyn AudioClip>, A>,
     with_audio: bool,
 ) -> Result<GraphBundle> {
+    materialize_graph_bundle_admitted(
+        graph,
+        registry,
+        video_seeds,
+        audio_seeds,
+        with_audio,
+        SourceAdmission::Legacy,
+    )
+}
+
+fn materialize_graph_bundle_admitted<S: BuildHasher, A: BuildHasher>(
+    graph: &RenderGraph,
+    registry: &OperationRegistry,
+    video_seeds: &HashMap<MediaAssetId, Arc<dyn VideoClip>, S>,
+    audio_seeds: &HashMap<MediaAssetId, Arc<dyn AudioClip>, A>,
+    with_audio: bool,
+    admission: SourceAdmission,
+) -> Result<GraphBundle> {
     graph
         .validate()
         .map_err(|e| IoError::message(e.to_string()))?;
@@ -663,6 +722,7 @@ pub fn materialize_graph_bundle<S: BuildHasher, A: BuildHasher>(
         with_audio,
         crate::AdapterContext::default(),
         crate::GpuContext::default(),
+        admission,
     );
     for id in &order {
         ctx.eval_node(id, video_seeds, audio_seeds)?;
@@ -726,16 +786,54 @@ pub fn materialize_execution_plan_with_adapters<S: BuildHasher, A: BuildHasher>(
     gpu: crate::GpuContext,
     hooks: Option<&crate::StageRunHooks>,
 ) -> Result<GraphBundle> {
+    materialize_plan_admitted(
+        graph,
+        plan,
+        registry,
+        video_seeds,
+        audio_seeds,
+        with_audio,
+        control,
+        cache,
+        adapters,
+        gpu,
+        hooks,
+        SourceAdmission::Legacy,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn materialize_plan_admitted<S: BuildHasher, A: BuildHasher>(
+    graph: &RenderGraph,
+    plan: &ExecutionPlan,
+    registry: &OperationRegistry,
+    video_seeds: &HashMap<MediaAssetId, Arc<dyn VideoClip>, S>,
+    audio_seeds: &HashMap<MediaAssetId, Arc<dyn AudioClip>, A>,
+    with_audio: bool,
+    control: Option<&WriteControl>,
+    cache: Option<&StageCache>,
+    adapters: crate::AdapterContext,
+    gpu: crate::GpuContext,
+    hooks: Option<&crate::StageRunHooks>,
+    admission: SourceAdmission,
+) -> Result<GraphBundle> {
     graph
         .validate()
         .map_err(|e| IoError::message(e.to_string()))?;
 
     if plan.stages.is_empty() {
         // Empty plan: fall back to full topo (tests / hand-built plans).
-        return materialize_graph_bundle(graph, registry, video_seeds, audio_seeds, with_audio);
+        return materialize_graph_bundle_admitted(
+            graph,
+            registry,
+            video_seeds,
+            audio_seeds,
+            with_audio,
+            admission,
+        );
     }
 
-    let mut ctx = MaterializeCtx::new(graph, registry, with_audio, adapters, gpu);
+    let mut ctx = MaterializeCtx::new(graph, registry, with_audio, adapters, gpu, admission);
     if let Some(h) = hooks {
         inject_restored(&mut ctx.produced, h);
     }
@@ -902,6 +1000,7 @@ struct MaterializeCtx<'a> {
     primary_out: Option<NodeMedia>,
     last_stage_fingerprint: Option<String>,
     stage_fingerprints: Vec<String>,
+    source_admission: SourceAdmission,
 }
 
 impl<'a> MaterializeCtx<'a> {
@@ -911,6 +1010,7 @@ impl<'a> MaterializeCtx<'a> {
         with_audio: bool,
         adapters: crate::AdapterContext,
         gpu: crate::GpuContext,
+        source_admission: SourceAdmission,
     ) -> Self {
         Self {
             graph,
@@ -929,6 +1029,7 @@ impl<'a> MaterializeCtx<'a> {
             primary_out: None,
             last_stage_fingerprint: None,
             stage_fingerprints: Vec::new(),
+            source_admission,
         }
     }
 
@@ -949,6 +1050,7 @@ impl<'a> MaterializeCtx<'a> {
                 video_seeds,
                 audio_seeds,
                 self.hints.preserve_audio,
+                self.source_admission,
             )?,
             RenderNodeKind::Op { operation, params } => {
                 let compiled = compile_op(self.registry, operation, params)
@@ -1055,8 +1157,12 @@ pub(crate) fn execution_cache_key(
             .iter()
             .map(|asset| (asset.id.0.as_str(), asset.uri.as_str())),
     );
+    let admission = match options.source_admission {
+        SourceAdmission::Legacy => "legacy",
+        SourceAdmission::Strict => "strict",
+    };
     Ok(format!(
-        "{base}|fps={}|codec={}|crf={}|audio={}|src={sources}",
+        "{base}|fps={}|codec={}|crf={}|audio={}|admit={admission}|src={sources}",
         options
             .fps
             .map(|fps| format!("{fps:.6}"))
@@ -1143,6 +1249,7 @@ fn resolve_source<S: BuildHasher, A: BuildHasher>(
     video_seeds: &HashMap<MediaAssetId, Arc<dyn VideoClip>, S>,
     audio_seeds: &HashMap<MediaAssetId, Arc<dyn AudioClip>, A>,
     with_audio: bool,
+    admission: SourceAdmission,
 ) -> Result<NodeMedia> {
     if let Some(clip) = video_seeds.get(asset) {
         return Ok(NodeMedia::new(
@@ -1163,9 +1270,8 @@ fn resolve_source<S: BuildHasher, A: BuildHasher>(
     if meta.role.as_deref() == Some("audio") {
         return resolve_audio_source(meta);
     }
-    if is_still_image(path) {
-        let clip = crate::ImageClip::from_path(path, still_hold(meta))?;
-        return Ok(NodeMedia::new(Arc::new(clip), None));
+    if let Some(still) = open_admitted_still(path, meta, admission)? {
+        return Ok(still);
     }
     let mut opts = OpenVideoOptions::new(&meta.uri);
     if !with_audio {
@@ -1182,24 +1288,148 @@ fn resolve_source<S: BuildHasher, A: BuildHasher>(
     }
 }
 
-fn is_still_image(path: &Path) -> bool {
-    let Some(ext) = path.extension().and_then(|ext| ext.to_str()) else {
-        return false;
-    };
-    matches!(
-        ext.to_ascii_lowercase().as_str(),
-        "png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp"
-    )
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RasterClass {
+    Still,
+    Animated,
+    Other,
 }
 
-fn still_hold(meta: &reelforge_render_graph::MediaAsset) -> reelforge_core::Duration {
+fn extension_raster(path: &Path) -> RasterClass {
+    let Some(ext) = path.extension().and_then(|ext| ext.to_str()) else {
+        return RasterClass::Other;
+    };
+    match ext.to_ascii_lowercase().as_str() {
+        "png" | "jpg" | "jpeg" | "webp" | "bmp" => RasterClass::Still,
+        "gif" => RasterClass::Animated,
+        _ => RasterClass::Other,
+    }
+}
+
+fn open_admitted_still(
+    path: &Path,
+    meta: &reelforge_render_graph::MediaAsset,
+    admission: SourceAdmission,
+) -> Result<Option<NodeMedia>> {
+    let by_ext = extension_raster(path);
+    match admission {
+        SourceAdmission::Legacy => {
+            if by_ext == RasterClass::Other {
+                return Ok(None);
+            }
+            Ok(Some(still_node(path, meta, admission)?))
+        }
+        SourceAdmission::Strict => match (by_ext, sniff_raster(path)?) {
+            (RasterClass::Animated, _) | (_, RasterClass::Animated) => {
+                Err(IoError::message(format!(
+                    "strict source admission does not open animated file '{}' as a still",
+                    meta.uri
+                )))
+            }
+            (RasterClass::Still, RasterClass::Still) => {
+                Ok(Some(still_node(path, meta, admission)?))
+            }
+            (RasterClass::Still, RasterClass::Other) | (RasterClass::Other, RasterClass::Still) => {
+                Err(IoError::message(format!(
+                    "strict source admission rejects '{}': extension and image signature disagree",
+                    meta.uri
+                )))
+            }
+            (RasterClass::Other, RasterClass::Other) => Ok(None),
+        },
+    }
+}
+
+fn still_node(
+    path: &Path,
+    meta: &reelforge_render_graph::MediaAsset,
+    admission: SourceAdmission,
+) -> Result<NodeMedia> {
+    let clip = crate::ImageClip::from_path(path, admitted_still_hold(meta, admission)?)?;
+    Ok(NodeMedia::new(Arc::new(clip), None))
+}
+
+fn admitted_still_hold(
+    meta: &reelforge_render_graph::MediaAsset,
+    admission: SourceAdmission,
+) -> Result<reelforge_core::Duration> {
     if let Some(time) = meta.duration {
         let duration = time.to_duration();
         if duration.is_positive() {
-            return duration;
+            return Ok(duration);
         }
     }
-    reelforge_core::Duration::from_secs(1.0)
+    match admission {
+        SourceAdmission::Legacy => Ok(LEGACY_STILL_HOLD),
+        SourceAdmission::Strict => Err(IoError::message(format!(
+            "strict source admission rejects still '{}' with no positive duration",
+            meta.id.0
+        ))),
+    }
+}
+
+fn sniff_raster(path: &Path) -> Result<RasterClass> {
+    let mut file = std::fs::File::open(path)
+        .map_err(|err| IoError::message(format!("open source {}: {err}", path.display())))?;
+    let mut header = [0_u8; 32];
+    let read = file
+        .read(&mut header)
+        .map_err(|err| IoError::message(format!("read source {}: {err}", path.display())))?;
+    let header = &header[..read];
+    if header.starts_with(b"GIF87a") || header.starts_with(b"GIF89a") {
+        return Ok(RasterClass::Animated);
+    }
+    if header.starts_with(&PNG_SIGNATURE) {
+        let mut buf = vec![0_u8; RASTER_SCAN_BYTES];
+        let copy = read.min(buf.len());
+        buf[..copy].copy_from_slice(&header[..copy]);
+        let rest = file
+            .read(&mut buf[copy..])
+            .map_err(|err| IoError::message(format!("read source {}: {err}", path.display())))?;
+        let total = copy + rest;
+        if png_declares_animation(&buf[..total]) {
+            return Ok(RasterClass::Animated);
+        }
+        return Ok(RasterClass::Still);
+    }
+    if header.starts_with(&[0xFF, 0xD8, 0xFF]) || header.starts_with(b"BM") {
+        return Ok(RasterClass::Still);
+    }
+    if header.len() >= 12 && header.starts_with(b"RIFF") && &header[8..12] == b"WEBP" {
+        if header.len() >= 21 && &header[12..16] == b"VP8X" && (header[20] & 0x02) != 0 {
+            return Ok(RasterClass::Animated);
+        }
+        return Ok(RasterClass::Still);
+    }
+    Ok(RasterClass::Other)
+}
+
+fn png_declares_animation(bytes: &[u8]) -> bool {
+    if bytes.len() < PNG_SIGNATURE.len() || bytes[..PNG_SIGNATURE.len()] != PNG_SIGNATURE {
+        return false;
+    }
+    let mut index = PNG_SIGNATURE.len();
+    while index + 8 <= bytes.len() {
+        let Ok(len_bytes) = bytes[index..index + 4].try_into() else {
+            return false;
+        };
+        let len = usize::try_from(u32::from_be_bytes(len_bytes)).unwrap_or(usize::MAX);
+        let kind = &bytes[index + 4..index + 8];
+        if kind == b"acTL" {
+            return true;
+        }
+        if kind == b"IDAT" || kind == b"IEND" {
+            return false;
+        }
+        let Some(next) = index.checked_add(12).and_then(|pos| pos.checked_add(len)) else {
+            return false;
+        };
+        if next > bytes.len() {
+            return false;
+        }
+        index = next;
+    }
+    false
 }
 
 fn resolve_audio_source(meta: &reelforge_render_graph::MediaAsset) -> Result<NodeMedia> {
@@ -3016,9 +3246,195 @@ mod tests {
         let mut unset = graph.clone();
         unset.assets[0].duration = None;
         let fallback = materialize_graph(&unset).unwrap().duration().as_secs();
-        assert!((fallback - 1.0).abs() < 1e-9, "fallback {fallback}");
+        assert!((LEGACY_STILL_HOLD.as_secs() - 1.0).abs() < 1e-9);
+        assert!(
+            (fallback - LEGACY_STILL_HOLD.as_secs()).abs() < 1e-9,
+            "fallback {fallback}"
+        );
         unset.assets[0].duration = Some(MediaTime::zero(1_000));
         let zero = materialize_graph(&unset).unwrap().duration().as_secs();
-        assert!((zero - 1.0).abs() < 1e-9, "zero {zero}");
+        assert!(
+            (zero - LEGACY_STILL_HOLD.as_secs()).abs() < 1e-9,
+            "zero {zero}"
+        );
+    }
+
+    fn still_photo_graph(path: &std::path::Path, duration: Option<MediaTime>) -> RenderGraph {
+        RenderGraph {
+            version: RENDER_GRAPH_VERSION,
+            assets: vec![MediaAsset {
+                id: MediaAssetId("photo".into()),
+                uri: path.to_string_lossy().into_owned(),
+                duration,
+                role: Some("image".into()),
+            }],
+            nodes: vec![
+                RenderNode {
+                    id: NodeId("src".into()),
+                    body: RenderNodeKind::Source {
+                        asset: MediaAssetId("photo".into()),
+                    },
+                    inputs: vec![],
+                },
+                RenderNode {
+                    id: NodeId("out".into()),
+                    body: RenderNodeKind::Output {
+                        name: "main".into(),
+                    },
+                    inputs: vec![NodeId("src".into())],
+                },
+            ],
+            outputs: vec![GraphOutput {
+                name: "main".into(),
+                node: NodeId("out".into()),
+                uri: None,
+            }],
+        }
+    }
+
+    fn materialize_admitted(
+        graph: &RenderGraph,
+        admission: SourceAdmission,
+    ) -> Result<Arc<dyn VideoClip>> {
+        let registry = OperationRegistry::with_builtins();
+        let video = HashMap::<MediaAssetId, Arc<dyn VideoClip>>::new();
+        let audio = HashMap::<MediaAssetId, Arc<dyn AudioClip>>::new();
+        Ok(
+            materialize_graph_bundle_admitted(graph, &registry, &video, &audio, true, admission)?
+                .video,
+        )
+    }
+
+    fn admission_error(graph: &RenderGraph, admission: SourceAdmission) -> String {
+        let Err(err) = materialize_admitted(graph, admission) else {
+            panic!("source admission accepted a source that must be rejected");
+        };
+        err.to_string()
+    }
+
+    #[test]
+    fn strict_still_requires_a_positive_duration() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plain.png");
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([10, 20, 30, 255]))
+            .save(&path)
+            .unwrap();
+        let missing = still_photo_graph(&path, None);
+        let missing_text = admission_error(&missing, SourceAdmission::Strict);
+        assert!(
+            missing_text.contains("no positive duration"),
+            "{missing_text}"
+        );
+        assert!(!missing_text.contains("1.0"), "{missing_text}");
+
+        let mut zero = missing.clone();
+        zero.assets[0].duration = Some(MediaTime::zero(1_000));
+        let zero_text = admission_error(&zero, SourceAdmission::Strict);
+        assert!(zero_text.contains("no positive duration"), "{zero_text}");
+
+        let declared = still_photo_graph(&path, Some(MediaTime::from_secs(1.5, 1_000).unwrap()));
+        let held = materialize_admitted(&declared, SourceAdmission::Strict)
+            .unwrap()
+            .duration()
+            .as_secs();
+        assert!((held - 1.5).abs() < 1e-9, "held {held}");
+
+        let plan = schedule_graph(&missing, &OperationRegistry::with_builtins()).unwrap();
+        let video = HashMap::<MediaAssetId, Arc<dyn VideoClip>>::new();
+        let audio = HashMap::<MediaAssetId, Arc<dyn AudioClip>>::new();
+        let Err(err) = materialize_plan_admitted(
+            &missing,
+            &plan,
+            &OperationRegistry::with_builtins(),
+            &video,
+            &audio,
+            true,
+            None,
+            None,
+            crate::AdapterContext::default(),
+            crate::GpuContext::default(),
+            None,
+            SourceAdmission::Strict,
+        ) else {
+            panic!("strict plan accepted a still with no duration");
+        };
+        let planned = err.to_string();
+        assert!(planned.contains("no positive duration"), "{planned}");
+    }
+
+    #[test]
+    fn strict_still_rejects_animated_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let gif = dir.path().join("loop.gif");
+        let frame = image::Frame::new(image::RgbaImage::from_pixel(
+            1,
+            1,
+            image::Rgba([0, 255, 0, 255]),
+        ));
+        let file = std::fs::File::create(&gif).unwrap();
+        let mut encoder = image::codecs::gif::GifEncoder::new(file);
+        encoder.encode_frame(frame).unwrap();
+
+        let legacy =
+            materialize_admitted(&still_photo_graph(&gif, None), SourceAdmission::Legacy).unwrap();
+        assert!((legacy.duration().as_secs() - LEGACY_STILL_HOLD.as_secs()).abs() < 1e-9);
+
+        let gif_text = admission_error(&still_photo_graph(&gif, None), SourceAdmission::Strict);
+        assert!(gif_text.contains("animated"), "{gif_text}");
+
+        let disguised = dir.path().join("still.png");
+        std::fs::copy(&gif, &disguised).unwrap();
+        let disguised_text = admission_error(
+            &still_photo_graph(&disguised, None),
+            SourceAdmission::Strict,
+        );
+        assert!(disguised_text.contains("animated"), "{disguised_text}");
+
+        let webp = dir.path().join("move.webp");
+        let mut header = vec![0_u8; 30];
+        header[0..4].copy_from_slice(b"RIFF");
+        header[8..12].copy_from_slice(b"WEBP");
+        header[12..16].copy_from_slice(b"VP8X");
+        header[20] = 0x02;
+        std::fs::write(&webp, &header).unwrap();
+        let webp_text = admission_error(&still_photo_graph(&webp, None), SourceAdmission::Strict);
+        assert!(webp_text.contains("animated"), "{webp_text}");
+
+        let apng = dir.path().join("anim.png");
+        let mut bytes = vec![0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n'];
+        bytes.extend_from_slice(&13_u32.to_be_bytes());
+        bytes.extend_from_slice(b"IHDR");
+        bytes.extend_from_slice(&[0_u8; 17]);
+        bytes.extend_from_slice(&8_u32.to_be_bytes());
+        bytes.extend_from_slice(b"acTL");
+        bytes.extend_from_slice(&[0_u8; 12]);
+        std::fs::write(&apng, &bytes).unwrap();
+        let apng_text = admission_error(&still_photo_graph(&apng, None), SourceAdmission::Strict);
+        assert!(apng_text.contains("animated"), "{apng_text}");
+
+        let junk = dir.path().join("junk.png");
+        std::fs::write(&junk, b"not-a-png").unwrap();
+        let junk_text = admission_error(&still_photo_graph(&junk, None), SourceAdmission::Strict);
+        assert!(junk_text.contains("signature"), "{junk_text}");
+        let legacy_junk = admission_error(&still_photo_graph(&junk, None), SourceAdmission::Legacy);
+        assert!(
+            !legacy_junk.contains("strict source admission"),
+            "{legacy_junk}"
+        );
+    }
+
+    #[test]
+    fn still_admission_changes_the_cache_key() {
+        let graph = RenderGraph::default();
+        let plan = ExecutionPlan::default();
+        let legacy = GraphRunOptions::new();
+        let strict = legacy
+            .clone()
+            .with_source_admission(SourceAdmission::Strict);
+        let legacy_key = execution_cache_key(&graph, &plan, &legacy).unwrap();
+        let strict_key = execution_cache_key(&graph, &plan, &strict).unwrap();
+        assert_ne!(legacy_key, strict_key);
+        assert!(legacy_key.contains("admit=legacy"), "{legacy_key}");
+        assert!(strict_key.contains("admit=strict"), "{strict_key}");
     }
 }
