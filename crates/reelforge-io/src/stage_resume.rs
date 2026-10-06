@@ -612,41 +612,50 @@ fn persist_final_bundle(
     ensure_persist_dir(dir)?;
     let (safe_node, stem) = checkpoint_name(node_id, fingerprint);
     let path = dir.join(format!("s{stage_index}-{safe_node}-{stem}.bundle"));
-    fs::write(&path, FINAL_BUNDLE_STUB)
-        .map_err(|err| IoError::message(format!("final bundle {}: {err}", path.display())))?;
-    let mut listed = Vec::with_capacity(frames.len());
-    let mut picture = String::new();
-    let mut picture_sha256 = String::new();
+    let mut pending = Vec::with_capacity(frames.len().saturating_add(2));
+    pending.push((path.clone(), FINAL_BUNDLE_STUB.to_vec()));
+    let mut frame_names = Vec::with_capacity(frames.len());
     let alpha_mode = alpha_label(frames[0].1.alpha_mode());
     for (index, (time, frame)) in frames.iter().enumerate() {
         let name = format!("s{stage_index}-{safe_node}-{stem}-f{index:04}.png");
         let png = dir.join(&name);
-        write_png_frame(&png, frame)?;
-        let sha256 = fingerprint_file(&png)?;
+        let bytes = png_bytes(frame)?;
         let pts = MediaTime::from_secs(time.as_secs(), MediaTime::HZ_1M)?;
+        pending.push((png, bytes));
+        frame_names.push((name, pts));
+    }
+    let audio_name = audio.as_ref().map(|(format, samples)| {
+        let name = format!("s{stage_index}-{safe_node}-{stem}.pcm");
+        let pcm = dir.join(&name);
+        let bytes = pcm_bytes(samples.samples());
+        pending.push((pcm, bytes));
+        (name, format.sample_rate, format.channels())
+    });
+    // The sidecar is the commit. A failed publish leaves the previous files.
+    publish_files(&pending)?;
+    let mut listed = Vec::with_capacity(frame_names.len());
+    let mut picture = String::new();
+    let mut picture_sha256 = String::new();
+    for (index, (name, pts)) in frame_names.iter().enumerate() {
+        let sha256 = fingerprint_file(dir.join(name))?;
         if index == 0 {
-            picture.clone_from(&name);
+            picture.clone_from(name);
             picture_sha256.clone_from(&sha256);
         }
         listed.push(FinalFrameRef {
-            file: name,
+            file: name.clone(),
             sha256,
             pts_ticks: pts.ticks,
             timescale: pts.timescale,
         });
     }
-    let audio = match audio {
-        Some((format, samples)) => {
-            let name = format!("s{stage_index}-{safe_node}-{stem}.pcm");
-            let pcm = dir.join(&name);
-            write_pcm(&pcm, samples.samples())?;
-            Some(FinalAudioRef {
-                file: name,
-                sha256: fingerprint_file(&pcm)?,
-                sample_rate: format.sample_rate,
-                channels: format.channels(),
-            })
-        }
+    let audio = match audio_name {
+        Some((name, sample_rate, channels)) => Some(FinalAudioRef {
+            file: name.clone(),
+            sha256: fingerprint_file(dir.join(&name))?,
+            sample_rate,
+            channels,
+        }),
         None => None,
     };
     let parts = FinalMediaComponents {
@@ -824,22 +833,86 @@ fn alpha_mode_from_label(label: &str) -> Result<AlphaMode> {
     }
 }
 
-fn write_png_frame(path: &Path, frame: &Frame) -> Result<()> {
+fn png_bytes(frame: &Frame) -> Result<Vec<u8>> {
     let size = frame.size();
     let data = frame.data().to_vec();
+    let mut cursor = std::io::Cursor::new(Vec::new());
     let saved = match frame.format() {
         FrameFormat::Rgba8 => {
             let image = image::RgbaImage::from_raw(size.width, size.height, data)
                 .ok_or_else(|| IoError::image("rgba frame does not match its size"))?;
-            image.save(path)
+            image.write_to(&mut cursor, image::ImageFormat::Png)
         }
         FrameFormat::Rgb8 => {
             let image = image::RgbImage::from_raw(size.width, size.height, data)
                 .ok_or_else(|| IoError::image("rgb frame does not match its size"))?;
-            image.save(path)
+            image.write_to(&mut cursor, image::ImageFormat::Png)
         }
     };
-    saved.map_err(|err| IoError::image(format!("png {}: {err}", path.display())))
+    saved.map_err(|err| IoError::image(format!("png encode: {err}")))?;
+    Ok(cursor.into_inner())
+}
+
+/// Write every component to a sibling partial, then publish those names.
+///
+/// A failed partial write removes only the partials from this attempt. Files
+/// that were already admitted stay in place, and this function does not write
+/// the sidecar.
+fn publish_files(files: &[(PathBuf, Vec<u8>)]) -> Result<()> {
+    let mut partials = Vec::with_capacity(files.len());
+    for (path, bytes) in files {
+        let partial = partial_sibling(path)?;
+        if let Err(err) = fs::write(&partial, bytes) {
+            discard_paths(&partials);
+            return Err(IoError::message(format!(
+                "final bundle {}: {err}",
+                partial.display()
+            )));
+        }
+        partials.push(partial);
+    }
+    for (index, (path, _)) in files.iter().enumerate() {
+        if let Err(err) = replace_published(&partials[index], path) {
+            discard_paths(&partials[index..]);
+            return Err(err);
+        }
+    }
+    Ok(())
+}
+
+fn partial_sibling(path: &Path) -> Result<PathBuf> {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return Err(IoError::message(format!(
+            "final bundle refuses a component name {}",
+            path.display()
+        )));
+    };
+    let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    else {
+        return Err(IoError::message(format!(
+            "final bundle refuses a component without a directory {}",
+            path.display()
+        )));
+    };
+    Ok(parent.join(format!(".{name}.partial")))
+}
+
+fn replace_published(partial: &Path, dest: &Path) -> Result<()> {
+    if dest.exists() {
+        fs::remove_file(dest).map_err(|err| {
+            IoError::message(format!("final bundle replace {}: {err}", dest.display()))
+        })?;
+    }
+    fs::rename(partial, dest)
+        .map_err(|err| IoError::message(format!("final bundle rename {}: {err}", dest.display())))
+}
+
+fn discard_paths(paths: &[PathBuf]) {
+    for path in paths {
+        let _ = fs::remove_file(path);
+    }
 }
 
 fn read_png_frame(path: &Path, mode: AlphaMode) -> Result<Frame> {
@@ -873,13 +946,12 @@ fn read_png_frame(path: &Path, mode: AlphaMode) -> Result<Frame> {
     Ok(Frame::from_raw(size, format, data)?.with_alpha_mode(mode)?)
 }
 
-fn write_pcm(path: &Path, samples: &[f32]) -> Result<()> {
+fn pcm_bytes(samples: &[f32]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(samples.len().saturating_mul(4));
     for sample in samples {
         bytes.extend_from_slice(&sample.to_le_bytes());
     }
-    fs::write(path, bytes)
-        .map_err(|err| IoError::message(format!("final pcm {}: {err}", path.display())))
+    bytes
 }
 
 fn read_pcm(path: &Path) -> Result<Vec<f32>> {
@@ -1534,6 +1606,46 @@ mod tests {
         let text = err.to_string();
         assert!(text.contains("refuses"), "{text}");
         assert!(fs::read_dir(dir.path()).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn failed_component_publish_leaves_the_admitted_bundle() {
+        let dir = tempfile::tempdir().unwrap();
+        let video = ColorClip::new(Size::new(2, 2), Rgb8::RED, Duration::from_secs(0.5));
+        let encode = StageEncodeState::default();
+        let rec = persist_stage_media(
+            dir.path(),
+            0,
+            "fp0",
+            "n0",
+            &final_parts(&video, None, None, &encode),
+        )
+        .unwrap();
+        assert!(artifact_serves(&rec, CheckpointFidelity::FinalLossless));
+        let png = fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "png"))
+            .unwrap();
+        let admitted = fs::read(&png).unwrap();
+        let err = publish_files(&[
+            (png.clone(), b"replacement-png".to_vec()),
+            (
+                dir.path().join("missing-parent").join("late.pcm"),
+                b"pcm".to_vec(),
+            ),
+        ])
+        .unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("final bundle"), "{text}");
+        assert_eq!(fs::read(&png).unwrap(), admitted);
+        assert!(artifact_serves(&rec, CheckpointFidelity::FinalLossless));
+        let leftover = fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .any(|entry| entry.file_name().to_string_lossy().contains(".partial"));
+        assert!(!leftover);
     }
 
     #[test]
