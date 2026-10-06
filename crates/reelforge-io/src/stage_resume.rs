@@ -402,8 +402,8 @@ pub fn restore_validated_prefix(
 /// Restore a prefix whose stages contain every required frontier node.
 ///
 /// `required_nodes[i]` is the node set stage `i` must have persisted. An
-/// empty entry keeps the older rule: any non-empty set of valid records.
-/// A missing required node stops the prefix even when the other files match.
+/// empty entry keeps the older rule: any non-empty set of valid records,
+/// including a final bundle. Two records for the same node do not resume.
 ///
 /// # Errors
 ///
@@ -467,9 +467,24 @@ fn stage_records_complete(
     if recs.is_empty() || recs.iter().any(|record| !artifact_serves(record, fidelity)) {
         return false;
     }
+    if duplicate_node(recs) {
+        return false;
+    }
+    if required.is_empty() {
+        return true;
+    }
     required
         .iter()
         .all(|id| recs.iter().any(|record| &record.node_id == id))
+}
+
+/// Two artifacts for one node have no chosen survivor.
+fn duplicate_node(recs: &[&StageArtifactRecord]) -> bool {
+    recs.iter().enumerate().any(|(index, record)| {
+        recs[..index]
+            .iter()
+            .any(|earlier| earlier.node_id == record.node_id)
+    })
 }
 
 fn restore_one(plan: &mut StageResumePlan, rec: &StageArtifactRecord) -> Result<()> {
@@ -1299,6 +1314,44 @@ mod tests {
         .unwrap();
         assert_eq!(plan.start_stage, 0);
         assert!(plan.restored_video.is_empty());
+    }
+
+    #[test]
+    fn duplicate_node_records_do_not_resume() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = sealed_record(dir.path(), "first.mp4", "same", 0, "fp0");
+        let second = sealed_record(dir.path(), "second.mp4", "same", 0, "fp0");
+        let later = sealed_record(dir.path(), "later.mp4", "later", 1, "fp1");
+        let plan = restore_validated_prefix_members(
+            &[first, second, later],
+            &["fp0".into(), "fp1".into()],
+            &[vec!["same".into()], vec!["later".into()]],
+        )
+        .unwrap();
+        assert_eq!(plan.start_stage, 0);
+        assert!(plan.restored_video.is_empty());
+    }
+
+    #[test]
+    fn empty_frontier_accepts_one_valid_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let record = sealed_record(dir.path(), "only.mp4", "only", 0, "fp0");
+        assert!(stage_records_complete(
+            &[&record],
+            &[],
+            CheckpointFidelity::PreviewLossy,
+        ));
+        let other = sealed_record(dir.path(), "other.mp4", "other", 0, "fp0");
+        assert!(stage_records_complete(
+            &[&record, &other],
+            &["only".into(), "other".into()],
+            CheckpointFidelity::PreviewLossy,
+        ));
+        assert!(!stage_records_complete(
+            &[&record, &other],
+            &["missing".into()],
+            CheckpointFidelity::PreviewLossy,
+        ));
     }
 
     fn write_sidecar(video: &Path, body: impl AsRef<[u8]>) -> StageArtifactRecord {
