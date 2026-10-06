@@ -221,18 +221,38 @@ pub fn artifact_is_valid(rec: &StageArtifactRecord) -> bool {
 /// A legacy record or a CRF 30 sidecar resumes only a preview. An intact final
 /// bundle resumes a preview or a final render. A final sidecar whose component
 /// hash does not match resumes neither. The bundle stub itself cannot be the
-/// picture.
+/// picture. A sidecar newer than this crate, or a sealed sidecar whose version
+/// is not the current one, resumes neither. A missing version stays a legacy
+/// preview only when the record itself has no sidecar hash.
 #[must_use]
 pub fn artifact_serves(rec: &StageArtifactRecord, required: CheckpointFidelity) -> bool {
     if !preview_bytes_match(rec) {
         return false;
     }
-    match read_sidecar(Path::new(&rec.uri)) {
-        Ok(Some(side)) if side.fidelity == CheckpointFidelity::FinalLossless => {
-            final_components_match(Path::new(&rec.uri), &side)
-        }
-        _ => required == CheckpointFidelity::PreviewLossy,
+    let Ok(parsed) = read_sidecar(Path::new(&rec.uri)) else {
+        return false;
+    };
+    let Some(side) = parsed else {
+        return rec.sidecar_fingerprint.is_none() && required == CheckpointFidelity::PreviewLossy;
+    };
+    if !sidecar_version_serves(rec, side.version) {
+        return false;
     }
+    if side.fidelity == CheckpointFidelity::FinalLossless {
+        return side.version == STAGE_MEDIA_SIDECAR_VERSION
+            && final_components_match(Path::new(&rec.uri), &side);
+    }
+    required == CheckpointFidelity::PreviewLossy
+}
+
+fn sidecar_version_serves(rec: &StageArtifactRecord, version: u32) -> bool {
+    if version > STAGE_MEDIA_SIDECAR_VERSION {
+        return false;
+    }
+    if rec.sidecar_fingerprint.is_some() {
+        return version == STAGE_MEDIA_SIDECAR_VERSION;
+    }
+    true
 }
 
 fn preview_bytes_match(rec: &StageArtifactRecord) -> bool {
@@ -1554,5 +1574,45 @@ mod tests {
             assert_eq!(plan.start_stage, 0);
             assert!(plan.restored_video.is_empty());
         }
+    }
+
+    #[test]
+    fn future_sidecar_version_does_not_resume() {
+        let dir = tempfile::tempdir().unwrap();
+        let video = dir.path().join("stage.mp4");
+        let rec = write_sidecar(
+            &video,
+            br#"{"version":2,"fidelity":"preview_lossy","encode":{"fps":5.0}}"#,
+        );
+        assert!(!artifact_serves(&rec, CheckpointFidelity::PreviewLossy));
+        assert!(!artifact_serves(&rec, CheckpointFidelity::FinalLossless));
+        let plan = restore_validated_prefix_for(
+            std::slice::from_ref(&rec),
+            &["fp0".into()],
+            &[],
+            CheckpointFidelity::PreviewLossy,
+        )
+        .unwrap();
+        assert_eq!(plan.start_stage, 0);
+        assert!(plan.restored_video.is_empty());
+    }
+
+    #[test]
+    fn sealed_sidecar_without_version_is_not_legacy() {
+        let dir = tempfile::tempdir().unwrap();
+        let video = dir.path().join("stage.mp4");
+        fs::write(&video, b"preview-mp4").unwrap();
+        let side = sidecar_path(&video);
+        fs::write(&side, br#"{"encode":{"fps":5.0}}"#).unwrap();
+        let sealed = StageArtifactRecord::new(0, "fp0", "n0", video.to_string_lossy())
+            .with_file_fingerprint(fingerprint_file(&video).unwrap())
+            .with_sidecar_fingerprint(fingerprint_file(&side).unwrap());
+        assert!(!artifact_serves(&sealed, CheckpointFidelity::PreviewLossy));
+        assert!(!artifact_serves(&sealed, CheckpointFidelity::FinalLossless));
+
+        let legacy = StageArtifactRecord::new(0, "fp0", "n0", video.to_string_lossy())
+            .with_file_fingerprint(fingerprint_file(&video).unwrap());
+        assert!(artifact_serves(&legacy, CheckpointFidelity::PreviewLossy));
+        assert!(!artifact_serves(&legacy, CheckpointFidelity::FinalLossless));
     }
 }
