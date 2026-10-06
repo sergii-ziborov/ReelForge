@@ -9,7 +9,7 @@ use crate::graph_run::{
 use crate::job::{JobOutputRecord, JobState, RenderJob};
 use crate::job_store::JobStore;
 use crate::manifest_seal::fingerprint_file;
-use crate::stage_resume::{StageCommit, restore_validated_prefix_for};
+use crate::stage_resume::{CheckpointFidelity, StageCommit, restore_validated_prefix_for};
 use reelforge_render_graph::{ArtifactManifest, ExecutionPlan, RenderGraph, schedule_graph};
 use std::fs;
 use std::path::Path;
@@ -39,7 +39,9 @@ pub fn submit_render_job(
     Ok(job)
 }
 
-/// Execute or resume `job`. A `Done` job with the same fingerprint is a no-op.
+/// Execute or resume `job`. A `Done` preview job with the same fingerprint and
+/// a ready output is a no-op. A final job whose output manifest is empty, or
+/// does not name every graph output, is recomputed.
 ///
 /// Cancel (`IoError::Cancelled`) persists [`JobState::Paused`]. Other errors
 /// persist [`JobState::Failed`]. Success persists [`JobState::Done`].
@@ -64,7 +66,7 @@ pub fn run_render_job(
     let fp = execution_cache_key(graph, &plan, options)?;
     if job.state == JobState::Done
         && job.run_fingerprint.as_deref() == Some(fp.as_str())
-        && outputs_ready(job, graph)
+        && outputs_ready(job, graph, options.checkpoint_fidelity)
     {
         return already_done_manifest(graph, &plan);
     }
@@ -215,10 +217,12 @@ fn output_ready(job: &RenderJob) -> bool {
 }
 
 /// Jobs sealed with [`JobOutputRecord`] must match every declared output.
-/// Older Done jobs, which have an empty manifest, keep the single-file check.
-fn outputs_ready(job: &RenderJob, graph: &RenderGraph) -> bool {
+/// Older Done jobs, which have an empty manifest, keep the single-file check
+/// for a preview. A final run does not treat that empty manifest as done, and
+/// its sealed records must name every graph output once.
+fn outputs_ready(job: &RenderJob, graph: &RenderGraph, fidelity: CheckpointFidelity) -> bool {
     if job.outputs.is_empty() {
-        return output_ready(job);
+        return fidelity != CheckpointFidelity::FinalLossless && output_ready(job);
     }
     let declared: Vec<&str> = graph
         .outputs
@@ -226,12 +230,37 @@ fn outputs_ready(job: &RenderJob, graph: &RenderGraph) -> bool {
         .filter_map(|output| output.uri.as_deref())
         .collect();
     if declared.is_empty() {
-        return output_ready(job);
+        return fidelity != CheckpointFidelity::FinalLossless && output_ready(job);
     }
-    declared.iter().all(|uri| {
+    let files_match = declared.iter().all(|uri| {
         job.outputs.iter().any(|record| {
             record.uri == *uri && sealed_file_matches(&record.uri, &record.file_fingerprint)
         })
+    });
+    if !files_match {
+        return false;
+    }
+    fidelity != CheckpointFidelity::FinalLossless || final_output_membership(job, graph)
+}
+
+/// Every graph output has one sealed record with its name and uri.
+fn final_output_membership(job: &RenderJob, graph: &RenderGraph) -> bool {
+    if job.outputs.len() != graph.outputs.len() {
+        return false;
+    }
+    graph.outputs.iter().all(|output| {
+        let Some(uri) = output.uri.as_deref() else {
+            return false;
+        };
+        job.outputs
+            .iter()
+            .filter(|record| {
+                record.name == output.name
+                    && record.uri == uri
+                    && sealed_file_matches(uri, &record.file_fingerprint)
+            })
+            .count()
+            == 1
     })
 }
 
@@ -408,6 +437,115 @@ mod tests {
         assert!(!matches!(err, IoError::Cancelled), "{err}");
         assert_eq!(std::fs::read(&primary).unwrap(), b"broken");
         assert!(!secondary.is_file());
+        assert_ne!(store.load(&job.id).unwrap().state, JobState::Done);
+    }
+
+    #[test]
+    fn strict_final_does_not_shortcut_an_empty_output_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("out.mp4");
+        std::fs::write(&out, b"legacy-primary").unwrap();
+        let store = JobStore::open(dir.path().join("jobs")).unwrap();
+        let mut graph = tiny_graph();
+        graph.outputs[0].uri = Some(out.to_string_lossy().into());
+        let opts = GraphRunOptions::default()
+            .with_checkpoint_fidelity(crate::CheckpointFidelity::FinalLossless);
+        let mut job = submit_render_job(&store, &graph, &opts).unwrap();
+        job.state = JobState::Done;
+        job.output_uri = graph.outputs[0].uri.clone();
+        assert!(job.outputs.is_empty());
+        store.save(&job).unwrap();
+
+        let err =
+            run_render_job(&store, &mut job, &graph, &WriteControl::default(), &opts).unwrap_err();
+        assert!(!matches!(err, IoError::Cancelled), "{err}");
+        assert_eq!(std::fs::read(&out).unwrap(), b"legacy-primary");
+        assert_ne!(store.load(&job.id).unwrap().state, JobState::Done);
+    }
+
+    #[test]
+    fn strict_final_keeps_a_sealed_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let primary = dir.path().join("primary.mp4");
+        let secondary = dir.path().join("secondary.mp4");
+        std::fs::write(&primary, b"primary-bytes").unwrap();
+        std::fs::write(&secondary, b"secondary-bytes").unwrap();
+        let store = JobStore::open(dir.path().join("jobs")).unwrap();
+        let graph = two_output_graph(&primary, &secondary);
+        let opts = GraphRunOptions::default()
+            .with_checkpoint_fidelity(crate::CheckpointFidelity::FinalLossless);
+        let mut job = submit_render_job(&store, &graph, &opts).unwrap();
+        job.state = JobState::Done;
+        job.output_uri = Some(primary.to_string_lossy().into());
+        job.outputs = vec![
+            crate::JobOutputRecord {
+                name: "main".into(),
+                uri: primary.to_string_lossy().into(),
+                file_fingerprint: crate::fingerprint_file(&primary).unwrap(),
+            },
+            crate::JobOutputRecord {
+                name: "alt".into(),
+                uri: secondary.to_string_lossy().into(),
+                file_fingerprint: crate::fingerprint_file(&secondary).unwrap(),
+            },
+        ];
+        store.save(&job).unwrap();
+        let manifest =
+            run_render_job(&store, &mut job, &graph, &WriteControl::default(), &opts).unwrap();
+        assert!(!manifest.outputs.is_empty());
+        assert_eq!(store.load(&job.id).unwrap().state, JobState::Done);
+        assert_eq!(std::fs::read(&primary).unwrap(), b"primary-bytes");
+        assert_eq!(std::fs::read(&secondary).unwrap(), b"secondary-bytes");
+    }
+
+    #[test]
+    fn strict_final_rejects_a_manifest_that_renames_an_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let primary = dir.path().join("primary.mp4");
+        let secondary = dir.path().join("secondary.mp4");
+        std::fs::write(&primary, b"primary-bytes").unwrap();
+        std::fs::write(&secondary, b"secondary-bytes").unwrap();
+        let store = JobStore::open(dir.path().join("jobs")).unwrap();
+        let graph = two_output_graph(&primary, &secondary);
+        let preview = GraphRunOptions::default();
+        let mut job = submit_render_job(&store, &graph, &preview).unwrap();
+        job.state = JobState::Done;
+        job.output_uri = Some(primary.to_string_lossy().into());
+        job.outputs = vec![
+            crate::JobOutputRecord {
+                name: "main".into(),
+                uri: primary.to_string_lossy().into(),
+                file_fingerprint: crate::fingerprint_file(&primary).unwrap(),
+            },
+            crate::JobOutputRecord {
+                name: "other".into(),
+                uri: secondary.to_string_lossy().into(),
+                file_fingerprint: crate::fingerprint_file(&secondary).unwrap(),
+            },
+        ];
+        store.save(&job).unwrap();
+        let manifest =
+            run_render_job(&store, &mut job, &graph, &WriteControl::default(), &preview).unwrap();
+        assert!(!manifest.outputs.is_empty());
+        assert_eq!(store.load(&job.id).unwrap().state, JobState::Done);
+
+        let final_run = preview.with_checkpoint_fidelity(crate::CheckpointFidelity::FinalLossless);
+        job.run_fingerprint = submit_render_job(&store, &graph, &final_run)
+            .unwrap()
+            .run_fingerprint;
+        job.state = JobState::Done;
+        store.save(&job).unwrap();
+        let err = run_render_job(
+            &store,
+            &mut job,
+            &graph,
+            &WriteControl::default(),
+            &final_run,
+        )
+        .unwrap_err();
+        assert!(!matches!(err, IoError::Cancelled), "{err}");
+        assert_eq!(std::fs::read(&primary).unwrap(), b"primary-bytes");
+        assert_eq!(std::fs::read(&secondary).unwrap(), b"secondary-bytes");
         assert_ne!(store.load(&job.id).unwrap().state, JobState::Done);
     }
 
