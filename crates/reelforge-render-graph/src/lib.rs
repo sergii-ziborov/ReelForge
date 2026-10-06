@@ -39,7 +39,7 @@ mod schedule;
 mod stage;
 mod track;
 
-pub use animated::{Animated, Easing, Keyframe};
+pub use animated::{Animated, CurveFault, Easing, Keyframe};
 pub use artifact::{
     ARTIFACT_MANIFEST_VERSION, ArtifactKind, ArtifactManifest, ArtifactRef, StageArtifacts,
     artifact_manifest,

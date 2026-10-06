@@ -270,12 +270,12 @@ fn apply_compose_layers(
         if let Some(arr) = layer_params
             && let Some(lp) = arr.get(i)
         {
-            let x = lp.get("x").and_then(serde_json::Value::as_i64).unwrap_or(0);
-            let y = lp.get("y").and_then(serde_json::Value::as_i64).unwrap_or(0);
-            #[allow(clippy::cast_possible_truncation)]
-            {
-                layer = layer.with_position(Position::absolute(x as i32, y as i32));
+            if lp.get("warp").is_some() {
+                return Err(IoError::message(
+                    "compose refuses warp; it is not a layer translate",
+                ));
             }
+            layer = apply_layer_motion(layer, lp)?;
             if let Some(value) = lp.get("opacity") {
                 layer = apply_layer_opacity(layer, value)?;
             }
@@ -317,6 +317,11 @@ fn apply_layer_opacity(layer: CompositeLayer, value: &serde_json::Value) -> Resu
     }
     let animated: Animated<f32> = serde_json::from_value(value.clone())
         .map_err(|err| IoError::message(format!("unknown opacity parameter: {err}")))?;
+    if let Some(fault) = animated.curve_fault() {
+        return Err(IoError::message(format!(
+            "compose refuses opacity keyframes: {fault}"
+        )));
+    }
     Ok(layer.with_opacity_at(Arc::new(move |time: Time| {
         let sampled = match MediaTime::from_secs(time.as_secs(), MediaTime::HZ_1M) {
             Ok(mt) => animated.sample_f32(mt),
@@ -324,6 +329,87 @@ fn apply_layer_opacity(layer: CompositeLayer, value: &serde_json::Value) -> Resu
         };
         sampled.clamp(0.0, 1.0)
     })))
+}
+
+fn apply_layer_motion(layer: CompositeLayer, lp: &serde_json::Value) -> Result<CompositeLayer> {
+    let x = axis_curve(lp.get("x"), "x")?;
+    let y = axis_curve(lp.get("y"), "y")?;
+    let scale = match lp.get("scale") {
+        Some(value) => Some(axis_curve(Some(value), "scale")?),
+        None => None,
+    };
+    let moves = curve_is_animated(&x) || curve_is_animated(&y);
+    let mut layer = if moves {
+        layer.with_position_at(Arc::new(move |time: Time| {
+            (
+                pixel_coord(sample_axis(&x, time)),
+                pixel_coord(sample_axis(&y, time)),
+            )
+        }))
+    } else {
+        layer.with_position(Position::absolute(
+            pixel_coord(sample_axis(&x, Time::ZERO)),
+            pixel_coord(sample_axis(&y, Time::ZERO)),
+        ))
+    };
+    if let Some(scale) = scale {
+        layer = layer.with_scale_at(Arc::new(move |time: Time| sample_axis(&scale, time)));
+    }
+    Ok(layer)
+}
+
+fn curve_is_animated(curve: &Animated<f32>) -> bool {
+    matches!(curve, Animated::Keyframes { .. })
+}
+
+fn axis_curve(value: Option<&serde_json::Value>, name: &str) -> Result<Animated<f32>> {
+    let Some(value) = value else {
+        return Ok(Animated::constant(0.0));
+    };
+    let animated = if let Some(number) = value.as_f64() {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+        Animated::constant(number as f32)
+    } else {
+        serde_json::from_value(value.clone()).map_err(|err| {
+            IoError::message(format!("compose refuses an unreadable {name}: {err}"))
+        })?
+    };
+    if let Some(fault) = animated.curve_fault() {
+        return Err(IoError::message(format!(
+            "compose refuses {name} keyframes: {fault}"
+        )));
+    }
+    if name == "scale" {
+        let values = match &animated {
+            Animated::Constant { value } => vec![*value],
+            Animated::Keyframes { keys } => keys.iter().map(|key| key.value).collect(),
+        };
+        if values
+            .iter()
+            .any(|value| !value.is_finite() || *value <= 0.0)
+        {
+            return Err(IoError::message("compose refuses a non-positive scale"));
+        }
+    }
+    Ok(animated)
+}
+
+fn sample_axis(curve: &Animated<f32>, time: Time) -> f32 {
+    let Ok(mt) = MediaTime::from_secs(time.as_secs(), MediaTime::HZ_1M) else {
+        return f32::NAN;
+    };
+    curve.try_sample_f32(mt).unwrap_or(f32::NAN)
+}
+
+fn pixel_coord(value: f32) -> i32 {
+    if !value.is_finite() {
+        return 0;
+    }
+    let rounded = value.round().clamp(-16_384.0, 16_384.0);
+    #[allow(clippy::cast_possible_truncation)]
+    {
+        rounded as i32
+    }
 }
 
 fn finish_composite(video: CompositeVideo, span: Option<MediaTime>) -> Arc<dyn VideoClip> {
@@ -657,6 +743,7 @@ fn apply_subtitle_burn(
 mod tests {
     use super::*;
     use reelforge_core::{ColorClip, Duration, Rgb8, Size, Time, VideoClip};
+    use reelforge_render_graph::Keyframe;
 
     #[test]
     fn timeline_concat_plays_end_to_end() {
@@ -741,7 +828,6 @@ mod tests {
 
     #[test]
     fn opacity_keyframes_change_the_frame_and_seek_repeats() {
-        use reelforge_render_graph::Keyframe;
         let white = Arc::new(ColorClip::new(
             Size::new(1, 1),
             Rgb8::new(255, 255, 255),
@@ -778,5 +864,100 @@ mod tests {
             panic!("unknown opacity was accepted");
         };
         assert!(err.to_string().contains("unknown opacity"));
+
+        let unsorted = Animated::keyframes(vec![
+            Keyframe::new(MediaTime::new(1, 1).unwrap(), 1.0),
+            Keyframe::new(MediaTime::new(0, 1).unwrap(), 0.0),
+        ]);
+        let Err(err) = apply_compose_layers(
+            vec![Arc::new(ColorClip::new(
+                Size::new(1, 1),
+                Rgb8::new(255, 255, 255),
+                Duration::from_secs(1.0),
+            ))],
+            Some(1),
+            Some(1),
+            &serde_json::json!([{ "opacity": unsorted }]),
+            None,
+            None,
+        ) else {
+            panic!("unsorted opacity keyframes were accepted");
+        };
+        let text = err.to_string();
+        assert!(text.contains("refuses"), "{text}");
+        assert!(text.contains("not strictly increasing"), "{text}");
+    }
+
+    #[test]
+    fn position_and_scale_keyframes_change_pixels() {
+        let white = Arc::new(ColorClip::new(
+            Size::new(1, 1),
+            Rgb8::new(255, 255, 255),
+            Duration::from_secs(2.0),
+        ));
+        let x = Animated::keyframes(vec![
+            Keyframe::new(MediaTime::new(0, 1).unwrap(), 0.0),
+            Keyframe::new(MediaTime::new(1, 1).unwrap(), 2.0),
+        ]);
+        let moved = apply_compose_layers(
+            vec![white],
+            Some(3),
+            Some(1),
+            &serde_json::json!([{ "x": x, "y": 0 }]),
+            Some(&serde_json::json!({ "r": 0, "g": 0, "b": 0 })),
+            None,
+        )
+        .unwrap();
+        let pixel =
+            |t: f64, index: usize| moved.frame_at(Time::from_secs(t)).unwrap().data()[index * 3];
+        assert_eq!(pixel(0.0, 0), 255);
+        assert_eq!(pixel(0.0, 2), 0);
+        assert_eq!(pixel(0.5, 1), 255);
+        assert_eq!(pixel(0.5, 0), 0);
+        assert_eq!(pixel(1.0, 2), 255);
+        assert_eq!(pixel(1.0, 0), 0);
+
+        let block = Arc::new(ColorClip::new(
+            Size::new(1, 1),
+            Rgb8::new(255, 0, 0),
+            Duration::from_secs(2.0),
+        ));
+        let scale = Animated::keyframes(vec![
+            Keyframe::new(MediaTime::new(0, 1).unwrap(), 1.0),
+            Keyframe::new(MediaTime::new(1, 1).unwrap(), 2.0),
+        ]);
+        let grown = apply_compose_layers(
+            vec![block],
+            Some(2),
+            Some(2),
+            &serde_json::json!([{ "scale": scale }]),
+            Some(&serde_json::json!({ "r": 0, "g": 0, "b": 0 })),
+            None,
+        )
+        .unwrap();
+        let red_at = |t: f64, x: usize, y: usize| {
+            let frame = grown.frame_at(Time::from_secs(t)).unwrap();
+            frame.data()[(y * 2 + x) * 3]
+        };
+        assert_eq!(red_at(0.0, 0, 0), 255);
+        assert_eq!(red_at(0.0, 1, 0), 0);
+        assert_eq!(red_at(1.0, 0, 0), 255);
+        assert_eq!(red_at(1.0, 1, 1), 255);
+
+        let Err(err) = apply_compose_layers(
+            vec![Arc::new(ColorClip::new(
+                Size::new(1, 1),
+                Rgb8::new(255, 255, 255),
+                Duration::from_secs(1.0),
+            ))],
+            Some(1),
+            Some(1),
+            &serde_json::json!([{ "warp": { "kind": "keyframes", "keys": [] } }]),
+            None,
+            None,
+        ) else {
+            panic!("warp was accepted as a layer translate");
+        };
+        assert!(err.to_string().contains("refuses warp"), "{err}");
     }
 }

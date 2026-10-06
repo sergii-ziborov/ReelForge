@@ -205,9 +205,24 @@ impl CompositeVideo {
                 continue;
             }
             let local = layer.local_time(t);
-            let frame = layer.clip.frame_at(local)?;
+            let mut frame = layer.clip.frame_at(local)?;
             let mask = layer.clip.mask_at(local)?;
-            let (ox, oy) = layer.position.resolve(self.size, frame.size());
+            if let Some(sample) = &layer.scale_at {
+                let factor = sample(t);
+                if (factor - 1.0).abs() > 1.0e-4 {
+                    if mask.is_some() {
+                        return Err(CoreError::invalid_frame(
+                            "composite refuses to scale a masked layer",
+                        ));
+                    }
+                    frame = nearest_scale(&frame, factor)?;
+                }
+            }
+            let (ox, oy) = if let Some(sample) = &layer.position_at {
+                sample(t)
+            } else {
+                layer.position.resolve(self.size, frame.size())
+            };
             let opacity = layer
                 .opacity_at
                 .as_ref()
@@ -221,6 +236,62 @@ impl CompositeVideo {
         }
         Ok(())
     }
+}
+
+#[allow(clippy::similar_names)] // source and destination width/height
+fn nearest_scale(src: &Frame, factor: f32) -> reelforge_core::Result<Frame> {
+    if !factor.is_finite() || factor <= 0.0 {
+        return Err(CoreError::invalid_frame(
+            "composite refuses a non-positive scale",
+        ));
+    }
+    let src_w = src.size().width;
+    let src_h = src.size().height;
+    let dst_w = scaled_dim(src_w, factor)?;
+    let dst_h = scaled_dim(src_h, factor)?;
+    if dst_w == src_w && dst_h == src_h {
+        return Ok(src.clone());
+    }
+    let bpp = src.format().bytes_per_pixel();
+    let src_w_us = usize::try_from(src_w)
+        .map_err(|_| CoreError::invalid_frame("composite refuses an oversized scale"))?;
+    let dst_w_us = usize::try_from(dst_w)
+        .map_err(|_| CoreError::invalid_frame("composite refuses an oversized scale"))?;
+    let dst_h_us = usize::try_from(dst_h)
+        .map_err(|_| CoreError::invalid_frame("composite refuses an oversized scale"))?;
+    let dst_len = dst_w_us
+        .checked_mul(dst_h_us)
+        .and_then(|pixels| pixels.checked_mul(bpp))
+        .ok_or_else(|| CoreError::invalid_frame("composite refuses an oversized scale"))?;
+    let src_data = src.data();
+    let mut dst = vec![0_u8; dst_len];
+    for y in 0..dst_h {
+        let sy = usize::try_from((u64::from(y) * u64::from(src_h)) / u64::from(dst_h))
+            .map_err(|_| CoreError::invalid_frame("composite refuses an oversized scale"))?;
+        let y_us = usize::try_from(y)
+            .map_err(|_| CoreError::invalid_frame("composite refuses an oversized scale"))?;
+        for x in 0..dst_w {
+            let sx = usize::try_from((u64::from(x) * u64::from(src_w)) / u64::from(dst_w))
+                .map_err(|_| CoreError::invalid_frame("composite refuses an oversized scale"))?;
+            let x_us = usize::try_from(x)
+                .map_err(|_| CoreError::invalid_frame("composite refuses an oversized scale"))?;
+            let from = (sy * src_w_us + sx) * bpp;
+            let to = (y_us * dst_w_us + x_us) * bpp;
+            dst[to..to + bpp].copy_from_slice(&src_data[from..from + bpp]);
+        }
+    }
+    Frame::from_raw(Size::new(dst_w, dst_h), src.format(), dst)?.with_alpha_mode(src.alpha_mode())
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn scaled_dim(src: u32, factor: f32) -> reelforge_core::Result<u32> {
+    let wide = f64::from(src) * f64::from(factor);
+    if !wide.is_finite() || !(1.0..=4096.0).contains(&wide) {
+        return Err(CoreError::invalid_frame(
+            "composite refuses a scale outside 1..=4096 pixels",
+        ));
+    }
+    Ok(wide.round() as u32)
 }
 
 /// Compose layers onto a canvas; returns a trait object.

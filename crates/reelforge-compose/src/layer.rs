@@ -18,6 +18,11 @@ pub struct CompositeLayer {
     pub opacity: f32,
     /// Sampled opacity at composite time. When set, it replaces [`Self::opacity`].
     pub opacity_at: Option<Arc<dyn Fn(Time) -> f32 + Send + Sync>>,
+    /// Sampled canvas origin. When set, it replaces [`Self::position`].
+    #[allow(clippy::type_complexity)]
+    pub position_at: Option<Arc<dyn Fn(Time) -> (i32, i32) + Send + Sync>>,
+    /// Nearest-neighbor scale about the layer origin. `None` keeps the source size.
+    pub scale_at: Option<Arc<dyn Fn(Time) -> f32 + Send + Sync>>,
 }
 
 impl CompositeLayer {
@@ -31,6 +36,8 @@ impl CompositeLayer {
             layer_index: 0,
             opacity: 1.0,
             opacity_at: None,
+            position_at: None,
+            scale_at: None,
         }
     }
 
@@ -38,6 +45,25 @@ impl CompositeLayer {
     #[must_use]
     pub fn with_position(mut self, position: Position) -> Self {
         self.position = position;
+        self.position_at = None;
+        self
+    }
+
+    /// Sample the canvas origin from composite time.
+    #[must_use]
+    #[allow(clippy::type_complexity)]
+    pub fn with_position_at(
+        mut self,
+        sample: Arc<dyn Fn(Time) -> (i32, i32) + Send + Sync>,
+    ) -> Self {
+        self.position_at = Some(sample);
+        self
+    }
+
+    /// Sample a nearest-neighbor scale from composite time.
+    #[must_use]
+    pub fn with_scale_at(mut self, sample: Arc<dyn Fn(Time) -> f32 + Send + Sync>) -> Self {
+        self.scale_at = Some(sample);
         self
     }
 
