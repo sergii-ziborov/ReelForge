@@ -14,6 +14,9 @@ impl CompileCtx<'_> {
         track: usize,
         picture: bool,
     ) -> Result<(NodeId, MediaTime)> {
+        // These ops rewrite the picture and leave the samples alone. On an
+        // audio track the timeline would still move, so refuse them here.
+        refuse_picture_only(clip, picture)?;
         let media = self.lookup_media(&clip.media)?;
         let asset_key = format!("m_{}", media.id.as_str());
         let asset = MediaAsset {
@@ -153,6 +156,37 @@ impl CompileCtx<'_> {
             }
         }
     }
+}
+
+fn refuse_picture_only(clip: &TimelineClip, picture: bool) -> Result<()> {
+    if picture {
+        return Ok(());
+    }
+    let id = clip.id.as_str();
+    match &clip.retiming {
+        Retiming::Freeze { .. } => {
+            return Err(ProjectError::message(format!(
+                "clip {id}: freeze is a picture retime; an audio track cannot use it"
+            )));
+        }
+        Retiming::Loop { .. } => {
+            return Err(ProjectError::message(format!(
+                "clip {id}: loop is a picture retime; an audio track cannot use it"
+            )));
+        }
+        Retiming::Identity | Retiming::Speed { .. } => {}
+    }
+    if clip.crop.is_some() {
+        return Err(ProjectError::message(format!(
+            "clip {id}: crop is a picture transform; an audio track cannot use it"
+        )));
+    }
+    if clip.scale_to.is_some() {
+        return Err(ProjectError::message(format!(
+            "clip {id}: scale is a picture transform; an audio track cannot use it"
+        )));
+    }
+    Ok(())
 }
 
 pub(crate) fn media_time_json(t: MediaTime) -> serde_json::Value {

@@ -2,10 +2,10 @@
 
 use reelforge_core::MediaTime;
 use reelforge_project::{
-    CAPTURE_PROJECT_VERSION, CaptureProject, Gap, MediaRef, MediaRefId, Metadata, NestedSequence,
-    ProjectId, Retiming, SemanticRef, Sequence, SequenceId, SourceRange, TimelineClip,
-    TimelineClipId, TimelineItem, TimelineTrack, TimelineTrackId, TrackKind, Transition,
-    TransitionKind, compile_project,
+    CAPTURE_PROJECT_VERSION, CaptureProject, CropRect, Gap, MediaRef, MediaRefId, Metadata,
+    NestedSequence, ProjectId, Retiming, SemanticRef, Sequence, SequenceId, SourceRange,
+    TimelineClip, TimelineClipId, TimelineItem, TimelineTrack, TimelineTrackId, TrackKind,
+    Transition, TransitionKind, compile_project,
 };
 use reelforge_render_graph::RenderNodeKind;
 
@@ -309,6 +309,92 @@ fn audio_track_mixes() {
     let names = ops(&out.graph);
     assert!(names.contains(&"rf.audio.drop"));
     assert!(names.contains(&"rf.audio.mix"));
+}
+
+fn project_with_audio_clip(mutate: impl FnOnce(&mut TimelineClip)) -> CaptureProject {
+    let mut p = CaptureProject::new(ProjectId::new("p"), "av");
+    p.media.push(media("a", "a.mp4"));
+    let mut seq = Sequence::new(SequenceId::new("s"), "main");
+    let mut video = TimelineTrack::new(TimelineTrackId::new("v0"), TrackKind::Video);
+    video.items.push(clip("pic", "a", 0.0, 2.0));
+    let mut audio = TimelineTrack::new(TimelineTrackId::new("a0"), TrackKind::Audio);
+    let TimelineItem::Clip(mut sound) = clip("snd", "a", 0.0, 2.0) else {
+        panic!("clip");
+    };
+    mutate(&mut sound);
+    audio.items.push(TimelineItem::Clip(sound));
+    seq.tracks.push(video);
+    seq.tracks.push(audio);
+    p.sequences.push(seq);
+    p
+}
+
+#[test]
+fn audio_track_keeps_speed() {
+    let out = compile_project(&project_with_audio_clip(|sound| {
+        sound.retiming = Retiming::Speed { factor: 2.0 };
+    }))
+    .unwrap();
+    let names = ops(&out.graph);
+    assert!(names.contains(&"rf.transform.speed"), "{names:?}");
+    assert!(names.contains(&"rf.audio.mix"), "{names:?}");
+    assert!(!names.contains(&"rf.transform.freeze"), "{names:?}");
+    out.graph.validate().unwrap();
+}
+
+#[test]
+fn audio_track_refuses_picture_only_retime() {
+    let freeze = compile_project(&project_with_audio_clip(|sound| {
+        sound.retiming = Retiming::Freeze {
+            at: MediaTime::from_secs(0.5, 1_000).unwrap(),
+            hold: MediaTime::from_secs(1.0, 1_000).unwrap(),
+        };
+    }))
+    .unwrap_err()
+    .to_string();
+    assert!(
+        freeze.contains("clip snd: freeze is a picture retime"),
+        "{freeze}"
+    );
+    assert!(freeze.contains("audio track"), "{freeze}");
+
+    let looped = compile_project(&project_with_audio_clip(|sound| {
+        sound.retiming = Retiming::Loop {
+            duration: None,
+            times: Some(3),
+        };
+    }))
+    .unwrap_err()
+    .to_string();
+    assert!(
+        looped.contains("clip snd: loop is a picture retime"),
+        "{looped}"
+    );
+
+    let cropped = compile_project(&project_with_audio_clip(|sound| {
+        sound.crop = Some(CropRect {
+            x: 0,
+            y: 0,
+            w: 8,
+            h: 8,
+        });
+    }))
+    .unwrap_err()
+    .to_string();
+    assert!(
+        cropped.contains("clip snd: crop is a picture transform"),
+        "{cropped}"
+    );
+
+    let scaled = compile_project(&project_with_audio_clip(|sound| {
+        sound.scale_to = Some((16, 16));
+    }))
+    .unwrap_err()
+    .to_string();
+    assert!(
+        scaled.contains("clip snd: scale is a picture transform"),
+        "{scaled}"
+    );
 }
 
 #[test]
