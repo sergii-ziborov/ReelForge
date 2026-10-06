@@ -73,6 +73,14 @@ enum Commands {
         #[arg(long)]
         out: Option<String>,
     },
+    /// Compile a `CaptureProject` JSON file into a render graph.
+    Project {
+        /// Path to `CaptureProject` JSON.
+        path: String,
+        /// Print the compiled `RenderGraph` JSON instead of the schedule.
+        #[arg(long)]
+        graph: bool,
+    },
     /// Inspect / run a JSON `RenderGraph` (Host / Intelligence encode path).
     Graph {
         /// Path to `RenderGraph` JSON.
@@ -143,6 +151,7 @@ fn run(cli: Cli) -> Result<(), String> {
             };
             commands::plan::run(&path, mode, out.as_deref())
         }
+        Commands::Project { path, graph } => commands::project::run(&path, graph),
         Commands::Graph {
             path,
             explain,
