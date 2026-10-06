@@ -14,8 +14,9 @@ impl CompileCtx<'_> {
         track: usize,
         picture: bool,
     ) -> Result<(NodeId, MediaTime)> {
-        // These ops rewrite the picture and leave the samples alone. On an
-        // audio track the timeline would still move, so refuse them here.
+        // These ops rewrite the picture and leave the samples alone. A wipe
+        // also rewrites the previous video layer. On an audio track the
+        // timeline would still move, so refuse them here.
         refuse_picture_only(clip, picture)?;
         let media = self.lookup_media(&clip.media)?;
         let asset_key = format!("m_{}", media.id.as_str());
@@ -184,6 +185,16 @@ fn refuse_picture_only(clip: &TimelineClip, picture: bool) -> Result<()> {
     if clip.scale_to.is_some() {
         return Err(ProjectError::message(format!(
             "clip {id}: scale is a picture transform; an audio track cannot use it"
+        )));
+    }
+    if let Some(transition) = &clip.transition_in {
+        let kind = match transition.kind {
+            TransitionKind::Fade => "fade",
+            TransitionKind::Dissolve => "dissolve",
+            TransitionKind::Wipe => "wipe",
+        };
+        return Err(ProjectError::message(format!(
+            "clip {id}: {kind} is a picture transition; an audio track cannot use it"
         )));
     }
     Ok(())

@@ -398,6 +398,34 @@ fn audio_track_refuses_picture_only_retime() {
 }
 
 #[test]
+fn audio_track_refuses_picture_transitions() {
+    for (kind, label) in [
+        (TransitionKind::Fade, "fade"),
+        (TransitionKind::Dissolve, "dissolve"),
+        (TransitionKind::Wipe, "wipe"),
+    ] {
+        let err = compile_project(&project_with_audio_clip(|sound| {
+            sound.transition_in = Some(Transition {
+                kind,
+                duration: MediaTime::from_secs(0.5, 1_000).unwrap(),
+            });
+        }))
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains(&format!(
+                "clip snd: {label} is a picture transition; an audio track cannot use it"
+            )),
+            "{err}"
+        );
+        assert!(
+            !err.contains("slide"),
+            "an audio wipe must not compile into a slide: {err}"
+        );
+    }
+}
+
+#[test]
 fn freeze_and_loop_emit_transforms() {
     let mut p = CaptureProject::new(ProjectId::new("p"), "time");
     p.media.push(media("a", "a.mp4"));
