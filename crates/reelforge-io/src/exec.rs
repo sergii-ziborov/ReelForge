@@ -19,7 +19,7 @@ use reelforge_fx::{
     BlackAndWhite, Crop, CrossFadeIn, EvenSize, FadeIn, FadeOut, Freeze, InvertColors, Loop,
     MirrorX, MirrorY, Painting, Resize, Rotate, SlideIn, SlideOut, SlideSide, Speed, VolumeGain,
 };
-use reelforge_render_graph::{Animated, CompiledOp, ExecutorKind, TypedParams};
+use reelforge_render_graph::{Animated, CompiledOp, ExecutorKind, Keyframe, TypedParams};
 use reelforge_text::{BurnInOptions, burn_in_layers, parse_subtitles_path};
 use std::sync::Arc;
 
@@ -330,13 +330,12 @@ fn apply_compose_layers(
                     "compose refuses warp; it is not a layer translate",
                 ));
             }
-            layer = apply_layer_motion(layer, lp)?;
+            let start = lp.get("start").and_then(json_as_time).unwrap_or(Time::ZERO);
+            layer = apply_layer_motion(layer, lp, start)?;
             if let Some(value) = lp.get("opacity") {
-                layer = apply_layer_opacity(layer, value)?;
+                layer = apply_layer_opacity(layer, value, start)?;
             }
-            if let Some(start) = lp.get("start").and_then(json_as_time) {
-                layer = layer.with_start(start);
-            }
+            layer = layer.with_start(start);
             if let Some(idx) = lp.get("layer_index").and_then(serde_json::Value::as_i64) {
                 #[allow(clippy::cast_possible_truncation)]
                 {
@@ -393,10 +392,14 @@ fn apply_scene_pose(
     let mut times = Vec::new();
     let mut parts = Vec::with_capacity(inputs.len());
     for (index, clip) in inputs.into_iter().enumerate() {
-        if !sources_have_fps && let Some(stored) = clip.sample_times() {
-            times.extend(stored);
-        }
         let layer = &layers[index];
+        let start = layer
+            .get("start")
+            .and_then(json_as_time)
+            .unwrap_or(Time::ZERO);
+        if !sources_have_fps && let Some(stored) = clip.sample_times() {
+            times.extend(shift_sample_times(&stored, start));
+        }
         if layer.get("warp").is_some() {
             return Err(IoError::message(
                 "compose refuses warp; it is not a layer translate",
@@ -411,20 +414,20 @@ fn apply_scene_pose(
         let parent = optional_pose_id(layer, "parent")?;
         let anchor = pose_anchor(layer)?;
         let (pivot_x, pivot_y) = pose_pivot(layer)?;
-        let x = axis_curve(layer.get("x"), "x")?;
-        let y = axis_curve(layer.get("y"), "y")?;
+        let x = on_composite_clock(axis_curve(layer.get("x"), "x")?, start)?;
+        let y = on_composite_clock(axis_curve(layer.get("y"), "y")?, start)?;
         let rotation = match layer.get("rotation") {
-            Some(value) => axis_curve(Some(value), "rotation")?,
+            Some(value) => on_composite_clock(axis_curve(Some(value), "rotation")?, start)?,
             None => Animated::constant(0.0),
         };
         let scale = match layer.get("scale") {
-            Some(value) => axis_curve(Some(value), "scale")?,
+            Some(value) => on_composite_clock(axis_curve(Some(value), "scale")?, start)?,
             None => Animated::constant(1.0),
         };
         require_finite_curve(&x, "x")?;
         require_finite_curve(&y, "y")?;
         require_finite_curve(&rotation, "rotation")?;
-        let opacity = opacity_curve(layer.get("opacity"))?;
+        let opacity = on_composite_clock(opacity_curve(layer.get("opacity"))?, start)?;
         if !sources_have_fps {
             push_key_times(&x, &mut times);
             push_key_times(&y, &mut times);
@@ -437,10 +440,6 @@ fn apply_scene_pose(
             .and_then(serde_json::Value::as_i64)
             .and_then(|value| i32::try_from(value).ok())
             .unwrap_or_else(|| i32::try_from(index).unwrap_or(i32::MAX));
-        let start = layer
-            .get("start")
-            .and_then(json_as_time)
-            .unwrap_or(Time::ZERO);
         let mut pose = ScenePartPose::new(id, clip)
             .with_pivot(pivot_x, pivot_y)
             .with_order(order)
@@ -618,7 +617,11 @@ fn push_key_times(curve: &Animated<f32>, times: &mut Vec<Time>) {
     }
 }
 
-fn apply_layer_opacity(layer: CompositeLayer, value: &serde_json::Value) -> Result<CompositeLayer> {
+fn apply_layer_opacity(
+    layer: CompositeLayer,
+    value: &serde_json::Value,
+    start: Time,
+) -> Result<CompositeLayer> {
     if let Some(opacity) = value.as_f64() {
         #[allow(clippy::cast_possible_truncation)]
         return Ok(layer.with_opacity(opacity as f32));
@@ -630,6 +633,7 @@ fn apply_layer_opacity(layer: CompositeLayer, value: &serde_json::Value) -> Resu
             "compose refuses opacity keyframes: {fault}"
         )));
     }
+    let animated = on_composite_clock(animated, start)?;
     Ok(layer.with_opacity_at(Arc::new(move |time: Time| {
         let sampled = match MediaTime::from_secs(time.as_secs(), MediaTime::HZ_1M) {
             Ok(mt) => animated.sample_f32(mt),
@@ -639,11 +643,18 @@ fn apply_layer_opacity(layer: CompositeLayer, value: &serde_json::Value) -> Resu
     })))
 }
 
-fn apply_layer_motion(layer: CompositeLayer, lp: &serde_json::Value) -> Result<CompositeLayer> {
-    let x = axis_curve(lp.get("x"), "x")?;
-    let y = axis_curve(lp.get("y"), "y")?;
+fn apply_layer_motion(
+    layer: CompositeLayer,
+    lp: &serde_json::Value,
+    start: Time,
+) -> Result<CompositeLayer> {
+    let x = on_composite_clock(axis_curve(lp.get("x"), "x")?, start)?;
+    let y = on_composite_clock(axis_curve(lp.get("y"), "y")?, start)?;
     let scale = match lp.get("scale") {
-        Some(value) => Some(axis_curve(Some(value), "scale")?),
+        Some(value) => Some(on_composite_clock(
+            axis_curve(Some(value), "scale")?,
+            start,
+        )?),
         None => None,
     };
     let moves = curve_is_animated(&x) || curve_is_animated(&y);
@@ -700,6 +711,47 @@ fn axis_curve(value: Option<&serde_json::Value>, name: &str) -> Result<Animated<
         }
     }
     Ok(animated)
+}
+
+fn on_composite_clock(curve: Animated<f32>, start: Time) -> Result<Animated<f32>> {
+    if start.as_secs() == 0.0 {
+        return Ok(curve);
+    }
+    if !start.as_secs().is_finite() {
+        return Err(IoError::message("compose refuses a non-finite layer start"));
+    }
+    let Animated::Keyframes { keys } = curve else {
+        return Ok(curve);
+    };
+    let mut shifted = Vec::with_capacity(keys.len());
+    for key in keys {
+        let at = key.t.as_secs() + start.as_secs();
+        let t = MediaTime::from_secs(at, MediaTime::HZ_1M).map_err(|_| {
+            IoError::message("compose refuses a layer start that moves a key off the clock")
+        })?;
+        shifted.push(Keyframe {
+            t,
+            value: key.value,
+            easing: key.easing,
+        });
+    }
+    let curve = Animated::Keyframes { keys: shifted };
+    if let Some(fault) = curve.curve_fault() {
+        return Err(IoError::message(format!(
+            "compose refuses a layer start that collapses keys: {fault}"
+        )));
+    }
+    Ok(curve)
+}
+
+fn shift_sample_times(times: &[Time], start: Time) -> Vec<Time> {
+    if start.as_secs() == 0.0 {
+        return times.to_vec();
+    }
+    times
+        .iter()
+        .map(|time| Time::from_secs(time.as_secs() + start.as_secs()))
+        .collect()
 }
 
 fn sample_axis(curve: &Animated<f32>, time: Time) -> f32 {
@@ -1518,5 +1570,63 @@ mod tests {
             panic!("warp was accepted as a layer translate");
         };
         assert!(err.to_string().contains("refuses warp"), "{err}");
+    }
+
+    #[test]
+    fn late_layer_local_keys_start_at_the_first_pose() {
+        let x = serde_json::to_value(Animated::keyframes(vec![
+            Keyframe::new(MediaTime::new(0, 1).unwrap(), 0.0),
+            Keyframe::new(MediaTime::new(1, 1).unwrap(), 2.0),
+        ]))
+        .unwrap();
+        let dot = Arc::new(ColorClip::new(
+            Size::new(1, 1),
+            Rgb8::WHITE,
+            Duration::from_secs(2.0),
+        ));
+        let moved = apply_compose_layers(
+            vec![dot],
+            Some(3),
+            Some(1),
+            &serde_json::json!([{ "x": x, "start": 2.0 }]),
+            Some(&serde_json::json!({ "r": 0, "g": 0, "b": 0 })),
+            None,
+        )
+        .unwrap();
+        let channel =
+            |t: f64, index: usize| moved.frame_at(Time::from_secs(t)).unwrap().data()[index * 3];
+        assert_eq!(channel(0.5, 0), 0);
+        assert_eq!(channel(2.0, 0), 255);
+        assert_eq!(channel(2.0, 2), 0);
+        assert_eq!(channel(3.0, 2), 255);
+        assert_eq!(channel(3.0, 0), 0);
+        assert_eq!(
+            moved.frame_at(Time::from_secs(2.0)).unwrap().data(),
+            moved.frame_at(Time::from_secs(2.0)).unwrap().data()
+        );
+
+        let posed = apply_compose_layers(
+            vec![Arc::new(ColorClip::new(
+                Size::new(1, 1),
+                Rgb8::WHITE,
+                Duration::from_secs(2.0),
+            ))],
+            Some(3),
+            Some(1),
+            &serde_json::json!([{
+                "x": x.clone(),
+                "pivot": { "x": 0.0, "y": 0.0 },
+                "start": 2.0
+            }]),
+            Some(&serde_json::json!({ "r": 0, "g": 0, "b": 0 })),
+            None,
+        )
+        .unwrap();
+        let posed_channel =
+            |t: f64, index: usize| posed.frame_at(Time::from_secs(t)).unwrap().data()[index * 3];
+        assert_eq!(posed_channel(2.0, 0), 255);
+        assert_eq!(posed_channel(2.0, 2), 0);
+        assert_eq!(posed_channel(3.0, 2), 255);
+        assert_eq!(posed_channel(0.5, 0), 0);
     }
 }

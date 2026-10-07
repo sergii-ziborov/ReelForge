@@ -4,7 +4,7 @@ use crate::blit::{blit_over, blit_over_premul, solid_canvas};
 use crate::layer::CompositeLayer;
 use crate::{ComposeError, Result};
 use reelforge_core::{
-    AlphaMode, CoreError, Duration, Frame, FrameFormat, Rgb8, Size, Time, VideoClip,
+    AlphaMode, CoreError, Duration, Frame, FrameFormat, Mask, Rgb8, Size, Time, VideoClip,
 };
 use std::sync::Arc;
 
@@ -206,16 +206,21 @@ impl CompositeVideo {
             }
             let local = layer.local_time(t);
             let mut frame = layer.clip.frame_at(local)?;
-            let mask = layer.clip.mask_at(local)?;
+            let mut mask = layer.clip.mask_at(local)?;
+            if let Some(mask) = &mask
+                && mask.size() != frame.size()
+            {
+                return Err(CoreError::invalid_frame(
+                    "composite refuses a coverage mask that does not match the picture",
+                ));
+            }
             if let Some(sample) = &layer.scale_at {
                 let factor = sample(t);
                 if (factor - 1.0).abs() > 1.0e-4 {
-                    if mask.is_some() {
-                        return Err(CoreError::invalid_frame(
-                            "composite refuses to scale a masked layer",
-                        ));
-                    }
                     frame = nearest_scale(&frame, factor)?;
+                    if let Some(coverage) = mask.as_ref() {
+                        mask = Some(nearest_scale_mask(coverage, frame.size())?);
+                    }
                 }
             }
             let (ox, oy) = if let Some(sample) = &layer.position_at {
@@ -281,6 +286,48 @@ fn nearest_scale(src: &Frame, factor: f32) -> reelforge_core::Result<Frame> {
         }
     }
     Frame::from_raw(Size::new(dst_w, dst_h), src.format(), dst)?.with_alpha_mode(src.alpha_mode())
+}
+
+#[allow(clippy::similar_names)]
+fn nearest_scale_mask(src: &Mask, dst: Size) -> reelforge_core::Result<Mask> {
+    if src.size() == dst {
+        return Ok(src.clone());
+    }
+    let src_w = src.size().width;
+    let src_h = src.size().height;
+    let dst_w = dst.width;
+    let dst_h = dst.height;
+    let src_w_us = usize::try_from(src_w)
+        .map_err(|_| CoreError::invalid_frame("composite refuses an oversized scale"))?;
+    let dst_w_us = usize::try_from(dst_w)
+        .map_err(|_| CoreError::invalid_frame("composite refuses an oversized scale"))?;
+    let dst_h_us = usize::try_from(dst_h)
+        .map_err(|_| CoreError::invalid_frame("composite refuses an oversized scale"))?;
+    let len = dst_w_us
+        .checked_mul(dst_h_us)
+        .ok_or_else(|| CoreError::invalid_frame("composite refuses an oversized scale"))?;
+    let data = src.data();
+    let mut out = vec![0.0_f32; len];
+    for y in 0..dst_h {
+        let sy = usize::try_from((u64::from(y) * u64::from(src_h)) / u64::from(dst_h))
+            .map_err(|_| CoreError::invalid_frame("composite refuses an oversized scale"))?;
+        let y_us = usize::try_from(y)
+            .map_err(|_| CoreError::invalid_frame("composite refuses an oversized scale"))?;
+        for x in 0..dst_w {
+            let sx = usize::try_from((u64::from(x) * u64::from(src_w)) / u64::from(dst_w))
+                .map_err(|_| CoreError::invalid_frame("composite refuses an oversized scale"))?;
+            let x_us = usize::try_from(x)
+                .map_err(|_| CoreError::invalid_frame("composite refuses an oversized scale"))?;
+            let sample = data[sy * src_w_us + sx];
+            if !sample.is_finite() {
+                return Err(CoreError::invalid_frame(
+                    "composite refuses a non-finite coverage mask",
+                ));
+            }
+            out[y_us * dst_w_us + x_us] = sample.clamp(0.0, 1.0);
+        }
+    }
+    Mask::from_raw(dst, out)
 }
 
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -454,5 +501,48 @@ mod tests {
         let painted = nested.frame_at(Time::ZERO).unwrap();
         assert_eq!(&painted.data()[0..3], &[255, 0, 0]);
         assert_eq!(&painted.data()[3..6], &[0, 0, 255]);
+    }
+
+    struct QuarterBar;
+
+    impl VideoClip for QuarterBar {
+        fn duration(&self) -> Duration {
+            Duration::from_secs(1.0)
+        }
+
+        fn size(&self) -> Size {
+            Size::new(2, 1)
+        }
+
+        fn frame_at(&self, _: Time) -> reelforge_core::Result<Frame> {
+            let mut frame = Frame::zeros(Size::new(2, 1), FrameFormat::Rgb8)?;
+            let data = frame.data_mut();
+            data[0] = 255;
+            data[1] = 255;
+            data[2] = 255;
+            Ok(frame)
+        }
+
+        fn mask_at(&self, _: Time) -> reelforge_core::Result<Option<Mask>> {
+            Ok(Some(Mask::from_raw(Size::new(2, 1), vec![0.25, 0.0])?))
+        }
+    }
+
+    #[test]
+    fn scale_moves_coverage_with_the_picture() {
+        let layer =
+            CompositeLayer::new(Arc::new(QuarterBar)).with_scale_at(Arc::new(|_: Time| 2.0));
+        let on_black = CompositeVideo::new(Size::new(4, 2), vec![layer]).unwrap();
+        let dark = on_black.frame_at(Time::ZERO).unwrap();
+        assert_eq!(&dark.data()[0..3], &[64, 64, 64]);
+        assert_eq!(&dark.data()[6..9], &[0, 0, 0]);
+        assert_eq!(on_black.frame_at(Time::ZERO).unwrap().data(), dark.data());
+
+        let layer =
+            CompositeLayer::new(Arc::new(QuarterBar)).with_scale_at(Arc::new(|_: Time| 2.0));
+        let on_white =
+            CompositeVideo::with_background(Size::new(4, 2), Rgb8::WHITE, vec![layer]).unwrap();
+        let light = on_white.frame_at(Time::ZERO).unwrap();
+        assert!(light.data().iter().all(|channel| *channel == 255));
     }
 }

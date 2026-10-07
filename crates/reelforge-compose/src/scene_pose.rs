@@ -3,9 +3,12 @@
 //! Placement is `parent · translate(position) · translate(pivot) · rotate · scale · translate(-pivot)`.
 //! An anchor is that same local placement applied at a point on another part, not a second parent.
 //! The sample clock is the time passed to [`ScenePoseVideo::frame_at`], not a nominal fps grid.
+//! Picture and [`VideoClip::mask_at`] coverage use one inverse map. A partial sample keeps the
+//! covered color, so a transparent neighbor does not darken the edge. Motion callbacks see the
+//! composite clock. The compose executor adds a layer's start to its local keys before that.
 
 use reelforge_core::{
-    AlphaMode, CoreError, Duration, Frame, FrameFormat, Rgb8, Size, Time, VideoClip,
+    AlphaMode, CoreError, Duration, Frame, FrameFormat, Mask, Rgb8, Size, Time, VideoClip,
 };
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -574,12 +577,6 @@ fn paint_part(
         return Ok(());
     }
     let when = Time::from_secs(local);
-    if part.clip.mask_at(when)?.is_some() {
-        return Err(CoreError::invalid_frame(format!(
-            "scene pose part {} refuses a coverage mask",
-            part.id
-        )));
-    }
     let opacity = (part.opacity_at)(t);
     if !opacity.is_finite() {
         return Err(CoreError::invalid_frame(format!(
@@ -592,76 +589,258 @@ fn paint_part(
         return Ok(());
     }
     let frame = part.clip.frame_at(when)?;
+    let mask = part.clip.mask_at(when)?;
+    if let Some(mask) = &mask
+        && mask.size() != frame.size()
+    {
+        return Err(CoreError::invalid_frame(format!(
+            "scene pose part {} coverage mask does not match the picture",
+            part.id
+        )));
+    }
     let Some(inverse) = world.invert() else {
         return Err(CoreError::invalid_frame(format!(
             "scene pose part {} transform cannot be inverted",
             part.id
         )));
     };
-    stamp(canvas, &frame, inverse, opacity);
-    Ok(())
+    stamp(canvas, &frame, mask.as_ref(), world, inverse, opacity)
 }
 
-fn stamp(canvas: &mut Frame, src: &Frame, inverse: Aff, opacity: f32) {
+fn stamp(
+    canvas: &mut Frame,
+    src: &Frame,
+    mask: Option<&Mask>,
+    world: Aff,
+    inverse: Aff,
+    opacity: f32,
+) -> reelforge_core::Result<()> {
     let premul = src.alpha_mode() == AlphaMode::Premultiplied;
     let src_w = src.size().width;
     let src_h = src.size().height;
     let dst_w = canvas.size().width;
     let dst_h = canvas.size().height;
-    let src_bpp = src.format().bytes_per_pixel();
+    let (x0, y0, x1, y1) = paint_span(world, src_w, src_h, dst_w, dst_h);
     let dst_data = canvas.data_mut();
-    let src_data = src.data();
     let row = usize::try_from(dst_w).unwrap_or(usize::MAX);
-    for y in 0..dst_h {
-        for x in 0..dst_w {
+    for y in y0..y1 {
+        for x in x0..x1 {
             let (sx, sy) = inverse.apply(u32_f32(x), u32_f32(y));
-            let Some(source_x) = pixel_index(sx, src_w) else {
+            let Some((rgb, coverage)) = sample_covered(src, mask, premul, sx, sy)? else {
                 continue;
             };
-            let Some(source_y) = pixel_index(sy, src_h) else {
+            let coverage = (coverage * opacity).clamp(0.0, 1.0);
+            if coverage <= 0.0 {
                 continue;
-            };
-            let src_i = (usize::try_from(source_y).unwrap_or(usize::MAX)
-                * usize::try_from(src_w).unwrap_or(usize::MAX)
-                + usize::try_from(source_x).unwrap_or(usize::MAX))
-                * src_bpp;
+            }
             let dst_i = (usize::try_from(y).unwrap_or(usize::MAX) * row
                 + usize::try_from(x).unwrap_or(usize::MAX))
                 * 3;
-            if src_i + src_bpp > src_data.len() || dst_i + 3 > dst_data.len() {
+            if dst_i + 3 > dst_data.len() {
                 continue;
             }
-            match src.format() {
-                FrameFormat::Rgb8 => {
-                    blend_rgb(
-                        &mut dst_data[dst_i..dst_i + 3],
-                        &src_data[src_i..src_i + 3],
-                        opacity,
-                    );
-                }
-                FrameFormat::Rgba8 => {
-                    let coverage = opacity * f32::from(src_data[src_i + 3]) / 255.0;
-                    if coverage <= 0.0 {
-                        continue;
-                    }
-                    if premul {
-                        blend_premul(
-                            &mut dst_data[dst_i..dst_i + 3],
-                            &src_data[src_i..src_i + 3],
-                            opacity,
-                            coverage,
-                        );
-                    } else {
-                        blend_rgb(
-                            &mut dst_data[dst_i..dst_i + 3],
-                            &src_data[src_i..src_i + 3],
-                            coverage,
-                        );
-                    }
-                }
-            }
+            over(&mut dst_data[dst_i..dst_i + 3], rgb, coverage);
         }
     }
+    Ok(())
+}
+
+fn paint_span(world: Aff, src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) -> (u32, u32, u32, u32) {
+    let width = u32_f32(src_w);
+    let height = u32_f32(src_h);
+    let corners = [
+        world.apply(0.0, 0.0),
+        world.apply(width, 0.0),
+        world.apply(0.0, height),
+        world.apply(width, height),
+    ];
+    let mut min_x = f32::MAX;
+    let mut min_y = f32::MAX;
+    let mut max_x = f32::MIN;
+    let mut max_y = f32::MIN;
+    for (x, y) in corners {
+        if !x.is_finite() || !y.is_finite() {
+            return (0, 0, dst_w, dst_h);
+        }
+        min_x = min_x.min(x);
+        min_y = min_y.min(y);
+        max_x = max_x.max(x);
+        max_y = max_y.max(y);
+    }
+    (
+        axis_start(min_x - 1.0, dst_w),
+        axis_start(min_y - 1.0, dst_h),
+        axis_end(max_x + 1.0, dst_w),
+        axis_end(max_y + 1.0, dst_h),
+    )
+}
+
+fn axis_start(value: f32, limit: u32) -> u32 {
+    if !value.is_finite() || value <= 0.0 {
+        return 0;
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let limit_f = limit as f32;
+    let floored = value.floor();
+    if floored >= limit_f {
+        return limit;
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    {
+        floored as u32
+    }
+}
+
+fn axis_end(value: f32, limit: u32) -> u32 {
+    if !value.is_finite() {
+        return limit;
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let limit_f = limit as f32;
+    let ceiled = value.ceil();
+    if ceiled <= 0.0 {
+        return 0;
+    }
+    if ceiled >= limit_f {
+        return limit;
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    {
+        ceiled as u32
+    }
+}
+
+fn sample_covered(
+    src: &Frame,
+    mask: Option<&Mask>,
+    premul: bool,
+    sx: f32,
+    sy: f32,
+) -> reelforge_core::Result<Option<([f32; 3], f32)>> {
+    if !sx.is_finite() || !sy.is_finite() {
+        return Ok(None);
+    }
+    let sx = snap_axis(sx);
+    let sy = snap_axis(sy);
+    let x0 = sx.floor();
+    let y0 = sy.floor();
+    let fx = sx - x0;
+    let fy = sy - y0;
+    let mut sum_rgb = [0.0_f32; 3];
+    let mut sum_a = 0.0_f32;
+    for (ox, wx) in [(0.0_f32, 1.0 - fx), (1.0, fx)] {
+        for (oy, wy) in [(0.0_f32, 1.0 - fy), (1.0, fy)] {
+            let weight = wx * wy;
+            if weight <= 0.0 {
+                continue;
+            }
+            let Some((rgb, alpha)) = tap(src, mask, x0 + ox, y0 + oy, premul)? else {
+                continue;
+            };
+            for channel in 0..3 {
+                sum_rgb[channel] += rgb[channel] * weight;
+            }
+            sum_a += alpha * weight;
+        }
+    }
+    if sum_a <= 0.0 {
+        return Ok(None);
+    }
+    Ok(Some((
+        [sum_rgb[0] / sum_a, sum_rgb[1] / sum_a, sum_rgb[2] / sum_a],
+        sum_a,
+    )))
+}
+
+fn tap(
+    src: &Frame,
+    mask: Option<&Mask>,
+    x: f32,
+    y: f32,
+    premul: bool,
+) -> reelforge_core::Result<Option<([f32; 3], f32)>> {
+    let Some(ix) = floor_index(x, src.size().width) else {
+        return Ok(None);
+    };
+    let Some(iy) = floor_index(y, src.size().height) else {
+        return Ok(None);
+    };
+    let coverage = coverage_at(mask, ix, iy, src.size().width)?;
+    if coverage <= 0.0 {
+        return Ok(None);
+    }
+    let bpp = src.format().bytes_per_pixel();
+    let index = (usize::try_from(iy).unwrap_or(usize::MAX)
+        * usize::try_from(src.size().width).unwrap_or(usize::MAX)
+        + usize::try_from(ix).unwrap_or(usize::MAX))
+        * bpp;
+    let data = src.data();
+    if index + bpp > data.len() {
+        return Ok(None);
+    }
+    let alpha = match src.format() {
+        FrameFormat::Rgb8 => 1.0,
+        FrameFormat::Rgba8 => f32::from(data[index + 3]) / 255.0,
+    };
+    if alpha <= 0.0 {
+        return Ok(None);
+    }
+    let mut rgb = [
+        f32::from(data[index]),
+        f32::from(data[index + 1]),
+        f32::from(data[index + 2]),
+    ];
+    if !premul {
+        for channel in &mut rgb {
+            *channel *= alpha;
+        }
+    }
+    for channel in &mut rgb {
+        *channel *= coverage;
+    }
+    Ok(Some((rgb, alpha * coverage)))
+}
+
+fn coverage_at(mask: Option<&Mask>, x: u32, y: u32, width: u32) -> reelforge_core::Result<f32> {
+    let Some(mask) = mask else {
+        return Ok(1.0);
+    };
+    let index = usize::try_from(y).unwrap_or(usize::MAX)
+        * usize::try_from(width).unwrap_or(usize::MAX)
+        + usize::try_from(x).unwrap_or(usize::MAX);
+    let Some(sample) = mask.data().get(index).copied() else {
+        return Err(CoreError::invalid_frame(
+            "scene pose coverage is outside the picture",
+        ));
+    };
+    if !sample.is_finite() {
+        return Err(CoreError::invalid_frame(
+            "scene pose coverage is not finite",
+        ));
+    }
+    Ok(sample.clamp(0.0, 1.0))
+}
+
+fn snap_axis(value: f32) -> f32 {
+    let nearest = value.round();
+    if (value - nearest).abs() <= 2.0e-3 {
+        nearest
+    } else {
+        value
+    }
+}
+
+fn floor_index(value: f32, limit: u32) -> Option<u32> {
+    if !value.is_finite() || value < 0.0 {
+        return None;
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let limit_f = limit as f32;
+    if value >= limit_f {
+        return None;
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    Some(value as u32)
 }
 
 fn u32_f32(value: u32) -> f32 {
@@ -671,41 +850,11 @@ fn u32_f32(value: u32) -> f32 {
     }
 }
 
-fn pixel_index(value: f32, limit: u32) -> Option<u32> {
-    if !value.is_finite() {
-        return None;
-    }
-    let nearest = value.round();
-    let snapped = if (value - nearest).abs() <= 2.0e-3 {
-        nearest
-    } else {
-        value.floor()
-    };
-    #[allow(clippy::cast_precision_loss)]
-    let limit_f = limit as f32;
-    if snapped < 0.0 || snapped >= limit_f {
-        return None;
-    }
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    Some(snapped as u32)
-}
-
-fn blend_rgb(dst: &mut [u8], src: &[u8], alpha: f32) {
-    let inv = 1.0 - alpha;
-    for channel in 0..3 {
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let mixed = (f32::from(src[channel]) * alpha + f32::from(dst[channel]) * inv)
-            .round()
-            .clamp(0.0, 255.0) as u8;
-        dst[channel] = mixed;
-    }
-}
-
-fn blend_premul(dst: &mut [u8], src: &[u8], extra: f32, coverage: f32) {
+fn over(dst: &mut [u8], rgb: [f32; 3], coverage: f32) {
     let inv = 1.0 - coverage;
     for channel in 0..3 {
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let mixed = (f32::from(src[channel]) * extra + f32::from(dst[channel]) * inv)
+        let mixed = (rgb[channel] * coverage + f32::from(dst[channel]) * inv)
             .round()
             .clamp(0.0, 255.0) as u8;
         dst[channel] = mixed;
@@ -905,5 +1054,168 @@ mod tests {
             panic!("a parent cycle was accepted");
         };
         assert!(err.to_string().contains("pose cycle"));
+    }
+
+    struct CoveredBar;
+
+    impl VideoClip for CoveredBar {
+        fn duration(&self) -> Duration {
+            Duration::from_secs(1.0)
+        }
+
+        fn size(&self) -> Size {
+            Size::new(2, 1)
+        }
+
+        fn frame_at(&self, t: Time) -> reelforge_core::Result<Frame> {
+            if !(0.0..1.0).contains(&t.as_secs()) {
+                return Err(CoreError::TimeOutOfRange {
+                    time: t,
+                    range: (Time::ZERO, Time::from_secs(1.0)),
+                });
+            }
+            let mut frame = Frame::zeros(Size::new(2, 1), FrameFormat::Rgb8)?;
+            let data = frame.data_mut();
+            data[0] = 255;
+            data[4] = 255;
+            Ok(frame)
+        }
+
+        fn mask_at(&self, t: Time) -> reelforge_core::Result<Option<Mask>> {
+            if !(0.0..1.0).contains(&t.as_secs()) {
+                return Err(CoreError::TimeOutOfRange {
+                    time: t,
+                    range: (Time::ZERO, Time::from_secs(1.0)),
+                });
+            }
+            Ok(Some(Mask::from_raw(Size::new(2, 1), vec![1.0, 0.25])?))
+        }
+    }
+
+    struct SoftEdge;
+
+    impl VideoClip for SoftEdge {
+        fn duration(&self) -> Duration {
+            Duration::from_secs(1.0)
+        }
+
+        fn size(&self) -> Size {
+            Size::new(2, 1)
+        }
+
+        fn frame_at(&self, _: Time) -> reelforge_core::Result<Frame> {
+            let mut frame = Frame::zeros(Size::new(2, 1), FrameFormat::Rgb8)?;
+            let data = frame.data_mut();
+            data[0] = 255;
+            data[1] = 255;
+            data[2] = 255;
+            Ok(frame)
+        }
+
+        fn mask_at(&self, _: Time) -> reelforge_core::Result<Option<Mask>> {
+            Ok(Some(Mask::from_raw(Size::new(2, 1), vec![1.0, 0.0])?))
+        }
+    }
+
+    struct QuarterDot;
+
+    impl VideoClip for QuarterDot {
+        fn duration(&self) -> Duration {
+            Duration::from_secs(1.0)
+        }
+
+        fn size(&self) -> Size {
+            Size::new(1, 1)
+        }
+
+        fn frame_at(&self, _: Time) -> reelforge_core::Result<Frame> {
+            Frame::solid_rgb(Size::new(1, 1), Rgb8::WHITE)
+        }
+
+        fn mask_at(&self, _: Time) -> reelforge_core::Result<Option<Mask>> {
+            Ok(Some(Mask::from_raw(Size::new(1, 1), vec![0.25])?))
+        }
+    }
+
+    struct MismatchedMask;
+
+    impl VideoClip for MismatchedMask {
+        fn duration(&self) -> Duration {
+            Duration::from_secs(1.0)
+        }
+
+        fn size(&self) -> Size {
+            Size::new(1, 1)
+        }
+
+        fn frame_at(&self, _: Time) -> reelforge_core::Result<Frame> {
+            Frame::solid_rgb(Size::new(1, 1), Rgb8::WHITE)
+        }
+
+        fn mask_at(&self, _: Time) -> reelforge_core::Result<Option<Mask>> {
+            Ok(Some(Mask::from_raw(Size::new(2, 1), vec![1.0, 1.0])?))
+        }
+    }
+
+    #[test]
+    fn coverage_rotates_with_the_picture() {
+        let bar = ScenePartPose::new("bar", Arc::new(CoveredBar))
+            .with_x_at(Arc::new(|_: Time| 1.0))
+            .with_y_at(Arc::new(|_: Time| 1.0))
+            .with_rotation_at(Arc::new(|_: Time| 90.0));
+        let pose =
+            ScenePoseVideo::new(Size::new(4, 4), Duration::from_secs(1.0), vec![bar]).unwrap();
+        let frame = pose.frame_at(Time::ZERO).unwrap();
+        assert_eq!(pixel(&frame, 1, 1), [255, 0, 0]);
+        assert_eq!(pixel(&frame, 1, 2), [0, 64, 0]);
+        assert_eq!(pose.frame_at(Time::ZERO).unwrap().data(), frame.data());
+    }
+
+    #[test]
+    fn half_pixel_edge_keeps_the_covered_color() {
+        let part =
+            ScenePartPose::new("edge", Arc::new(SoftEdge)).with_x_at(Arc::new(|_: Time| 0.5));
+        let on_black =
+            ScenePoseVideo::new(Size::new(3, 1), Duration::from_secs(1.0), vec![part]).unwrap();
+        let dark = on_black.frame_at(Time::ZERO).unwrap();
+        assert_eq!(pixel(&dark, 0, 0), [128, 128, 128]);
+        assert_eq!(pixel(&dark, 1, 0), [128, 128, 128]);
+        assert_eq!(pixel(&dark, 2, 0), [0, 0, 0]);
+        assert_eq!(on_black.frame_at(Time::ZERO).unwrap().data(), dark.data());
+
+        let part =
+            ScenePartPose::new("edge", Arc::new(SoftEdge)).with_x_at(Arc::new(|_: Time| 0.5));
+        let on_white = ScenePoseVideo::with_background(
+            Size::new(3, 1),
+            Rgb8::WHITE,
+            Duration::from_secs(1.0),
+            vec![part],
+        )
+        .unwrap();
+        let light = on_white.frame_at(Time::ZERO).unwrap();
+        assert_eq!(light.data(), &[255_u8; 9]);
+    }
+
+    #[test]
+    fn scaled_coverage_stays_with_the_pixel() {
+        let part =
+            ScenePartPose::new("dot", Arc::new(QuarterDot)).with_scale_at(Arc::new(|_: Time| 2.0));
+        let pose =
+            ScenePoseVideo::new(Size::new(2, 2), Duration::from_secs(1.0), vec![part]).unwrap();
+        let frame = pose.frame_at(Time::ZERO).unwrap();
+        assert_eq!(pixel(&frame, 0, 0), [64, 64, 64]);
+        assert_eq!(pixel(&frame, 1, 0), [32, 32, 32]);
+        assert_eq!(pose.frame_at(Time::ZERO).unwrap().data(), frame.data());
+    }
+
+    #[test]
+    fn a_coverage_mask_must_match_the_picture() {
+        let part = ScenePartPose::new("dot", Arc::new(MismatchedMask));
+        let pose =
+            ScenePoseVideo::new(Size::new(2, 2), Duration::from_secs(1.0), vec![part]).unwrap();
+        let Err(err) = pose.frame_at(Time::ZERO) else {
+            panic!("a mismatched coverage mask was painted");
+        };
+        assert!(err.to_string().contains("does not match the picture"));
     }
 }
