@@ -7,15 +7,16 @@ use crate::options::WriteVideoOptions;
 use crate::video_file::open_video;
 use crate::write::{write_av, write_video};
 use reelforge_core::{
-    AlphaMode, AudioBuffer, AudioClip, AudioFormat, CoreError, Duration, Frame, FrameFormat,
+    AlphaMode, AudioBuffer, AudioClip, AudioFormat, CoreError, Duration, Frame, FrameFormat, Mask,
     MediaTime, SampleLayout, Size, Time, VideoClip,
 };
 use reelforge_render_graph::MaskTimeline;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs;
+use std::fs::{self, File};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// One committed stage (persist + checkpoint).
 #[derive(Debug, Clone)]
@@ -79,6 +80,12 @@ const STAGE_MEDIA_SIDECAR_VERSION: u32 = 1;
 /// Final checkpoints refuse a longer picture than this before writing files.
 const FINAL_MAX_FRAMES: usize = 120;
 
+/// Decoded pictures kept in memory while writing or reading one chunk.
+const FINAL_CHUNK_FRAMES: usize = 8;
+
+/// PCM sample frames read or written in one pass.
+const FINAL_AUDIO_CHUNK_FRAMES: u64 = 4_096;
+
 /// Final checkpoints refuse a longer PCM stream than this before writing files.
 const FINAL_MAX_AUDIO_FRAMES: u64 = 240_000;
 
@@ -138,6 +145,12 @@ pub struct FinalFrameRef {
     pub pts_ticks: i64,
     /// Ticks per second for `pts_ticks`.
     pub timescale: u32,
+    /// Coverage sibling, separate from pixel alpha. Absent when the picture had no mask.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<String>,
+    /// [`fingerprint_file`](crate::fingerprint_file) of `coverage`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage_sha256: Option<String>,
 }
 
 /// Interleaved little-endian `f32` PCM stored beside a final checkpoint.
@@ -151,6 +164,12 @@ pub struct FinalAudioRef {
     pub sample_rate: u32,
     /// Interleaved channel count.
     pub channels: u16,
+    /// Named layout such as `stereo` or `discrete:4`. Absent on older bundles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<String>,
+    /// Sample frames in `file`. Absent on older bundles, which use the file length.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample_count: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -296,6 +315,9 @@ fn final_components_match(video: &Path, side: &StageMediaSidecar) -> bool {
         if fingerprint_file(&path).ok().as_deref() != Some(frame.sha256.as_str()) {
             return false;
         }
+        if !coverage_file_matches(video, frame) {
+            return false;
+        }
         if frame.file == parts.picture && frame.sha256 == parts.picture_sha256 {
             saw_picture = true;
         }
@@ -309,10 +331,39 @@ fn final_components_match(video: &Path, side: &StageMediaSidecar) -> bool {
     if audio.sample_rate == 0 || audio.channels == 0 {
         return false;
     }
+    if let Some(label) = &audio.layout
+        && layout_from_label(label, audio.channels).is_err()
+    {
+        return false;
+    }
     let Some(path) = component_file(video, &audio.file) else {
         return false;
     };
+    if let Some(count) = audio.sample_count {
+        let expected = count
+            .saturating_mul(u64::from(audio.channels))
+            .saturating_mul(4);
+        let Ok(meta) = fs::metadata(&path) else {
+            return false;
+        };
+        if meta.len() != expected {
+            return false;
+        }
+    }
     fingerprint_file(&path).is_ok_and(|got| got == audio.sha256)
+}
+
+fn coverage_file_matches(video: &Path, frame: &FinalFrameRef) -> bool {
+    match (&frame.coverage, &frame.coverage_sha256) {
+        (None, None) => true,
+        (Some(name), Some(hash)) => {
+            let Some(path) = component_file(video, name) else {
+                return false;
+            };
+            fingerprint_file(&path).ok().as_deref() == Some(hash.as_str())
+        }
+        _ => false,
+    }
 }
 
 fn known_alpha_mode(mode: &str) -> bool {
@@ -557,9 +608,11 @@ pub fn persist_stage_video(
 /// Write one frontier node, including audio and a media sidecar.
 ///
 /// Preview writes CRF 30 and [`CheckpointFidelity::PreviewLossy`]. Final writes
-/// a bundle stub, PNG frames, and PCM, and does not call `ffmpeg`. A final clip
-/// past the frame or audio cap is refused before any file is written. Masks and
-/// encode settings go in `{uri}.media.json`.
+/// a bundle stub, PNG frames, and PCM, and does not call `ffmpeg`. Pictures and
+/// PCM are written one chunk at a time. A coverage mask is a sibling file,
+/// separate from pixel alpha. A final clip past the frame or audio cap is
+/// refused before any file is written. Masks and encode settings go in
+/// `{uri}.media.json`.
 ///
 /// # Errors
 ///
@@ -615,65 +668,254 @@ fn persist_final_bundle(
     node_id: &str,
     media: &StageMediaParts<'_>,
 ) -> Result<StageArtifactRecord> {
-    let frames = collect_final_frames(media.video)?;
-    let audio = collect_final_audio(media.audio)?;
+    let times = final_sample_times(media.video)?;
     let duration = MediaTime::from_secs(media.video.duration().as_secs(), MediaTime::HZ_1M)?;
-    if frames.is_empty() || duration.ticks <= 0 {
+    if times.is_empty() || duration.ticks <= 0 {
         return Err(IoError::message(
             "final bundle refuses a clip with no positive duration",
         ));
     }
+    if let Some(audio) = media.audio {
+        let frames = audio.format().frames_for_duration(audio.duration());
+        if frames > FINAL_MAX_AUDIO_FRAMES {
+            return Err(IoError::message(audio_frame_limit(frames)));
+        }
+    }
     let dir = dir.as_ref();
     ensure_persist_dir(dir)?;
     let (safe_node, stem) = checkpoint_name(node_id, fingerprint);
-    let path = dir.join(format!("s{stage_index}-{safe_node}-{stem}.bundle"));
-    let mut pending = Vec::with_capacity(frames.len().saturating_add(2));
-    pending.push((path.clone(), FINAL_BUNDLE_STUB.to_vec()));
-    let mut frame_names = Vec::with_capacity(frames.len());
-    let alpha_mode = alpha_label(frames[0].1.alpha_mode());
-    for (index, (time, frame)) in frames.iter().enumerate() {
-        let name = format!("s{stage_index}-{safe_node}-{stem}-f{index:04}.png");
-        let png = dir.join(&name);
-        let bytes = png_bytes(frame)?;
-        let pts = MediaTime::from_secs(time.as_secs(), MediaTime::HZ_1M)?;
-        pending.push((png, bytes));
-        frame_names.push((name, pts));
-    }
-    let audio_name = audio.as_ref().map(|(format, samples)| {
-        let name = format!("s{stage_index}-{safe_node}-{stem}.pcm");
-        let pcm = dir.join(&name);
-        let bytes = pcm_bytes(samples.samples());
-        pending.push((pcm, bytes));
-        (name, format.sample_rate, format.channels())
-    });
+    let prefix = format!("s{stage_index}-{safe_node}-{stem}");
+    let path = dir.join(format!("{prefix}.bundle"));
+    let mut pending = Vec::new();
+    stage_partial(path.clone(), FINAL_BUNDLE_STUB, &mut pending)?;
+    let (alpha_mode, written) =
+        stage_final_pictures(dir, &prefix, media.video, &times, &mut pending)?;
+    let audio = stage_final_audio(dir, &prefix, media.audio, &mut pending)?;
     // The sidecar is the commit. A failed publish leaves the previous files.
-    publish_files(&pending)?;
-    let mut listed = Vec::with_capacity(frame_names.len());
-    let mut picture = String::new();
-    let mut picture_sha256 = String::new();
-    for (index, (name, pts)) in frame_names.iter().enumerate() {
-        let sha256 = fingerprint_file(dir.join(name))?;
-        if index == 0 {
-            picture.clone_from(name);
-            picture_sha256.clone_from(&sha256);
+    commit_pending(&pending)?;
+    let parts = finished_components(dir, &alpha_mode, duration, &written, audio)?;
+    write_media_sidecar(stage_index, fingerprint, node_id, &path, media, Some(parts))
+}
+
+struct WrittenFrame {
+    name: String,
+    pts: MediaTime,
+    coverage: Option<String>,
+}
+
+struct WrittenAudio {
+    name: String,
+    format: AudioFormat,
+    sample_count: u64,
+}
+
+fn stage_final_pictures(
+    dir: &Path,
+    prefix: &str,
+    video: &dyn VideoClip,
+    times: &[Time],
+    pending: &mut Vec<PendingPublish>,
+) -> Result<(String, Vec<WrittenFrame>)> {
+    let mut written = Vec::with_capacity(times.len());
+    let mut alpha_mode: Option<&str> = None;
+    let mut size: Option<Size> = None;
+    for (index, time) in times.iter().enumerate() {
+        let frame = match video.frame_at(*time) {
+            Ok(frame) => frame,
+            Err(err) => return fail_pending(pending, err.into()),
+        };
+        let next = alpha_label(frame.alpha_mode());
+        if let Some(prev) = alpha_mode
+            && prev != next
+        {
+            return abandon(
+                pending,
+                "final bundle refuses frames that do not share one alpha mode",
+            );
         }
-        listed.push(FinalFrameRef {
-            file: name.clone(),
-            sha256,
-            pts_ticks: pts.ticks,
-            timescale: pts.timescale,
+        if let Some(expected) = size
+            && frame.size() != expected
+        {
+            return abandon(pending, "final bundle refuses frames that change size");
+        }
+        alpha_mode = Some(next);
+        size = Some(frame.size());
+        let name = format!("{prefix}-f{index:04}.png");
+        let bytes = match png_bytes(&frame) {
+            Ok(bytes) => bytes,
+            Err(err) => return fail_pending(pending, err),
+        };
+        stage_partial(dir.join(&name), &bytes, pending)?;
+        let coverage = stage_coverage(dir, prefix, index, video, *time, &frame, pending)?;
+        let pts = match MediaTime::from_secs(time.as_secs(), MediaTime::HZ_1M) {
+            Ok(pts) => pts,
+            Err(err) => return fail_pending(pending, err.into()),
+        };
+        written.push(WrittenFrame {
+            name,
+            pts,
+            coverage,
         });
     }
-    let audio = match audio_name {
-        Some((name, sample_rate, channels)) => Some(FinalAudioRef {
-            file: name.clone(),
-            sha256: fingerprint_file(dir.join(&name))?,
-            sample_rate,
-            channels,
-        }),
-        None => None,
+    let Some(alpha_mode) = alpha_mode else {
+        return abandon(
+            pending,
+            "final bundle refuses a clip with no positive duration",
+        );
     };
-    let parts = FinalMediaComponents {
+    Ok((alpha_mode.to_string(), written))
+}
+
+fn stage_coverage(
+    dir: &Path,
+    prefix: &str,
+    index: usize,
+    video: &dyn VideoClip,
+    time: Time,
+    frame: &Frame,
+    pending: &mut Vec<PendingPublish>,
+) -> Result<Option<String>> {
+    let mask = match video.mask_at(time) {
+        Ok(Some(mask)) => mask,
+        Ok(None) => return Ok(None),
+        Err(err) => return fail_pending(pending, err.into()),
+    };
+    if mask.size() != frame.size() {
+        return abandon(
+            pending,
+            "final bundle refuses a coverage mask that does not match the picture",
+        );
+    }
+    let name = format!("{prefix}-c{index:04}.mask");
+    let bytes = match mask_bytes(mask.data()) {
+        Ok(bytes) => bytes,
+        Err(err) => return fail_pending(pending, err),
+    };
+    stage_partial(dir.join(&name), &bytes, pending)?;
+    Ok(Some(name))
+}
+
+fn stage_final_audio(
+    dir: &Path,
+    prefix: &str,
+    audio: Option<&dyn AudioClip>,
+    pending: &mut Vec<PendingPublish>,
+) -> Result<Option<WrittenAudio>> {
+    let Some(audio) = audio else {
+        return Ok(None);
+    };
+    let format = audio.format();
+    let frames = format.frames_for_duration(audio.duration());
+    if frames == 0 {
+        return Ok(None);
+    }
+    if frames > FINAL_MAX_AUDIO_FRAMES {
+        return abandon(pending, audio_frame_limit(frames));
+    }
+    let name = format!("{prefix}.pcm");
+    let dest = dir.join(&name);
+    let partial = partial_sibling(&dest)?;
+    let mut file = match File::create(&partial) {
+        Ok(file) => file,
+        Err(err) => {
+            return abandon(
+                pending,
+                format!("final bundle {}: {err}", partial.display()),
+            );
+        }
+    };
+    let mut written = 0_u64;
+    while written < frames {
+        let count = (frames - written).min(FINAL_AUDIO_CHUNK_FRAMES);
+        let Ok(count_usize) = usize::try_from(count) else {
+            let _ = fs::remove_file(&partial);
+            return abandon(
+                pending,
+                "final bundle refuses an audio length that does not fit in memory",
+            );
+        };
+        let time = Time::from_secs(index_seconds(written, f64::from(format.sample_rate)));
+        let buffer = match audio.samples_at(time, count_usize) {
+            Ok(buffer) => buffer,
+            Err(err) => {
+                let _ = fs::remove_file(&partial);
+                return abandon(pending, err.to_string());
+            }
+        };
+        let channels = usize::from(format.channels());
+        if buffer.samples().len() != count_usize.saturating_mul(channels) {
+            let _ = fs::remove_file(&partial);
+            return abandon(
+                pending,
+                "final bundle audio chunk does not match its layout",
+            );
+        }
+        if let Err(err) = file.write_all(&pcm_bytes(buffer.samples())) {
+            let _ = fs::remove_file(&partial);
+            return abandon(
+                pending,
+                format!("final bundle {}: {err}", partial.display()),
+            );
+        }
+        written += count;
+    }
+    if let Err(err) = file.sync_all() {
+        let _ = fs::remove_file(&partial);
+        return abandon(
+            pending,
+            format!("final bundle {}: {err}", partial.display()),
+        );
+    }
+    pending.push(PendingPublish { dest, partial });
+    Ok(Some(WrittenAudio {
+        name,
+        format,
+        sample_count: frames,
+    }))
+}
+
+fn finished_components(
+    dir: &Path,
+    alpha_mode: &str,
+    duration: MediaTime,
+    written: &[WrittenFrame],
+    audio: Option<WrittenAudio>,
+) -> Result<FinalMediaComponents> {
+    let mut listed = Vec::with_capacity(written.len());
+    let mut picture = String::new();
+    let mut picture_sha256 = String::new();
+    for (index, frame) in written.iter().enumerate() {
+        let sha256 = fingerprint_file(dir.join(&frame.name))?;
+        if index == 0 {
+            picture.clone_from(&frame.name);
+            picture_sha256.clone_from(&sha256);
+        }
+        let (coverage, coverage_sha256) = match &frame.coverage {
+            Some(name) => (Some(name.clone()), Some(fingerprint_file(dir.join(name))?)),
+            None => (None, None),
+        };
+        listed.push(FinalFrameRef {
+            file: frame.name.clone(),
+            sha256,
+            pts_ticks: frame.pts.ticks,
+            timescale: frame.pts.timescale,
+            coverage,
+            coverage_sha256,
+        });
+    }
+    let audio = audio
+        .map(|audio| -> Result<_> {
+            Ok(FinalAudioRef {
+                file: audio.name.clone(),
+                sha256: fingerprint_file(dir.join(&audio.name))?,
+                sample_rate: audio.format.sample_rate,
+                channels: audio.format.channels(),
+                layout: Some(layout_label(audio.format.layout)),
+                sample_count: Some(audio.sample_count),
+            })
+        })
+        .transpose()?;
+    Ok(FinalMediaComponents {
         picture,
         picture_sha256,
         alpha_mode: alpha_mode.to_string(),
@@ -681,8 +923,17 @@ fn persist_final_bundle(
         timescale: MediaTime::HZ_1M,
         frames: listed,
         audio,
-    };
-    write_media_sidecar(stage_index, fingerprint, node_id, &path, media, Some(parts))
+    })
+}
+
+fn abandon<T>(pending: &mut Vec<PendingPublish>, message: impl Into<String>) -> Result<T> {
+    fail_pending(pending, IoError::message(message.into()))
+}
+
+fn fail_pending<T>(pending: &mut Vec<PendingPublish>, err: IoError) -> Result<T> {
+    discard_pending(pending);
+    pending.clear();
+    Err(err)
 }
 
 fn write_media_sidecar(
@@ -723,59 +974,6 @@ fn checkpoint_name(node_id: &str, fingerprint: &str) -> (String, String) {
         .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
         .collect();
     (safe_node, stem)
-}
-
-fn collect_final_frames(video: &dyn VideoClip) -> Result<Vec<(Time, Frame)>> {
-    let times = final_sample_times(video)?;
-    let mut frames = Vec::with_capacity(times.len());
-    let mut label: Option<&str> = None;
-    let mut size: Option<Size> = None;
-    for time in times {
-        let frame = video.frame_at(time)?;
-        let next = alpha_label(frame.alpha_mode());
-        if let Some(prev) = label
-            && prev != next
-        {
-            return Err(IoError::message(
-                "final bundle refuses frames that do not share one alpha mode",
-            ));
-        }
-        if let Some(expected) = size
-            && frame.size() != expected
-        {
-            return Err(IoError::message(
-                "final bundle refuses frames that change size",
-            ));
-        }
-        label = Some(next);
-        size = Some(frame.size());
-        frames.push((time, frame));
-    }
-    Ok(frames)
-}
-
-fn collect_final_audio(
-    audio: Option<&dyn AudioClip>,
-) -> Result<Option<(AudioFormat, AudioBuffer)>> {
-    let Some(audio) = audio else {
-        return Ok(None);
-    };
-    let format = audio.format();
-    let frames = format.frames_for_duration(audio.duration());
-    if frames == 0 {
-        return Ok(None);
-    }
-    if frames > FINAL_MAX_AUDIO_FRAMES {
-        return Err(IoError::message(format!(
-            "final bundle refuses {frames} audio frames; the limit is {FINAL_MAX_AUDIO_FRAMES}"
-        )));
-    }
-    let Ok(count) = usize::try_from(frames) else {
-        return Err(IoError::message(
-            "final bundle refuses an audio length that does not fit in memory",
-        ));
-    };
-    Ok(Some((format, audio.samples_at(Time::ZERO, count)?)))
 }
 
 fn final_sample_times(video: &dyn VideoClip) -> Result<Vec<Time>> {
@@ -838,6 +1036,10 @@ fn too_many_frames(count: u64) -> IoError {
     ))
 }
 
+fn audio_frame_limit(frames: u64) -> String {
+    format!("final bundle refuses {frames} audio frames; the limit is {FINAL_MAX_AUDIO_FRAMES}")
+}
+
 #[allow(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
@@ -872,6 +1074,50 @@ fn alpha_mode_from_label(label: &str) -> Result<AlphaMode> {
     }
 }
 
+fn layout_label(layout: SampleLayout) -> String {
+    match layout {
+        SampleLayout::Mono => "mono".to_string(),
+        SampleLayout::Stereo => "stereo".to_string(),
+        SampleLayout::Quad => "quad".to_string(),
+        SampleLayout::Surround51 => "surround51".to_string(),
+        SampleLayout::Surround71 => "surround71".to_string(),
+        SampleLayout::Discrete(channels) => format!("discrete:{channels}"),
+    }
+}
+
+fn layout_from_label(label: &str, channels: u16) -> Result<SampleLayout> {
+    let parsed = if let Some(rest) = label.strip_prefix("discrete:") {
+        let count: u16 = rest.parse().map_err(|_| {
+            IoError::message(format!("final bundle refuses unknown audio layout {label}"))
+        })?;
+        if count == 0 {
+            return Err(IoError::message(
+                "final bundle refuses a discrete layout with no channels",
+            ));
+        }
+        SampleLayout::Discrete(count)
+    } else {
+        match label {
+            "mono" => SampleLayout::Mono,
+            "stereo" => SampleLayout::Stereo,
+            "quad" => SampleLayout::Quad,
+            "surround51" => SampleLayout::Surround51,
+            "surround71" => SampleLayout::Surround71,
+            _ => {
+                return Err(IoError::message(format!(
+                    "final bundle refuses unknown audio layout {label}"
+                )));
+            }
+        }
+    };
+    if parsed.channels() != channels {
+        return Err(IoError::message(format!(
+            "final bundle audio layout {label} does not match {channels} channels"
+        )));
+    }
+    Ok(parsed)
+}
+
 fn png_bytes(frame: &Frame) -> Result<Vec<u8>> {
     let size = frame.size();
     let data = frame.data().to_vec();
@@ -897,26 +1143,56 @@ fn png_bytes(frame: &Frame) -> Result<Vec<u8>> {
 /// A failed partial write removes only the partials from this attempt. Files
 /// that were already admitted stay in place, and this function does not write
 /// the sidecar.
+struct PendingPublish {
+    dest: PathBuf,
+    partial: PathBuf,
+}
+
+#[cfg(test)]
 fn publish_files(files: &[(PathBuf, Vec<u8>)]) -> Result<()> {
-    let mut partials = Vec::with_capacity(files.len());
+    let mut pending = Vec::with_capacity(files.len());
     for (path, bytes) in files {
-        let partial = partial_sibling(path)?;
-        if let Err(err) = fs::write(&partial, bytes) {
-            discard_paths(&partials);
-            return Err(IoError::message(format!(
-                "final bundle {}: {err}",
-                partial.display()
-            )));
-        }
-        partials.push(partial);
+        stage_partial(path.clone(), bytes, &mut pending)?;
     }
-    for (index, (path, _)) in files.iter().enumerate() {
-        if let Err(err) = replace_published(&partials[index], path) {
-            discard_paths(&partials[index..]);
+    commit_pending(&pending)
+}
+
+fn stage_partial(dest: PathBuf, bytes: &[u8], pending: &mut Vec<PendingPublish>) -> Result<()> {
+    let partial = match partial_sibling(&dest) {
+        Ok(partial) => partial,
+        Err(err) => {
+            discard_pending(pending);
+            pending.clear();
+            return Err(err);
+        }
+    };
+    if let Err(err) = fs::write(&partial, bytes) {
+        discard_pending(pending);
+        pending.clear();
+        let _ = fs::remove_file(&partial);
+        return Err(IoError::message(format!(
+            "final bundle {}: {err}",
+            partial.display()
+        )));
+    }
+    pending.push(PendingPublish { dest, partial });
+    Ok(())
+}
+
+fn commit_pending(pending: &[PendingPublish]) -> Result<()> {
+    for (index, file) in pending.iter().enumerate() {
+        if let Err(err) = replace_published(&file.partial, &file.dest) {
+            discard_pending(&pending[index..]);
             return Err(err);
         }
     }
     Ok(())
+}
+
+fn discard_pending(pending: &[PendingPublish]) {
+    for file in pending {
+        let _ = fs::remove_file(&file.partial);
+    }
 }
 
 fn partial_sibling(path: &Path) -> Result<PathBuf> {
@@ -946,12 +1222,6 @@ fn replace_published(partial: &Path, dest: &Path) -> Result<()> {
     }
     fs::rename(partial, dest)
         .map_err(|err| IoError::message(format!("final bundle rename {}: {err}", dest.display())))
-}
-
-fn discard_paths(paths: &[PathBuf]) {
-    for path in paths {
-        let _ = fs::remove_file(path);
-    }
 }
 
 fn read_png_frame(path: &Path, mode: AlphaMode) -> Result<Frame> {
@@ -993,33 +1263,65 @@ fn pcm_bytes(samples: &[f32]) -> Vec<u8> {
     bytes
 }
 
-fn read_pcm(path: &Path) -> Result<Vec<f32>> {
-    let bytes = fs::read(path)
-        .map_err(|err| IoError::message(format!("final pcm {}: {err}", path.display())))?;
-    if !bytes.len().is_multiple_of(4) {
-        return Err(IoError::message(
-            "final bundle pcm length is not a multiple of 4",
-        ));
+fn mask_bytes(samples: &[f32]) -> Result<Vec<u8>> {
+    let mut bytes = Vec::with_capacity(samples.len().saturating_mul(4));
+    for sample in samples {
+        if !sample.is_finite() {
+            return Err(IoError::message(
+                "final bundle refuses a non-finite coverage sample",
+            ));
+        }
+        bytes.extend_from_slice(&sample.clamp(0.0, 1.0).to_le_bytes());
     }
-    let mut samples = Vec::with_capacity(bytes.len() / 4);
+    Ok(bytes)
+}
+
+fn read_f32_range(path: &Path, start: usize, count: usize) -> Result<Vec<f32>> {
+    let mut file = File::open(path)
+        .map_err(|err| IoError::message(format!("final pcm {}: {err}", path.display())))?;
+    let offset = u64::try_from(start.saturating_mul(4))
+        .map_err(|_| IoError::message("final bundle refuses a pcm offset that does not fit"))?;
+    file.seek(SeekFrom::Start(offset))
+        .map_err(|err| IoError::message(format!("final pcm {}: {err}", path.display())))?;
+    let mut bytes = vec![0_u8; count.saturating_mul(4)];
+    file.read_exact(&mut bytes)
+        .map_err(|err| IoError::message(format!("final pcm {}: {err}", path.display())))?;
+    let mut samples = Vec::with_capacity(count);
     for chunk in bytes.chunks_exact(4) {
         let Ok(chunk) = <[u8; 4]>::try_from(chunk) else {
             return Err(IoError::message("final bundle pcm chunk is short"));
         };
-        samples.push(f32::from_le_bytes(chunk));
+        let sample = f32::from_le_bytes(chunk);
+        if !sample.is_finite() {
+            return Err(IoError::message(
+                "final bundle refuses a non-finite pcm or coverage sample",
+            ));
+        }
+        samples.push(sample);
     }
     Ok(samples)
 }
 
-struct HeldFrame {
+struct PictureSlot {
+    file: String,
+    sha256: String,
     pts: Time,
-    frame: Frame,
+    coverage: Option<(String, String)>,
+}
+
+struct CachedChunk {
+    start: usize,
+    frames: Vec<Frame>,
+    masks: Vec<Option<Mask>>,
 }
 
 struct FinalPictureClip {
-    frames: Vec<HeldFrame>,
+    bundle: PathBuf,
+    slots: Vec<PictureSlot>,
+    alpha: AlphaMode,
     duration: Duration,
     size: Size,
+    cache: Mutex<Option<CachedChunk>>,
 }
 
 impl FinalPictureClip {
@@ -1027,14 +1329,14 @@ impl FinalPictureClip {
         if parts.frames.is_empty() {
             return Err(IoError::message("final bundle has no frames to restore"));
         }
-        let mode = alpha_mode_from_label(&parts.alpha_mode)?;
+        let alpha = alpha_mode_from_label(&parts.alpha_mode)?;
         let duration = MediaTime::new(parts.duration_ticks, parts.timescale)?.to_duration();
         if duration.as_secs() <= 0.0 {
             return Err(IoError::message(
                 "final bundle refuses a non-positive duration",
             ));
         }
-        let mut frames = Vec::with_capacity(parts.frames.len());
+        let mut slots = Vec::with_capacity(parts.frames.len());
         for frame_ref in &parts.frames {
             let path = component_file(bundle, &frame_ref.file)
                 .ok_or_else(|| IoError::message("final bundle frame path is not a sibling file"))?;
@@ -1042,17 +1344,151 @@ impl FinalPictureClip {
             if got != frame_ref.sha256 {
                 return Err(IoError::message("final bundle frame hash does not match"));
             }
-            let frame = read_png_frame(&path, mode)?;
+            let coverage = match (&frame_ref.coverage, &frame_ref.coverage_sha256) {
+                (None, None) => None,
+                (Some(name), Some(hash)) => {
+                    let mask_path = component_file(bundle, name).ok_or_else(|| {
+                        IoError::message("final bundle coverage path is not a sibling file")
+                    })?;
+                    let got = fingerprint_file(&mask_path)?;
+                    if &got != hash {
+                        return Err(IoError::message(
+                            "final bundle coverage hash does not match",
+                        ));
+                    }
+                    Some((name.clone(), hash.clone()))
+                }
+                _ => {
+                    return Err(IoError::message(
+                        "final bundle coverage is missing its file or hash",
+                    ));
+                }
+            };
             let pts = MediaTime::new(frame_ref.pts_ticks, frame_ref.timescale)?.to_time();
-            frames.push(HeldFrame { pts, frame });
+            slots.push(PictureSlot {
+                file: frame_ref.file.clone(),
+                sha256: frame_ref.sha256.clone(),
+                pts,
+                coverage,
+            });
         }
-        frames.sort_by(|left, right| left.pts.as_secs().total_cmp(&right.pts.as_secs()));
-        let size = frames[0].frame.size();
-        Ok(Self {
-            frames,
+        slots.sort_by(|left, right| left.pts.as_secs().total_cmp(&right.pts.as_secs()));
+        let clip = Self {
+            bundle: bundle.to_path_buf(),
+            slots,
+            alpha,
             duration,
-            size,
+            // Width zero means the first decoded chunk has not chosen a size yet.
+            size: Size::new(0, 0),
+            cache: Mutex::new(None),
+        };
+        let chunk = clip.read_chunk(0)?;
+        let Some(size) = chunk.frames.first().map(Frame::size) else {
+            return Err(IoError::message("final bundle frame chunk is empty"));
+        };
+        if chunk.frames.iter().any(|frame| frame.size() != size) {
+            return Err(IoError::message(
+                "final bundle refuses frames that change size",
+            ));
+        }
+        *clip
+            .cache
+            .lock()
+            .map_err(|_| IoError::message("final bundle frame cache is poisoned"))? = Some(chunk);
+        Ok(Self { size, ..clip })
+    }
+
+    #[cfg(test)]
+    fn resident_frames(&self) -> usize {
+        self.cache
+            .lock()
+            .ok()
+            .and_then(|cache| cache.as_ref().map(|chunk| chunk.frames.len()))
+            .unwrap_or(0)
+    }
+
+    fn read_chunk(&self, start: usize) -> Result<CachedChunk> {
+        let end = (start + FINAL_CHUNK_FRAMES).min(self.slots.len());
+        if start >= end {
+            return Err(IoError::message("final bundle frame chunk is empty"));
+        }
+        let mut frames = Vec::with_capacity(end - start);
+        let mut masks = Vec::with_capacity(end - start);
+        for slot in &self.slots[start..end] {
+            let path = component_file(&self.bundle, &slot.file)
+                .ok_or_else(|| IoError::message("final bundle frame path is not a sibling file"))?;
+            let got = fingerprint_file(&path)?;
+            if got != slot.sha256 {
+                return Err(IoError::message("final bundle frame hash does not match"));
+            }
+            let frame = read_png_frame(&path, self.alpha)?;
+            if self.size.width > 0 && frame.size() != self.size {
+                return Err(IoError::message(
+                    "final bundle refuses frames that change size",
+                ));
+            }
+            masks.push(self.read_coverage(slot, frame.size())?);
+            frames.push(frame);
+        }
+        Ok(CachedChunk {
+            start,
+            frames,
+            masks,
         })
+    }
+
+    fn read_coverage(&self, slot: &PictureSlot, size: Size) -> Result<Option<Mask>> {
+        let Some((name, hash)) = &slot.coverage else {
+            return Ok(None);
+        };
+        let path = component_file(&self.bundle, name)
+            .ok_or_else(|| IoError::message("final bundle coverage path is not a sibling file"))?;
+        let got = fingerprint_file(&path)?;
+        if &got != hash {
+            return Err(IoError::message(
+                "final bundle coverage hash does not match",
+            ));
+        }
+        let count = usize::try_from(size.pixel_count())
+            .map_err(|_| IoError::message("final bundle coverage does not fit in memory"))?;
+        let samples = read_f32_range(&path, 0, count)?;
+        Mask::from_raw(size, samples).map(Some).map_err(|err| {
+            IoError::message(format!(
+                "final bundle coverage does not match the picture: {err}"
+            ))
+        })
+    }
+
+    fn slot_index(&self, t: Time) -> usize {
+        let mut selected = 0;
+        for (index, slot) in self.slots.iter().enumerate() {
+            if slot.pts.as_secs() <= t.as_secs() {
+                selected = index;
+            }
+        }
+        selected
+    }
+
+    fn cached_sample(&self, index: usize) -> reelforge_core::Result<(Frame, Option<Mask>)> {
+        let start = index / FINAL_CHUNK_FRAMES * FINAL_CHUNK_FRAMES;
+        let mut cache = self
+            .cache
+            .lock()
+            .map_err(|_| CoreError::invalid_frame("final bundle frame cache is poisoned"))?;
+        let hit = cache.as_ref().is_some_and(|chunk| chunk.start == start);
+        if !hit {
+            let loaded = self
+                .read_chunk(start)
+                .map_err(|err| CoreError::invalid_frame(err.to_string()))?;
+            *cache = Some(loaded);
+        }
+        let Some(chunk) = cache.as_ref() else {
+            return Err(CoreError::invalid_frame(
+                "final bundle frame cache is empty",
+            ));
+        };
+        let local = index - chunk.start;
+        Ok((chunk.frames[local].clone(), chunk.masks[local].clone()))
     }
 }
 
@@ -1070,7 +1506,7 @@ impl VideoClip for FinalPictureClip {
     }
 
     fn sample_times(&self) -> Option<Vec<Time>> {
-        Some(self.frames.iter().map(|held| held.pts).collect())
+        Some(self.slots.iter().map(|slot| slot.pts).collect())
     }
 
     fn frame_at(&self, t: Time) -> reelforge_core::Result<Frame> {
@@ -1080,19 +1516,24 @@ impl VideoClip for FinalPictureClip {
                 range: (Time::ZERO, Time::from_secs(self.duration.as_secs())),
             });
         }
-        let mut selected = &self.frames[0];
-        for held in &self.frames {
-            if held.pts.as_secs() <= t.as_secs() {
-                selected = held;
-            }
+        Ok(self.cached_sample(self.slot_index(t))?.0)
+    }
+
+    fn mask_at(&self, t: Time) -> reelforge_core::Result<Option<Mask>> {
+        if t.as_secs() < 0.0 || t.as_secs() >= self.duration.as_secs() {
+            return Err(CoreError::TimeOutOfRange {
+                time: t,
+                range: (Time::ZERO, Time::from_secs(self.duration.as_secs())),
+            });
         }
-        Ok(selected.frame.clone())
+        Ok(self.cached_sample(self.slot_index(t))?.1)
     }
 }
 
 struct FinalPcmClip {
+    path: PathBuf,
     format: AudioFormat,
-    samples: Vec<f32>,
+    sample_count: u64,
     duration: Duration,
 }
 
@@ -1109,21 +1550,37 @@ impl FinalPcmClip {
         if got != audio.sha256 {
             return Err(IoError::message("final bundle pcm hash does not match"));
         }
-        let samples = read_pcm(&path)?;
-        let format = AudioFormat::new(
-            audio.sample_rate,
-            SampleLayout::from_channels(audio.channels),
-        )?;
-        let channels = usize::from(format.channels());
-        if channels == 0 || !samples.len().is_multiple_of(channels) {
+        let layout = match &audio.layout {
+            Some(label) => layout_from_label(label, audio.channels)?,
+            None => SampleLayout::from_channels(audio.channels),
+        };
+        let format = AudioFormat::new(audio.sample_rate, layout)?;
+        let meta = fs::metadata(&path)
+            .map_err(|err| IoError::message(format!("final pcm {}: {err}", path.display())))?;
+        if !meta.len().is_multiple_of(4) {
+            return Err(IoError::message(
+                "final bundle pcm length is not a multiple of 4",
+            ));
+        }
+        let channels = u64::from(format.channels());
+        let samples = meta.len() / 4;
+        if channels == 0 || !samples.is_multiple_of(channels) {
             return Err(IoError::message(
                 "final bundle pcm does not match its channel count",
             ));
         }
-        let frame_count = u64::try_from(samples.len() / channels).unwrap_or(0);
+        let frame_count = samples / channels;
+        if let Some(declared) = audio.sample_count
+            && declared != frame_count
+        {
+            return Err(IoError::message(
+                "final bundle pcm sample count does not match the file",
+            ));
+        }
         Ok(Self {
+            path,
             format,
-            samples,
+            sample_count: frame_count,
             duration: format.duration_of_frames(frame_count),
         })
     }
@@ -1150,10 +1607,15 @@ impl AudioClip for FinalPcmClip {
         let Some(need) = frame_count.checked_mul(channels) else {
             return Err(CoreError::invalid_audio("pcm read length overflow"));
         };
+        let stored = usize::try_from(self.sample_count)
+            .unwrap_or(usize::MAX)
+            .saturating_mul(channels);
         let mut out = vec![0.0; need];
-        if start < self.samples.len() {
-            let copy = (self.samples.len() - start).min(need);
-            out[..copy].copy_from_slice(&self.samples[start..start + copy]);
+        if start < stored {
+            let copy = (stored - start).min(need);
+            let samples = read_f32_range(&self.path, start, copy)
+                .map_err(|err| CoreError::invalid_audio(err.to_string()))?;
+            out[..samples.len()].copy_from_slice(&samples);
         }
         AudioBuffer::from_interleaved(self.format, out)
     }
@@ -1224,7 +1686,7 @@ mod tests {
     use super::*;
     use reelforge_core::{
         AlphaMode, AudioBuffer, AudioClip, AudioFormat, ColorClip, CoreError, Duration, Frame,
-        FrameFormat, MediaTime, Rgb8, SampleLayout, Size, Time, VideoClip,
+        FrameFormat, Mask, MediaTime, Rgb8, SampleLayout, Size, Time, VideoClip,
     };
     use reelforge_render_graph::{MaskSample, MaskTimeline};
 
@@ -1472,6 +1934,7 @@ mod tests {
 
     struct StepVideo {
         frames: Vec<Frame>,
+        masks: Vec<Option<Mask>>,
         fps: f64,
         duration: Duration,
     }
@@ -1502,6 +1965,17 @@ mod tests {
                 .cloned()
                 .ok_or_else(|| CoreError::invalid_frame("step video has no frames"))
         }
+
+        fn mask_at(&self, t: Time) -> reelforge_core::Result<Option<Mask>> {
+            if t.as_secs() < 0.0 || t.as_secs() >= self.duration.as_secs() {
+                return Err(CoreError::TimeOutOfRange {
+                    time: t,
+                    range: (Time::ZERO, Time::from_secs(self.duration.as_secs())),
+                });
+            }
+            let index = step_frame_index(t.as_secs(), self.fps, self.frames.len());
+            Ok(self.masks.get(index).cloned().flatten())
+        }
     }
 
     struct StepAudio {
@@ -1530,9 +2004,12 @@ mod tests {
             let Some(need) = frame_count.checked_mul(channels) else {
                 return Err(CoreError::invalid_audio("step audio length overflow"));
             };
+            let origin = pcm_origin(t, self.format.sample_rate).saturating_mul(channels);
             let mut out = vec![0.0; need];
-            let copy = need.min(self.samples.len());
-            out[..copy].copy_from_slice(&self.samples[..copy]);
+            if origin < self.samples.len() {
+                let copy = need.min(self.samples.len() - origin);
+                out[..copy].copy_from_slice(&self.samples[origin..origin + copy]);
+            }
             AudioBuffer::from_interleaved(self.format, out)
         }
     }
@@ -1582,6 +2059,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let video = StepVideo {
             frames: vec![rgba_step([10, 20, 30], 128), rgba_step([70, 80, 90], 64)],
+            masks: Vec::new(),
             fps: 2.0,
             duration: Duration::from_secs(1.0),
         };
@@ -1679,6 +2157,7 @@ mod tests {
                 rgba_step([4, 5, 6], 200),
                 rgba_step([7, 8, 9], 100),
             ],
+            masks: Vec::new(),
             fps: 2.0,
             duration: Duration::from_secs(1.5),
         };
@@ -1832,6 +2311,223 @@ mod tests {
             assert_eq!(plan.start_stage, 0);
             assert!(plan.restored_video.is_empty());
         }
+    }
+
+    #[test]
+    fn final_bundle_restores_coverage_apart_from_alpha() {
+        let dir = tempfile::tempdir().unwrap();
+        let video = StepVideo {
+            frames: vec![rgba_step([10, 20, 30], 128), rgba_step([70, 80, 90], 64)],
+            masks: vec![
+                Some(Mask::from_raw(Size::new(2, 1), vec![0.25, 0.5]).unwrap()),
+                Some(Mask::from_raw(Size::new(2, 1), vec![0.75, 0.0]).unwrap()),
+            ],
+            fps: 2.0,
+            duration: Duration::from_secs(1.0),
+        };
+        let encode = StageEncodeState::default();
+        let rec = persist_stage_media(
+            dir.path(),
+            0,
+            "cover-fp",
+            "src",
+            &final_parts(&video, None, None, &encode),
+        )
+        .unwrap();
+        let mask_files = fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "mask"))
+            .count();
+        assert_eq!(mask_files, 2);
+        let plan = restore_validated_prefix_for(
+            std::slice::from_ref(&rec),
+            &["cover-fp".into()],
+            &[],
+            CheckpointFidelity::FinalLossless,
+        )
+        .unwrap();
+        let clip = plan.restored_video.get("src").unwrap();
+        let frame = clip.frame_at(Time::ZERO).unwrap();
+        assert_eq!(frame.data()[3], 128);
+        let coverage = clip.mask_at(Time::ZERO).unwrap().unwrap();
+        assert_eq!(
+            coverage
+                .data()
+                .iter()
+                .copied()
+                .map(f32::to_bits)
+                .collect::<Vec<_>>(),
+            [0.25_f32, 0.5].map(f32::to_bits)
+        );
+        let later = clip.mask_at(Time::from_secs(0.5)).unwrap().unwrap();
+        assert_eq!(
+            later
+                .data()
+                .iter()
+                .copied()
+                .map(f32::to_bits)
+                .collect::<Vec<_>>(),
+            [0.75_f32, 0.0].map(f32::to_bits)
+        );
+        assert_eq!(clip.frame_at(Time::from_secs(0.5)).unwrap().data()[3], 64);
+    }
+
+    #[test]
+    fn final_bundle_keeps_discrete_channel_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        let video = ColorClip::new(Size::new(2, 1), Rgb8::RED, Duration::from_secs(1.0));
+        let format = AudioFormat::new(4, SampleLayout::Discrete(4)).unwrap();
+        assert_eq!(SampleLayout::from_channels(4), SampleLayout::Quad);
+        let pattern = [0.25_f32, -0.5, 0.125, 0.0];
+        let audio = StepAudio {
+            samples: pattern.into_iter().cycle().take(16).collect(),
+            format,
+            duration: Duration::from_secs(1.0),
+        };
+        let encode = StageEncodeState::default();
+        let rec = persist_stage_media(
+            dir.path(),
+            0,
+            "layout-fp",
+            "src",
+            &final_parts(&video, Some(&audio), None, &encode),
+        )
+        .unwrap();
+        let side = fs::read(sidecar_path(Path::new(&rec.uri))).unwrap();
+        let text = String::from_utf8(side).unwrap();
+        assert!(text.contains("\"layout\":\"discrete:4\""), "{text}");
+        let plan = restore_validated_prefix_for(
+            std::slice::from_ref(&rec),
+            &["layout-fp".into()],
+            &[],
+            CheckpointFidelity::FinalLossless,
+        )
+        .unwrap();
+        let restored = plan.restored_audio.get("src").unwrap();
+        assert_eq!(restored.format().layout, SampleLayout::Discrete(4));
+        assert_ne!(restored.format().layout, SampleLayout::Quad);
+        let samples = restored.samples_at(Time::ZERO, 1).unwrap();
+        assert_eq!(
+            samples
+                .samples()
+                .iter()
+                .copied()
+                .map(f32::to_bits)
+                .collect::<Vec<_>>(),
+            pattern.map(f32::to_bits)
+        );
+    }
+
+    #[test]
+    fn final_bundle_keeps_one_picture_chunk_resident() {
+        let dir = tempfile::tempdir().unwrap();
+        let frames = (0..16)
+            .map(|index| {
+                let byte = u8::try_from(index).unwrap_or(u8::MAX);
+                rgba_step([byte, 0, 0], 255)
+            })
+            .collect();
+        let video = StepVideo {
+            frames,
+            masks: Vec::new(),
+            fps: 16.0,
+            duration: Duration::from_secs(1.0),
+        };
+        let encode = StageEncodeState::default();
+        let rec = persist_stage_media(
+            dir.path(),
+            0,
+            "chunk-fp",
+            "src",
+            &final_parts(&video, None, None, &encode),
+        )
+        .unwrap();
+        let pngs = fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "png"))
+            .count();
+        assert_eq!(pngs, 16);
+        let side = read_sidecar(Path::new(&rec.uri)).unwrap().unwrap();
+        let parts = side.final_components.unwrap();
+        let clip = FinalPictureClip::open(Path::new(&rec.uri), &parts).unwrap();
+        assert_eq!(clip.resident_frames(), FINAL_CHUNK_FRAMES);
+        assert_eq!(clip.frame_at(Time::from_secs(0.5)).unwrap().data()[0], 8);
+        assert_eq!(clip.resident_frames(), FINAL_CHUNK_FRAMES);
+        assert_eq!(
+            clip.frame_at(Time::from_secs(15.0 / 16.0)).unwrap().data()[0],
+            15
+        );
+        assert_eq!(clip.resident_frames(), FINAL_CHUNK_FRAMES);
+        assert_eq!(clip.frame_at(Time::ZERO).unwrap().data()[0], 0);
+        assert_eq!(clip.resident_frames(), FINAL_CHUNK_FRAMES);
+    }
+
+    #[test]
+    fn final_bundle_reads_pcm_past_the_first_chunk() {
+        let dir = tempfile::tempdir().unwrap();
+        let video = ColorClip::new(Size::new(2, 1), Rgb8::RED, Duration::from_secs(1.0));
+        let format = AudioFormat::new(8_192, SampleLayout::Mono).unwrap();
+        let mut samples = vec![0.25_f32; 4_096];
+        samples.extend(std::iter::repeat_n(0.75_f32, 4_096));
+        let audio = StepAudio {
+            samples,
+            format,
+            duration: Duration::from_secs(1.0),
+        };
+        let encode = StageEncodeState::default();
+        let rec = persist_stage_media(
+            dir.path(),
+            0,
+            "pcm-fp",
+            "src",
+            &final_parts(&video, Some(&audio), None, &encode),
+        )
+        .unwrap();
+        let plan = restore_validated_prefix_for(
+            std::slice::from_ref(&rec),
+            &["pcm-fp".into()],
+            &[],
+            CheckpointFidelity::FinalLossless,
+        )
+        .unwrap();
+        let restored = plan.restored_audio.get("src").unwrap();
+        let boundary = restored
+            .samples_at(Time::from_secs(4_095.0 / 8_192.0), 2)
+            .unwrap();
+        assert_eq!(
+            boundary
+                .samples()
+                .iter()
+                .copied()
+                .map(f32::to_bits)
+                .collect::<Vec<_>>(),
+            [0.25_f32, 0.75].map(f32::to_bits)
+        );
+    }
+
+    #[test]
+    fn final_bundle_refuses_too_many_audio_frames_before_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let video = ColorClip::new(Size::new(2, 2), Rgb8::RED, Duration::from_secs(0.5));
+        let audio = StepAudio {
+            samples: Vec::new(),
+            format: AudioFormat::new(48_000, SampleLayout::Mono).unwrap(),
+            duration: Duration::from_secs(6.0),
+        };
+        let encode = StageEncodeState::default();
+        let err = persist_stage_media(
+            dir.path(),
+            0,
+            "too-much-pcm",
+            "src",
+            &final_parts(&video, Some(&audio), None, &encode),
+        )
+        .unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains("240000"), "{text}");
+        assert!(fs::read_dir(dir.path()).unwrap().next().is_none());
     }
 
     #[test]
