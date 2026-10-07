@@ -785,6 +785,9 @@ fn final_sample_times(video: &dyn VideoClip) -> Result<Vec<Time>> {
             "final bundle refuses a clip with no positive duration",
         ));
     }
+    if let Some(times) = kept_sample_times(video, duration)? {
+        return Ok(times);
+    }
     let Some(fps) = video.fps().filter(|fps| fps.is_finite() && *fps > 0.0) else {
         return Ok(vec![Time::ZERO]);
     };
@@ -806,6 +809,27 @@ fn final_sample_times(video: &dyn VideoClip) -> Result<Vec<Time>> {
         times.push(Time::ZERO);
     }
     Ok(times)
+}
+
+fn kept_sample_times(video: &dyn VideoClip, duration: f64) -> Result<Option<Vec<Time>>> {
+    let Some(times) = video.sample_times() else {
+        return Ok(None);
+    };
+    let kept: Vec<Time> = times
+        .into_iter()
+        .filter(|time| {
+            let secs = time.as_secs();
+            secs.is_finite() && secs >= 0.0 && secs < duration
+        })
+        .collect();
+    if kept.is_empty() {
+        return Ok(None);
+    }
+    if kept.len() > FINAL_MAX_FRAMES {
+        let count = u64::try_from(kept.len()).unwrap_or(u64::MAX);
+        return Err(too_many_frames(count));
+    }
+    Ok(Some(kept))
 }
 
 fn too_many_frames(count: u64) -> IoError {
@@ -1043,6 +1067,10 @@ impl VideoClip for FinalPictureClip {
 
     fn fps(&self) -> Option<f64> {
         None
+    }
+
+    fn sample_times(&self) -> Option<Vec<Time>> {
+        Some(self.frames.iter().map(|held| held.pts).collect())
     }
 
     fn frame_at(&self, t: Time) -> reelforge_core::Result<Frame> {
@@ -1639,6 +1667,71 @@ mod tests {
                 .unwrap()
                 .data()[3],
             128
+        );
+    }
+
+    #[test]
+    fn restored_final_bundle_repersists_every_picture() {
+        let dir = tempfile::tempdir().unwrap();
+        let video = StepVideo {
+            frames: vec![
+                rgba_step([1, 2, 3], 255),
+                rgba_step([4, 5, 6], 200),
+                rgba_step([7, 8, 9], 100),
+            ],
+            fps: 2.0,
+            duration: Duration::from_secs(1.5),
+        };
+        let encode = StageEncodeState::default();
+        let rec = persist_stage_media(
+            dir.path(),
+            0,
+            "times-fp",
+            "src",
+            &final_parts(&video, None, None, &encode),
+        )
+        .unwrap();
+        let plan = restore_validated_prefix_for(
+            std::slice::from_ref(&rec),
+            &["times-fp".into()],
+            &[],
+            CheckpointFidelity::FinalLossless,
+        )
+        .unwrap();
+        let clip = plan.restored_video.get("src").unwrap();
+        assert!(clip.fps().is_none());
+        assert_eq!(clip.sample_times().map(|times| times.len()), Some(3));
+
+        let again_dir = tempfile::tempdir().unwrap();
+        let again = persist_stage_media(
+            again_dir.path(),
+            0,
+            "times-again",
+            "src",
+            &final_parts(clip, None, None, &encode),
+        )
+        .unwrap();
+        let pngs = fs::read_dir(again_dir.path())
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "png"))
+            .count();
+        assert_eq!(pngs, 3);
+        let second = restore_validated_prefix_for(
+            std::slice::from_ref(&again),
+            &["times-again".into()],
+            &[],
+            CheckpointFidelity::FinalLossless,
+        )
+        .unwrap();
+        let restored = second.restored_video.get("src").unwrap();
+        assert_eq!(
+            restored.frame_at(Time::ZERO).unwrap().data(),
+            rgba_step([1, 2, 3], 255).data()
+        );
+        assert_eq!(
+            restored.frame_at(Time::from_secs(1.0)).unwrap().data(),
+            rgba_step([7, 8, 9], 100).data()
         );
     }
 

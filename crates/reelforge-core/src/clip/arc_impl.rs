@@ -25,6 +25,10 @@ impl VideoClip for Arc<dyn VideoClip> {
         (**self).fps()
     }
 
+    fn sample_times(&self) -> Option<Vec<Time>> {
+        (**self).sample_times()
+    }
+
     fn id(&self) -> Option<&ClipId> {
         (**self).id()
     }

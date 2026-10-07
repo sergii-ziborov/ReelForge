@@ -29,6 +29,14 @@ pub trait VideoClip: Send + Sync {
         None
     }
 
+    /// Stored presentation times, when this clip has an explicit frame list.
+    ///
+    /// `None` leaves the caller on [`Self::fps`]. The default is `None`, so a
+    /// still with no fps and no stored times is still one instant.
+    fn sample_times(&self) -> Option<Vec<Time>> {
+        None
+    }
+
     /// Optional stable id for graph tooling.
     fn id(&self) -> Option<&ClipId> {
         None
