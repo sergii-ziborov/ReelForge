@@ -288,6 +288,64 @@ fn trailing_gap_extends_compose_duration() {
 }
 
 #[test]
+fn audio_role_stays_audio_through_trim() {
+    let mut p = CaptureProject::new(ProjectId::new("p"), "av");
+    p.media.push(media("a", "a.mp4"));
+    p.media.push(MediaRef {
+        id: MediaRefId::new("m"),
+        uri: "m.wav".into(),
+        duration: None,
+        role: Some("audio".into()),
+    });
+    let mut seq = Sequence::new(SequenceId::new("s"), "main");
+    let mut video = TimelineTrack::new(TimelineTrackId::new("v0"), TrackKind::Video);
+    video.items.push(clip("pic", "a", 0.0, 2.0));
+    let mut audio = TimelineTrack::new(TimelineTrackId::new("a0"), TrackKind::Audio);
+    let TimelineItem::Clip(mut sound) = clip("snd", "m", 0.0, 2.0) else {
+        panic!("clip");
+    };
+    sound.retiming = Retiming::Speed { factor: 2.0 };
+    audio.items.push(TimelineItem::Clip(sound));
+    seq.tracks.push(video);
+    seq.tracks.push(audio);
+    p.sequences.push(seq);
+    let out = compile_project(&p).unwrap();
+    let wav = out
+        .graph
+        .assets
+        .iter()
+        .find(|asset| asset.uri == "m.wav")
+        .expect("wav asset");
+    assert_eq!(wav.role.as_deref(), Some("audio"));
+    let names = ops(&out.graph);
+    assert!(names.contains(&"rf.transform.trim"), "{names:?}");
+    assert!(names.contains(&"rf.transform.speed"), "{names:?}");
+    assert!(names.contains(&"rf.audio.mix"), "{names:?}");
+    out.graph.validate().unwrap();
+}
+
+#[test]
+fn video_track_refuses_audio_media() {
+    let mut p = CaptureProject::new(ProjectId::new("p"), "av");
+    p.media.push(MediaRef {
+        id: MediaRefId::new("m"),
+        uri: "m.wav".into(),
+        duration: None,
+        role: Some("audio".into()),
+    });
+    let mut seq = Sequence::new(SequenceId::new("s"), "main");
+    let mut video = TimelineTrack::new(TimelineTrackId::new("v0"), TrackKind::Video);
+    video.items.push(clip("pic", "m", 0.0, 2.0));
+    seq.tracks.push(video);
+    p.sequences.push(seq);
+    let err = compile_project(&p).unwrap_err().to_string();
+    assert!(
+        err.contains("clip pic: audio media cannot compile on a video track"),
+        "{err}"
+    );
+}
+
+#[test]
 fn audio_track_mixes() {
     let mut p = CaptureProject::new(ProjectId::new("p"), "av");
     p.media.push(media("a", "a.mp4"));

@@ -21,6 +21,7 @@ pub struct ProjectCompile {
 /// Video clips: `Source` → trim (ticks) → optional speed / fade / slide → compose.
 /// A same-track dissolve is `rf.transform.crossfade_in` on the incoming clip.
 /// Audio tracks: trim and speed, then `rf.audio.mix` onto the picture.
+/// Media with role `audio` stays audio-only through that chain.
 /// Freeze, loop, crop, scale, fade, dissolve, and wipe are picture-only and fail compile on an audio track.
 /// Subtitle tracks compile to `rf.subtitle.burn` (file URI + record start).
 /// Project `semantic` refs compile to `rf.adapter.sightloom`. An empty

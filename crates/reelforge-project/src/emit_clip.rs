@@ -19,15 +19,18 @@ impl CompileCtx<'_> {
         // timeline would still move, so refuse them here.
         refuse_picture_only(clip, picture)?;
         let media = self.lookup_media(&clip.media)?;
+        if picture && media.role.as_deref() == Some("audio") {
+            return Err(ProjectError::message(format!(
+                "clip {}: audio media cannot compile on a video track",
+                clip.id.as_str()
+            )));
+        }
         let asset_key = format!("m_{}", media.id.as_str());
         let asset = MediaAsset {
             id: MediaAssetId(asset_key.clone()),
             uri: media.uri.clone(),
             duration: media.duration,
-            role: match media.role.as_deref() {
-                Some("audio") => None,
-                _ => media.role.clone(),
-            },
+            role: media.role.clone(),
         };
         let asset_id = asset.id.clone();
         self.assets.entry(asset_key).or_insert(asset);

@@ -151,6 +151,19 @@ fn infer_op_contract(
                 notes: None,
             })
         }
+        TypedParams::Trim { .. } | TypedParams::Speed { .. } => {
+            let input = single_input(node_id, upstreams)?;
+            if input.audio && !input.video {
+                return Ok(MediaContract::audio_only());
+            }
+            require(node_id, op.id.as_str(), input, &desc.input.without_notes())?;
+            Ok(MediaContract {
+                video: input.video,
+                audio: input.audio,
+                masks: false,
+                notes: None,
+            })
+        }
         TypedParams::EncodeH264 { preserve_audio, .. } => {
             let input = single_input(node_id, upstreams)?;
             require(node_id, op.id.as_str(), input, &MediaContract::video_only())?;
@@ -307,6 +320,54 @@ mod tests {
         )
         .unwrap();
         assert!(out.video && out.audio);
+    }
+
+    #[test]
+    fn trim_and_speed_keep_audio_only() {
+        let reg = OperationRegistry::with_builtins();
+        let au = MediaContract::audio_only();
+        let trim = infer_op_contract(
+            "trim",
+            &crate::compile::compile_op(
+                &reg,
+                &OperationId::new("rf.transform.trim"),
+                &serde_json::json!({ "start": 0, "duration": 1.0 }),
+            )
+            .unwrap(),
+            &[&au],
+            &reg,
+        )
+        .unwrap();
+        assert!(!trim.video && trim.audio);
+        let speed = infer_op_contract(
+            "speed",
+            &crate::compile::compile_op(
+                &reg,
+                &OperationId::new("rf.transform.speed"),
+                &serde_json::json!({ "factor": 2.0 }),
+            )
+            .unwrap(),
+            &[&au],
+            &reg,
+        )
+        .unwrap();
+        assert!(!speed.video && speed.audio);
+        let err = infer_op_contract(
+            "freeze",
+            &crate::compile::compile_op(
+                &reg,
+                &OperationId::new("rf.transform.freeze"),
+                &serde_json::json!({
+                    "at": { "ticks": 0, "timescale": 1000 },
+                    "hold": { "ticks": 1000, "timescale": 1000 }
+                }),
+            )
+            .unwrap(),
+            &[&au],
+            &reg,
+        )
+        .unwrap_err();
+        assert_eq!(err.code_str(), "RFGRAPH_MEDIA_CONTRACT");
     }
 
     #[test]
