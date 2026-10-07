@@ -2,8 +2,8 @@
 
 use reelforge_core::MediaTime;
 use reelforge_project::{
-    GroupId, MotionKey, MotionProperty, PartAnchor, PartId, SceneDocument, SceneGroup, ScenePart,
-    ScenePoint, SourceLink,
+    GroupId, MotionKey, MotionProperty, PartAnchor, PartId, SceneCanvas, SceneDocument, SceneGroup,
+    SceneMedia, ScenePart, ScenePoint, SourceLink, compile_scene,
 };
 
 fn two_parts() -> SceneDocument {
@@ -140,4 +140,164 @@ fn version_zero_migrates_and_a_newer_version_is_rejected() {
     let future = r#"{"version":2,"id":"scene","name":"flower"}"#;
     let err = SceneDocument::from_json(future).unwrap_err();
     assert!(err.to_string().contains("version 2"));
+}
+
+fn canvas() -> SceneCanvas {
+    SceneCanvas {
+        width: 8,
+        height: 4,
+        duration: MediaTime::from_secs(2.0, 1_000).unwrap(),
+    }
+}
+
+fn photo() -> Vec<SceneMedia> {
+    vec![SceneMedia {
+        id: reelforge_project::MediaRefId::new("photo"),
+        uri: "mem://photo".into(),
+    }]
+}
+
+fn key(secs: i64, value: f64) -> MotionKey {
+    MotionKey {
+        t: MediaTime::new(secs, 1).unwrap(),
+        value,
+    }
+}
+
+#[test]
+fn invalid_links_do_not_reach_the_compiler() {
+    let mut scene = two_parts();
+    scene.parts[0].parent = Some(PartId::new("petal"));
+    scene.parts[1].parent = Some(PartId::new("stem"));
+    let err = scene.validate().unwrap_err();
+    assert!(err.to_string().contains("parent cycle"));
+    let err = compile_scene(&scene, &photo(), canvas()).unwrap_err();
+    assert!(err.to_string().contains("parent cycle"));
+
+    let mut both = two_parts();
+    both.parts[1].parent = Some(PartId::new("stem"));
+    both.parts[1].anchor = Some(PartAnchor {
+        target: PartId::new("stem"),
+        point: ScenePoint::new(1.0, 0.0),
+    });
+    assert!(
+        both.validate()
+            .unwrap_err()
+            .to_string()
+            .contains("both a parent and an anchor")
+    );
+
+    let mut group = two_parts();
+    group.parts[1].group = Some(GroupId::new("flower"));
+    assert!(
+        group
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("missing part")
+    );
+
+    let mut unsorted = two_parts();
+    unsorted.parts[1].source.mask = None;
+    unsorted
+        .add_motion_key(
+            &PartId::new("petal"),
+            MotionProperty::PositionX,
+            key(1, 2.0),
+        )
+        .unwrap();
+    unsorted
+        .add_motion_key(
+            &PartId::new("petal"),
+            MotionProperty::PositionX,
+            key(0, 1.0),
+        )
+        .unwrap();
+    assert!(
+        unsorted
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("not strictly increasing")
+    );
+
+    let mut mixed = two_parts();
+    mixed.parts[0].parent = Some(PartId::new("petal"));
+    mixed.parts[1].anchor = Some(PartAnchor {
+        target: PartId::new("stem"),
+        point: ScenePoint::new(0.0, 0.0),
+    });
+    assert!(
+        mixed
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("pose cycle")
+    );
+}
+
+#[test]
+fn compile_scene_keeps_parent_pivot_and_rotation() {
+    let mut scene = two_parts();
+    scene.parts[1].source.mask = None;
+    scene.parts[1].parent = Some(PartId::new("stem"));
+    scene.parts[1].pivot = ScenePoint::new(1.0, 2.0);
+    scene.parts[1].order = 1;
+    scene
+        .add_motion_key(
+            &PartId::new("petal"),
+            MotionProperty::Rotation,
+            key(0, 15.0),
+        )
+        .unwrap();
+    scene
+        .add_motion_key(&PartId::new("stem"), MotionProperty::PositionX, key(0, 4.0))
+        .unwrap();
+    scene
+        .add_motion_key(&PartId::new("stem"), MotionProperty::PositionX, key(1, 8.0))
+        .unwrap();
+    scene.set_hidden(&PartId::new("stem"), false).unwrap();
+
+    let compiled = compile_scene(&scene, &photo(), canvas()).unwrap();
+    let loaded = SceneDocument::from_json(&scene.to_json().unwrap()).unwrap();
+    let again = compile_scene(&loaded, &photo(), canvas()).unwrap();
+    assert_eq!(compiled.resolved, again.resolved);
+    assert_eq!(compiled.graph, again.graph);
+    let text = serde_json::to_string(&compiled.graph).unwrap();
+    assert!(text.contains("\"parent\":\"stem\""), "{text}");
+    assert!(text.contains("\"rotation\""), "{text}");
+    assert!(text.contains("keyframes"), "{text}");
+    assert!(text.contains("1.0"), "{text}");
+    assert_eq!(compiled.resolved.parts.len(), 2);
+    assert!((compiled.resolved.parts[1].pivot.x - 1.0).abs() < 1e-9);
+
+    scene.parts[1].source.mask = Some("petal-mask".into());
+    let err = compile_scene(&scene, &photo(), canvas()).unwrap_err();
+    assert!(err.to_string().contains("coverage is not compiled"));
+}
+
+#[test]
+fn compile_scene_keeps_an_anchor_and_drops_hidden_parts() {
+    let mut scene = two_parts();
+    scene.parts[1].source.mask = None;
+    scene
+        .bind_anchor(
+            &PartId::new("petal"),
+            PartAnchor {
+                target: PartId::new("stem"),
+                point: ScenePoint::new(1.0, 0.0),
+            },
+        )
+        .unwrap();
+    scene.set_hidden(&PartId::new("stem"), true).unwrap();
+    let err = compile_scene(&scene, &photo(), canvas()).unwrap_err();
+    assert!(err.to_string().contains("not a visible part"));
+
+    scene.set_hidden(&PartId::new("stem"), false).unwrap();
+    scene.set_hidden(&PartId::new("petal"), true).unwrap();
+    let compiled = compile_scene(&scene, &photo(), canvas()).unwrap();
+    assert_eq!(compiled.resolved.parts.len(), 1);
+    assert_eq!(compiled.resolved.parts[0].id.as_str(), "stem");
+    let text = serde_json::to_string(&compiled.graph).unwrap();
+    assert!(!text.contains("petal"), "{text}");
 }

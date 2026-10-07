@@ -5,7 +5,9 @@
 use crate::error::{ProjectError, Result};
 use crate::ids::{GroupId, MediaRefId, PartId, SceneId};
 use reelforge_core::MediaTime;
+use reelforge_render_graph::{Animated, CurveFault, Keyframe};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 
 /// Current [`SceneDocument`] schema.
 pub const SCENE_DOCUMENT_VERSION: u32 = 1;
@@ -142,7 +144,7 @@ impl SceneGroup {
 }
 
 /// Which value a motion channel drives.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MotionProperty {
     /// Local horizontal position.
@@ -155,6 +157,18 @@ pub enum MotionProperty {
     Scale,
     /// Opacity from 0 to 1.
     Opacity,
+}
+
+impl MotionProperty {
+    fn name(self) -> &'static str {
+        match self {
+            Self::PositionX => "position_x",
+            Self::PositionY => "position_y",
+            Self::Rotation => "rotation",
+            Self::Scale => "scale",
+            Self::Opacity => "opacity",
+        }
+    }
 }
 
 /// One sample on a motion channel.
@@ -353,6 +367,211 @@ impl SceneDocument {
         Ok(())
     }
 
+    /// Admit this document for compilation.
+    ///
+    /// Links, groups, and motion keys are checked here. A compose curve fault is
+    /// not treated as validation of the whole document.
+    ///
+    /// # Errors
+    ///
+    /// Duplicate ids, a broken parent or anchor link, a cycle, a group that
+    /// disagrees with its parts, or a motion key that cannot be sampled.
+    pub fn validate(&self) -> Result<()> {
+        self.check_parts()?;
+        self.check_groups()?;
+        self.check_links(|part| part.parent.as_ref(), "parent")?;
+        self.check_links(
+            |part| part.anchor.as_ref().map(|anchor| &anchor.target),
+            "anchor",
+        )?;
+        self.check_links(
+            |part| {
+                part.parent
+                    .as_ref()
+                    .or(part.anchor.as_ref().map(|anchor| &anchor.target))
+            },
+            "pose",
+        )?;
+        self.check_motion()?;
+        Ok(())
+    }
+
+    fn check_parts(&self) -> Result<()> {
+        let mut ids = BTreeSet::new();
+        for part in &self.parts {
+            if part.id.as_str().is_empty() {
+                return Err(ProjectError::message("part id is empty"));
+            }
+            if !ids.insert(part.id.clone()) {
+                return Err(ProjectError::message(format!(
+                    "duplicate part {}",
+                    part.id.as_str()
+                )));
+            }
+            if part.source.media.as_str().is_empty() {
+                return Err(ProjectError::message(format!(
+                    "part {} source media is empty",
+                    part.id.as_str()
+                )));
+            }
+            if part
+                .replacement
+                .as_ref()
+                .is_some_and(|source| source.media.as_str().is_empty())
+            {
+                return Err(ProjectError::message(format!(
+                    "part {} replacement media is empty",
+                    part.id.as_str()
+                )));
+            }
+            if !part.pivot.x.is_finite() || !part.pivot.y.is_finite() {
+                return Err(ProjectError::message(format!(
+                    "part {} pivot is not finite",
+                    part.id.as_str()
+                )));
+            }
+            if part.parent.is_some() && part.anchor.is_some() {
+                return Err(ProjectError::message(format!(
+                    "part {} has both a parent and an anchor",
+                    part.id.as_str()
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn check_groups(&self) -> Result<()> {
+        let mut ids = BTreeSet::new();
+        for group in &self.groups {
+            if group.id.as_str().is_empty() {
+                return Err(ProjectError::message("group id is empty"));
+            }
+            if !ids.insert(group.id.clone()) {
+                return Err(ProjectError::message(format!(
+                    "duplicate group {}",
+                    group.id.as_str()
+                )));
+            }
+        }
+        for part in &self.parts {
+            if let Some(group) = &part.group
+                && self.group_index(group).is_err()
+            {
+                return Err(ProjectError::message(format!(
+                    "part {} group {} does not exist",
+                    part.id.as_str(),
+                    group.as_str()
+                )));
+            }
+        }
+        for group in &self.groups {
+            let mut listed = BTreeSet::new();
+            for member in &group.parts {
+                if !listed.insert(member.clone()) {
+                    return Err(ProjectError::message(format!(
+                        "group {} lists part {} twice",
+                        group.id.as_str(),
+                        member.as_str()
+                    )));
+                }
+                let Some(part) = self.parts.iter().find(|part| &part.id == member) else {
+                    return Err(ProjectError::message(format!(
+                        "group {} lists part {} that is not a member",
+                        group.id.as_str(),
+                        member.as_str()
+                    )));
+                };
+                if part.group.as_ref() != Some(&group.id) {
+                    return Err(ProjectError::message(format!(
+                        "group {} lists part {} that is not a member",
+                        group.id.as_str(),
+                        member.as_str()
+                    )));
+                }
+            }
+            for part in &self.parts {
+                if part.group.as_ref() == Some(&group.id) && !listed.contains(&part.id) {
+                    return Err(ProjectError::message(format!(
+                        "group {} is missing part {}",
+                        group.id.as_str(),
+                        part.id.as_str()
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn check_links(&self, next: impl Fn(&ScenePart) -> Option<&PartId>, label: &str) -> Result<()> {
+        for part in &self.parts {
+            let Some(target) = next(part) else {
+                continue;
+            };
+            if target == &part.id {
+                return Err(ProjectError::message(format!(
+                    "part {} {label}s itself",
+                    part.id.as_str()
+                )));
+            }
+            if self.part_index(target).is_err() {
+                return Err(ProjectError::message(format!(
+                    "part {} {label} {} does not exist",
+                    part.id.as_str(),
+                    target.as_str()
+                )));
+            }
+        }
+        let mut color = vec![0_u8; self.parts.len()];
+        for start in 0..self.parts.len() {
+            let mut cursor = Some(start);
+            while let Some(index) = cursor {
+                if color[index] == 2 {
+                    break;
+                }
+                if color[index] == 1 {
+                    return Err(ProjectError::message(format!(
+                        "part {} is in a {label} cycle",
+                        self.parts[index].id.as_str()
+                    )));
+                }
+                color[index] = 1;
+                cursor = next(&self.parts[index])
+                    .and_then(|target| self.parts.iter().position(|part| &part.id == target));
+            }
+            let mut back = Some(start);
+            while let Some(index) = back {
+                if color[index] == 2 {
+                    break;
+                }
+                color[index] = 2;
+                back = next(&self.parts[index])
+                    .and_then(|target| self.parts.iter().position(|part| &part.id == target));
+            }
+        }
+        Ok(())
+    }
+
+    fn check_motion(&self) -> Result<()> {
+        let mut seen = BTreeSet::new();
+        for channel in &self.motion.channels {
+            if self.part_index(&channel.part).is_err() {
+                return Err(ProjectError::message(format!(
+                    "motion channel names part {} that does not exist",
+                    channel.part.as_str()
+                )));
+            }
+            if !seen.insert((channel.part.clone(), channel.property)) {
+                return Err(ProjectError::message(format!(
+                    "part {} has two {} channels",
+                    channel.part.as_str(),
+                    channel.property.name()
+                )));
+            }
+            check_keys(channel)?;
+        }
+        Ok(())
+    }
+
     fn part_index(&self, id: &PartId) -> Result<usize> {
         self.parts
             .iter()
@@ -366,4 +585,89 @@ impl SceneDocument {
             .position(|group| &group.id == id)
             .ok_or_else(|| ProjectError::message(format!("unknown group {}", id.as_str())))
     }
+}
+
+fn check_keys(channel: &MotionChannel) -> Result<()> {
+    let name = channel.property.name();
+    let mut keys = Vec::with_capacity(channel.keys.len());
+    for key in &channel.keys {
+        if key.t.timescale == 0 {
+            return Err(ProjectError::message(format!(
+                "part {} {name} key has a zero timescale",
+                channel.part.as_str()
+            )));
+        }
+        if key.t.ticks < 0 {
+            return Err(ProjectError::message(format!(
+                "part {} {name} key is negative",
+                channel.part.as_str()
+            )));
+        }
+        let Some(value) = finite_f32(key.value) else {
+            return Err(ProjectError::message(format!(
+                "part {} {name} key is not finite",
+                channel.part.as_str()
+            )));
+        };
+        match channel.property {
+            MotionProperty::Opacity if !(0.0..=1.0).contains(&key.value) => {
+                return Err(ProjectError::message(format!(
+                    "part {} opacity is outside 0..=1",
+                    channel.part.as_str()
+                )));
+            }
+            MotionProperty::Scale if key.value <= 0.0 => {
+                return Err(ProjectError::message(format!(
+                    "part {} scale is not positive",
+                    channel.part.as_str()
+                )));
+            }
+            _ => {}
+        }
+        keys.push(Keyframe::new(key.t, value));
+    }
+    let fault = Animated::keyframes(keys).curve_fault();
+    let message = match fault {
+        Some(CurveFault::Empty) => {
+            format!("part {} {name} channel has no keys", channel.part.as_str())
+        }
+        Some(CurveFault::NotStrictlyIncreasing) => format!(
+            "part {} {name} channel is not strictly increasing",
+            channel.part.as_str()
+        ),
+        None => return Ok(()),
+    };
+    Err(ProjectError::message(message))
+}
+
+pub(crate) fn finite_f32(value: f64) -> Option<f32> {
+    if !value.is_finite() {
+        return None;
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    let narrowed = value as f32;
+    narrowed.is_finite().then_some(narrowed)
+}
+
+pub(crate) fn motion_curve(
+    scene: &SceneDocument,
+    id: &PartId,
+    property: MotionProperty,
+    default: f32,
+) -> Animated<f32> {
+    let Some(channel) = scene
+        .motion
+        .channels
+        .iter()
+        .find(|channel| &channel.part == id && channel.property == property)
+    else {
+        return Animated::constant(default);
+    };
+    Animated::keyframes(
+        channel
+            .keys
+            .iter()
+            .filter_map(|key| finite_f32(key.value).map(|value| Keyframe::new(key.t, value)))
+            .collect(),
+    )
 }

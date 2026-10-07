@@ -8,8 +8,8 @@ use crate::gpu::{GpuContext, GpuRequest, execute_gpu};
 use crate::graph_run::{GraphEncodeHints, NodeMedia};
 use crate::mask_bridge::{apply_region_redaction, region_redaction_from_value};
 use reelforge_compose::{
-    CompositeLayer, CompositeVideo, MixTrack, composite_video, concatenate_audio,
-    concatenate_video, mix_audio,
+    CompositeLayer, CompositeVideo, MixTrack, ScenePartPose, ScenePoseVideo, composite_video,
+    concatenate_audio, concatenate_video, mix_audio,
 };
 use reelforge_core::{
     AudioClip, AudioEffect, AudioFormat, Duration, MediaTime, Position, Rgb8, SilenceClip, Size,
@@ -315,6 +315,9 @@ fn apply_compose_layers(
         inputs[0].size()
     };
     let layer_params = layer_value.as_array();
+    if layer_params.is_some_and(|layers| layers_use_pose(layers)) {
+        return apply_scene_pose(inputs, size, layer_value, background, span);
+    }
     let mut layers = Vec::with_capacity(inputs.len());
     for (i, clip) in inputs.into_iter().enumerate() {
         let mut layer =
@@ -359,6 +362,259 @@ fn apply_compose_layers(
             CompositeVideo::new(size, layers).map_err(|e| IoError::message(e.to_string()))?,
             span,
         ))
+    }
+}
+
+fn layers_use_pose(layers: &[serde_json::Value]) -> bool {
+    layers.iter().any(|layer| {
+        layer.get("rotation").is_some()
+            || layer.get("pivot").is_some()
+            || layer.get("parent").is_some()
+            || layer.get("anchor").is_some()
+    })
+}
+
+fn apply_scene_pose(
+    inputs: Vec<Arc<dyn VideoClip>>,
+    size: Size,
+    layer_value: &serde_json::Value,
+    background: Option<&serde_json::Value>,
+    span: Option<MediaTime>,
+) -> Result<Arc<dyn VideoClip>> {
+    let Some(layers) = layer_value.as_array() else {
+        return Err(IoError::message("rf.compose.layers needs a layer array"));
+    };
+    if layers.len() != inputs.len() {
+        return Err(IoError::message(
+            "scene pose layer count does not match its inputs",
+        ));
+    }
+    let sources_have_fps = inputs.iter().any(|clip| clip.fps().is_some());
+    let mut times = Vec::new();
+    let mut parts = Vec::with_capacity(inputs.len());
+    for (index, clip) in inputs.into_iter().enumerate() {
+        if !sources_have_fps && let Some(stored) = clip.sample_times() {
+            times.extend(stored);
+        }
+        let layer = &layers[index];
+        if layer.get("warp").is_some() {
+            return Err(IoError::message(
+                "compose refuses warp; it is not a layer translate",
+            ));
+        }
+        refuse_unknown_pose_fields(layer)?;
+        let id = layer
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| !id.is_empty())
+            .map_or_else(|| format!("layer-{index}"), str::to_string);
+        let parent = optional_pose_id(layer, "parent")?;
+        let anchor = pose_anchor(layer)?;
+        let (pivot_x, pivot_y) = pose_pivot(layer)?;
+        let x = axis_curve(layer.get("x"), "x")?;
+        let y = axis_curve(layer.get("y"), "y")?;
+        let rotation = match layer.get("rotation") {
+            Some(value) => axis_curve(Some(value), "rotation")?,
+            None => Animated::constant(0.0),
+        };
+        let scale = match layer.get("scale") {
+            Some(value) => axis_curve(Some(value), "scale")?,
+            None => Animated::constant(1.0),
+        };
+        require_finite_curve(&x, "x")?;
+        require_finite_curve(&y, "y")?;
+        require_finite_curve(&rotation, "rotation")?;
+        let opacity = opacity_curve(layer.get("opacity"))?;
+        if !sources_have_fps {
+            push_key_times(&x, &mut times);
+            push_key_times(&y, &mut times);
+            push_key_times(&rotation, &mut times);
+            push_key_times(&scale, &mut times);
+            push_key_times(&opacity, &mut times);
+        }
+        let order = layer
+            .get("layer_index")
+            .and_then(serde_json::Value::as_i64)
+            .and_then(|value| i32::try_from(value).ok())
+            .unwrap_or_else(|| i32::try_from(index).unwrap_or(i32::MAX));
+        let start = layer
+            .get("start")
+            .and_then(json_as_time)
+            .unwrap_or(Time::ZERO);
+        let mut pose = ScenePartPose::new(id, clip)
+            .with_pivot(pivot_x, pivot_y)
+            .with_order(order)
+            .with_start(start)
+            .with_x_at(Arc::new(move |time: Time| sample_axis(&x, time)))
+            .with_y_at(Arc::new(move |time: Time| sample_axis(&y, time)))
+            .with_rotation_at(Arc::new(move |time: Time| sample_axis(&rotation, time)))
+            .with_scale_at(Arc::new(move |time: Time| sample_axis(&scale, time)))
+            .with_opacity_at(Arc::new(move |time: Time| {
+                sample_axis(&opacity, time).clamp(0.0, 1.0)
+            }));
+        if let Some(parent) = parent {
+            pose = pose.with_parent(parent);
+        }
+        if let Some((target, anchor_x, anchor_y)) = anchor {
+            pose = pose.with_anchor(target, anchor_x, anchor_y);
+        }
+        parts.push(pose);
+    }
+    let mut duration = span.map_or(Duration::ZERO, MediaTime::to_duration);
+    for part in &parts {
+        let end = part.start.as_secs() + part.clip.duration().as_secs();
+        if end > duration.as_secs() {
+            duration = Duration::from_secs(end);
+        }
+    }
+    let video =
+        ScenePoseVideo::with_background(size, background_color(background), duration, parts)
+            .map_err(|err| IoError::message(err.to_string()))?;
+    let video = if sources_have_fps {
+        video
+    } else {
+        video.with_sample_times(&times)
+    };
+    Ok(Arc::new(video))
+}
+
+fn background_color(background: Option<&serde_json::Value>) -> Rgb8 {
+    let Some(bg) = background else {
+        return Rgb8::BLACK;
+    };
+    let red = bg.get("r").and_then(serde_json::Value::as_u64).unwrap_or(0);
+    let green = bg.get("g").and_then(serde_json::Value::as_u64).unwrap_or(0);
+    let blue = bg.get("b").and_then(serde_json::Value::as_u64).unwrap_or(0);
+    #[allow(clippy::cast_possible_truncation)]
+    Rgb8::new(red as u8, green as u8, blue as u8)
+}
+
+fn refuse_unknown_pose_fields(layer: &serde_json::Value) -> Result<()> {
+    const KNOWN: &[&str] = &[
+        "id",
+        "parent",
+        "anchor",
+        "pivot",
+        "x",
+        "y",
+        "rotation",
+        "scale",
+        "opacity",
+        "layer_index",
+        "start",
+        "warp",
+    ];
+    let Some(object) = layer.as_object() else {
+        return Err(IoError::message(
+            "compose refuses a layer that is not an object",
+        ));
+    };
+    if let Some(name) = object.keys().find(|key| !KNOWN.contains(&key.as_str())) {
+        return Err(IoError::message(format!(
+            "compose refuses unsupported layer field {name}"
+        )));
+    }
+    Ok(())
+}
+
+fn optional_pose_id(layer: &serde_json::Value, name: &str) -> Result<Option<String>> {
+    match layer.get(name) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(id)) if !id.is_empty() => Ok(Some(id.clone())),
+        _ => Err(IoError::message(format!(
+            "compose refuses an unreadable {name}"
+        ))),
+    }
+}
+
+fn pose_anchor(layer: &serde_json::Value) -> Result<Option<(String, f32, f32)>> {
+    let Some(value) = layer.get("anchor") else {
+        return Ok(None);
+    };
+    let Some(target) = value
+        .get("target")
+        .and_then(serde_json::Value::as_str)
+        .filter(|id| !id.is_empty())
+    else {
+        return Err(IoError::message("compose refuses an unreadable anchor"));
+    };
+    Ok(Some((
+        target.to_string(),
+        finite_coord(value.get("x"), "anchor x")?,
+        finite_coord(value.get("y"), "anchor y")?,
+    )))
+}
+
+fn pose_pivot(layer: &serde_json::Value) -> Result<(f32, f32)> {
+    let Some(pivot) = layer.get("pivot") else {
+        return Ok((0.0, 0.0));
+    };
+    Ok((
+        finite_coord(pivot.get("x"), "pivot x")?,
+        finite_coord(pivot.get("y"), "pivot y")?,
+    ))
+}
+
+fn finite_coord(value: Option<&serde_json::Value>, name: &str) -> Result<f32> {
+    let Some(number) = value.and_then(serde_json::Value::as_f64) else {
+        return Err(IoError::message(format!(
+            "compose refuses an unreadable {name}"
+        )));
+    };
+    if !number.is_finite() {
+        return Err(IoError::message(format!(
+            "compose refuses a non-finite {name}"
+        )));
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    let narrowed = number as f32;
+    if !narrowed.is_finite() {
+        return Err(IoError::message(format!(
+            "compose refuses a non-finite {name}"
+        )));
+    }
+    Ok(narrowed)
+}
+
+fn opacity_curve(value: Option<&serde_json::Value>) -> Result<Animated<f32>> {
+    let Some(value) = value else {
+        return Ok(Animated::constant(1.0));
+    };
+    if let Some(number) = value.as_f64() {
+        #[allow(clippy::cast_possible_truncation)]
+        return Ok(Animated::constant(number as f32));
+    }
+    let animated: Animated<f32> = serde_json::from_value(value.clone())
+        .map_err(|err| IoError::message(format!("unknown opacity parameter: {err}")))?;
+    if let Some(fault) = animated.curve_fault() {
+        return Err(IoError::message(format!(
+            "compose refuses opacity keyframes: {fault}"
+        )));
+    }
+    require_finite_curve(&animated, "opacity")?;
+    Ok(animated)
+}
+
+fn require_finite_curve(curve: &Animated<f32>, name: &str) -> Result<()> {
+    let finite = match curve {
+        Animated::Constant { value } => value.is_finite(),
+        Animated::Keyframes { keys } => keys.iter().all(|key| key.value.is_finite()),
+    };
+    if finite {
+        Ok(())
+    } else {
+        Err(IoError::message(format!(
+            "compose refuses a non-finite {name}"
+        )))
+    }
+}
+
+fn push_key_times(curve: &Animated<f32>, times: &mut Vec<Time>) {
+    let Animated::Keyframes { keys } = curve else {
+        return;
+    };
+    for key in keys {
+        times.push(key.t.to_time());
     }
 }
 
@@ -1064,6 +1320,131 @@ mod tests {
         let text = err.to_string();
         assert!(text.contains("refuses"), "{text}");
         assert!(text.contains("not strictly increasing"), "{text}");
+    }
+
+    struct Pair;
+
+    impl VideoClip for Pair {
+        fn duration(&self) -> Duration {
+            Duration::from_secs(1.0)
+        }
+
+        fn size(&self) -> Size {
+            Size::new(2, 1)
+        }
+
+        fn frame_at(&self, t: Time) -> reelforge_core::Result<reelforge_core::Frame> {
+            if t.as_secs() < 0.0 || t.as_secs() >= 1.0 {
+                return Err(reelforge_core::CoreError::TimeOutOfRange {
+                    time: t,
+                    range: (Time::ZERO, Time::from_secs(1.0)),
+                });
+            }
+            let mut frame =
+                reelforge_core::Frame::zeros(Size::new(2, 1), reelforge_core::FrameFormat::Rgb8)?;
+            let data = frame.data_mut();
+            data[0] = 255;
+            data[4] = 255;
+            Ok(frame)
+        }
+    }
+
+    fn pose_pixel(frame: &reelforge_core::Frame, x: u32, y: u32) -> [u8; 3] {
+        let width = usize::try_from(frame.size().width).unwrap();
+        let index = (usize::try_from(y).unwrap() * width + usize::try_from(x).unwrap()) * 3;
+        let data = frame.data();
+        [data[index], data[index + 1], data[index + 2]]
+    }
+
+    #[test]
+    fn scene_pose_keeps_anchor_contact_across_seek() {
+        let x = serde_json::to_value(Animated::keyframes(vec![
+            Keyframe::new(MediaTime::new(0, 1).unwrap(), 2.0),
+            Keyframe::new(MediaTime::new(1, 1).unwrap(), 4.0),
+        ]))
+        .unwrap();
+        let layers = serde_json::json!([
+            {
+                "id": "stem",
+                "x": x,
+                "y": 1,
+                "rotation": 0,
+                "scale": 1,
+                "opacity": 1,
+                "pivot": { "x": 0, "y": 0 },
+                "layer_index": 0
+            },
+            {
+                "id": "petal",
+                "anchor": { "target": "stem", "x": 1, "y": 0 },
+                "x": 0,
+                "y": 0,
+                "rotation": 0,
+                "scale": 1,
+                "opacity": 1,
+                "pivot": { "x": 0, "y": 0 },
+                "layer_index": 1
+            }
+        ]);
+        let stem = Arc::new(ColorClip::new(
+            Size::new(1, 1),
+            Rgb8::RED,
+            Duration::from_secs(2.0),
+        ));
+        let petal = Arc::new(ColorClip::new(
+            Size::new(1, 1),
+            Rgb8::BLUE,
+            Duration::from_secs(2.0),
+        ));
+        let clip =
+            apply_compose_layers(vec![stem, petal], Some(8), Some(4), &layers, None, None).unwrap();
+        let early = clip.frame_at(Time::ZERO).unwrap();
+        let later = clip.frame_at(Time::from_secs(1.0)).unwrap();
+        assert_eq!(pose_pixel(&early, 2, 1), [255, 0, 0]);
+        assert_eq!(pose_pixel(&early, 3, 1), [0, 0, 255]);
+        assert_eq!(pose_pixel(&later, 4, 1), [255, 0, 0]);
+        assert_eq!(pose_pixel(&later, 5, 1), [0, 0, 255]);
+        assert_eq!(
+            clip.frame_at(Time::from_secs(1.0)).unwrap().data(),
+            later.data()
+        );
+        assert_eq!(clip.sample_times().map(|times| times.len()), Some(2));
+
+        let bad = serde_json::json!([{ "pivot": { "x": 0, "y": 0 }, "shear": 2 }]);
+        let Err(err) = apply_compose_layers(
+            vec![Arc::new(ColorClip::new(
+                Size::new(1, 1),
+                Rgb8::WHITE,
+                Duration::from_secs(1.0),
+            ))],
+            Some(2),
+            Some(2),
+            &bad,
+            None,
+            None,
+        ) else {
+            panic!("an unsupported layer field was accepted");
+        };
+        assert!(err.to_string().contains("unsupported layer field shear"));
+    }
+
+    #[test]
+    fn scene_pose_rotation_reads_the_layer_field() {
+        let layers = serde_json::json!([{
+            "id": "bar",
+            "x": 1,
+            "y": 1,
+            "rotation": 90,
+            "pivot": { "x": 0, "y": 0 },
+            "scale": 1,
+            "opacity": 1
+        }]);
+        let clip =
+            apply_compose_layers(vec![Arc::new(Pair)], Some(4), Some(4), &layers, None, None)
+                .unwrap();
+        let frame = clip.frame_at(Time::ZERO).unwrap();
+        assert_eq!(pose_pixel(&frame, 1, 1), [255, 0, 0]);
+        assert_eq!(pose_pixel(&frame, 1, 2), [0, 255, 0]);
     }
 
     #[test]

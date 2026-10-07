@@ -15,6 +15,7 @@ mod ids;
 mod model;
 mod project;
 mod scene;
+mod scene_compile;
 
 pub use compile::{ProjectCompile, compile_project};
 pub use error::{ProjectError, Result};
@@ -29,4 +30,7 @@ pub use project::{CAPTURE_PROJECT_VERSION, CaptureProject, Sequence, TimelineTra
 pub use scene::{
     MotionChannel, MotionKey, MotionProperty, MotionTimeline, PartAnchor, SCENE_DOCUMENT_VERSION,
     SceneDocument, SceneGroup, ScenePart, ScenePoint, SourceLink,
+};
+pub use scene_compile::{
+    ResolvedPart, ResolvedScene, SceneCanvas, SceneCompile, SceneMedia, compile_scene,
 };
