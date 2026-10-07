@@ -12,8 +12,8 @@ use reelforge_compose::{
     concatenate_video, mix_audio,
 };
 use reelforge_core::{
-    AudioEffect, MediaTime, Position, Rgb8, Size, Time, VideoClip, VideoEffect, subclip_audio,
-    subclip_video,
+    AudioClip, AudioEffect, AudioFormat, Duration, MediaTime, Position, Rgb8, SilenceClip, Size,
+    Time, VideoClip, VideoEffect, subclip_audio, subclip_video,
 };
 use reelforge_fx::{
     BlackAndWhite, Crop, CrossFadeIn, EvenSize, FadeIn, FadeOut, Freeze, InvertColors, Loop,
@@ -96,27 +96,79 @@ fn apply_timeline_concat(inputs: Vec<NodeMedia>) -> Result<NodeMedia> {
     }
     let encode = inputs.first().map(|m| m.encode.clone()).unwrap_or_default();
     let mut videos = Vec::with_capacity(inputs.len());
-    let mut audios = Vec::with_capacity(inputs.len());
-    let mut all_audio = true;
+    let mut heard = Vec::with_capacity(inputs.len());
     for media in inputs {
-        videos.push(media.video);
-        match media.audio {
-            Some(a) => audios.push(a),
-            None => all_audio = false,
+        let picture = media.video.duration();
+        if !picture.is_positive() {
+            return Err(IoError::message(
+                "concat refuses a picture with no positive duration",
+            ));
         }
+        videos.push(media.video);
+        heard.push((picture, media.audio));
     }
     let video = concatenate_video(videos).map_err(|e| IoError::message(e.to_string()))?;
-    let audio = if all_audio {
-        Some(concatenate_audio(audios).map_err(|e| IoError::message(e.to_string()))?)
-    } else {
-        None
+    let Some(format) = heard
+        .iter()
+        .find_map(|(_, audio)| audio.as_ref().map(AudioClip::format))
+    else {
+        return Ok(NodeMedia {
+            video,
+            audio: None,
+            masks: None,
+            encode,
+        });
     };
+    let mut pieces: Vec<Arc<dyn AudioClip>> = Vec::with_capacity(heard.len());
+    for (picture, audio) in heard {
+        pieces.extend(align_concat_audio(format, picture, audio)?);
+    }
+    let audio = Some(concatenate_audio(pieces).map_err(|e| IoError::message(e.to_string()))?);
     Ok(NodeMedia {
         video,
         audio,
         masks: None,
         encode,
     })
+}
+
+/// A missing stream is silence for that picture. A shorter stream is padded.
+/// A longer stream is refused, and a different format is refused.
+fn align_concat_audio(
+    format: AudioFormat,
+    picture: Duration,
+    audio: Option<Arc<dyn AudioClip>>,
+) -> Result<Vec<Arc<dyn AudioClip>>> {
+    let picture_frames = format.frames_for_duration(picture);
+    if picture_frames == 0 {
+        return Err(IoError::message(
+            "concat refuses a picture shorter than one audio frame",
+        ));
+    }
+    let Some(clip) = audio else {
+        return Ok(vec![silence_frames(format, picture_frames)]);
+    };
+    if clip.format() != format {
+        return Err(IoError::message(format!(
+            "concat refuses mixed audio formats: {format:?} and {:?}",
+            clip.format()
+        )));
+    }
+    let have = clip.format().frames_for_duration(clip.duration());
+    if have > picture_frames {
+        return Err(IoError::message(
+            "concat refuses audio longer than its picture",
+        ));
+    }
+    let mut pieces = vec![clip];
+    if have < picture_frames {
+        pieces.push(silence_frames(format, picture_frames - have));
+    }
+    Ok(pieces)
+}
+
+fn silence_frames(format: AudioFormat, frames: u64) -> Arc<dyn AudioClip> {
+    Arc::new(SilenceClip::new(format, format.duration_of_frames(frames)))
 }
 
 fn execute_unary(
@@ -742,8 +794,32 @@ fn apply_subtitle_burn(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use reelforge_core::{ColorClip, Duration, Rgb8, Size, Time, VideoClip};
+    use reelforge_core::{
+        AudioBuffer, AudioClip, AudioFormat, ColorClip, Duration, Rgb8, Size, Time, VideoClip,
+    };
     use reelforge_render_graph::Keyframe;
+
+    struct Tone {
+        format: AudioFormat,
+        duration: Duration,
+        value: f32,
+    }
+
+    impl AudioClip for Tone {
+        fn duration(&self) -> Duration {
+            self.duration
+        }
+
+        fn format(&self) -> AudioFormat {
+            self.format
+        }
+
+        fn samples_at(&self, _t: Time, frame_count: usize) -> reelforge_core::Result<AudioBuffer> {
+            let channels = usize::from(self.format.channels());
+            let samples = vec![self.value; frame_count * channels];
+            AudioBuffer::from_interleaved(self.format, samples)
+        }
+    }
 
     #[test]
     fn timeline_concat_plays_end_to_end() {
@@ -778,6 +854,108 @@ mod tests {
             out.video.frame_at(Time::from_secs(1.2)).unwrap().data()[0],
             0
         );
+        assert!(out.audio.is_none());
+    }
+
+    #[test]
+    fn timeline_concat_keeps_voice_around_a_silent_picture() {
+        let fmt = reelforge_core::AudioFormat::STEREO_48K;
+        let picture = || {
+            Arc::new(ColorClip::new(
+                Size::new(2, 2),
+                Rgb8::WHITE,
+                Duration::from_secs(1.0),
+            )) as Arc<dyn VideoClip>
+        };
+        let voice = |value: f32| -> Arc<dyn reelforge_core::AudioClip> {
+            Arc::new(Tone {
+                format: fmt,
+                duration: Duration::from_secs(1.0),
+                value,
+            })
+        };
+        let out = apply_timeline_concat(vec![
+            NodeMedia::new(picture(), Some(voice(0.5))),
+            NodeMedia::new(picture(), None),
+            NodeMedia::new(picture(), Some(voice(-0.25))),
+        ])
+        .unwrap();
+        let audio = out.audio.expect("concat audio");
+        assert!((audio.duration().as_secs() - 3.0).abs() < 1e-6);
+        let early = audio.samples_at(Time::from_secs(0.1), 4).unwrap();
+        assert!(
+            early
+                .samples()
+                .iter()
+                .all(|sample| (*sample - 0.5).abs() < 1e-6)
+        );
+        let middle = audio.samples_at(Time::from_secs(1.2), 4).unwrap();
+        assert!(middle.samples().iter().all(|sample| *sample == 0.0));
+        let late = audio.samples_at(Time::from_secs(2.1), 4).unwrap();
+        assert!(
+            late.samples()
+                .iter()
+                .all(|sample| (*sample + 0.25).abs() < 1e-6)
+        );
+        assert!((out.video.duration().as_secs() - 3.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn timeline_concat_pads_short_audio_and_refuses_a_longer_or_foreign_stream() {
+        let fmt = reelforge_core::AudioFormat::STEREO_48K;
+        let picture = |secs: f64| {
+            Arc::new(ColorClip::new(
+                Size::new(2, 2),
+                Rgb8::WHITE,
+                Duration::from_secs(secs),
+            )) as Arc<dyn VideoClip>
+        };
+        let tone = |secs: f64,
+                    format: reelforge_core::AudioFormat|
+         -> Arc<dyn reelforge_core::AudioClip> {
+            Arc::new(Tone {
+                format,
+                duration: Duration::from_secs(secs),
+                value: 0.5,
+            })
+        };
+        let padded = apply_timeline_concat(vec![
+            NodeMedia::new(picture(1.0), Some(tone(0.5, fmt))),
+            NodeMedia::new(picture(1.0), Some(tone(1.0, fmt))),
+        ])
+        .unwrap();
+        let audio = padded.audio.expect("padded audio");
+        assert!((audio.duration().as_secs() - 2.0).abs() < 1e-6);
+        let gap = audio.samples_at(Time::from_secs(0.6), 4).unwrap();
+        assert!(gap.samples().iter().all(|sample| *sample == 0.0));
+        let second = audio.samples_at(Time::from_secs(1.1), 4).unwrap();
+        assert!(
+            second
+                .samples()
+                .iter()
+                .all(|sample| (*sample - 0.5).abs() < 1e-6)
+        );
+
+        let Err(longer) = apply_timeline_concat(vec![
+            NodeMedia::new(picture(1.0), Some(tone(1.5, fmt))),
+            NodeMedia::new(picture(1.0), Some(tone(1.0, fmt))),
+        ]) else {
+            panic!("longer audio was accepted");
+        };
+        let longer = longer.to_string();
+        assert!(longer.contains("longer than its picture"), "{longer}");
+
+        let Err(foreign) = apply_timeline_concat(vec![
+            NodeMedia::new(picture(1.0), Some(tone(1.0, fmt))),
+            NodeMedia::new(
+                picture(1.0),
+                Some(tone(1.0, reelforge_core::AudioFormat::STEREO_44K)),
+            ),
+        ]) else {
+            panic!("mixed formats were accepted");
+        };
+        let foreign = foreign.to_string();
+        assert!(foreign.contains("mixed audio formats"), "{foreign}");
     }
 
     #[test]
