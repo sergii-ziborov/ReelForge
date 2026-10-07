@@ -4,7 +4,8 @@ use crate::emit::CompileCtx;
 use crate::error::{ProjectError, Result};
 use crate::project::CaptureProject;
 use reelforge_render_graph::{
-    GraphOutput, NodeId, RENDER_GRAPH_VERSION, RenderGraph, RenderNode, RenderNodeKind,
+    GraphOutput, NodeId, OperationRegistry, RENDER_GRAPH_VERSION, RenderGraph, RenderNode,
+    RenderNodeKind, compile_graph,
 };
 
 /// Compile result: graph + editorial warnings (markers / skipped wipes).
@@ -31,7 +32,8 @@ pub struct ProjectCompile {
 ///
 /// # Errors
 ///
-/// Missing media, empty picture, nested cycles, bad speed, or graph validate.
+/// Missing media, empty picture, nested cycles, bad speed, a media-contract
+/// break, or sequence audio that does not reach output `main`.
 pub fn compile_project(project: &CaptureProject) -> Result<ProjectCompile> {
     let seq = project.active()?;
     let mut warnings = Vec::new();
@@ -83,9 +85,21 @@ pub fn compile_project(project: &CaptureProject) -> Result<ProjectCompile> {
             uri: None,
         }],
     };
-    graph
-        .validate()
-        .map_err(|e| ProjectError::Graph(e.to_string()))?;
+    let compiled = compile_graph(&graph, &OperationRegistry::with_builtins())
+        .map_err(|err| ProjectError::Graph(err.to_string()))?;
+    if !ctx.audio.is_empty() {
+        let reached = compiled
+            .outputs
+            .iter()
+            .find(|output| output.name == "main")
+            .and_then(|output| compiled.nodes.get(output.node.as_usize()))
+            .is_some_and(|node| node.output.audio);
+        if !reached {
+            return Err(ProjectError::message(
+                "active sequence audio did not reach output main",
+            ));
+        }
+    }
     Ok(ProjectCompile {
         graph,
         warnings: ctx.warnings,

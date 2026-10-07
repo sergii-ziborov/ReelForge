@@ -325,6 +325,53 @@ fn audio_role_stays_audio_through_trim() {
 }
 
 #[test]
+fn audio_reaches_the_output_after_subtitles() {
+    let mut p = CaptureProject::new(ProjectId::new("p"), "av");
+    p.media.push(media("a", "a.mp4"));
+    p.media.push(MediaRef {
+        id: MediaRefId::new("m"),
+        uri: "m.wav".into(),
+        duration: None,
+        role: Some("audio".into()),
+    });
+    p.media.push(MediaRef {
+        id: MediaRefId::new("s"),
+        uri: "talk.srt".into(),
+        duration: None,
+        role: Some("subtitle".into()),
+    });
+    let mut seq = Sequence::new(SequenceId::new("s"), "main");
+    let mut video = TimelineTrack::new(TimelineTrackId::new("v0"), TrackKind::Video);
+    video.items.push(clip("pic", "a", 0.0, 2.0));
+    let mut audio = TimelineTrack::new(TimelineTrackId::new("a0"), TrackKind::Audio);
+    audio.items.push(clip("snd", "m", 0.0, 2.0));
+    let mut titles = TimelineTrack::new(TimelineTrackId::new("s0"), TrackKind::Subtitle);
+    titles.items.push(clip("sc", "s", 0.0, 2.0));
+    seq.tracks.push(video);
+    seq.tracks.push(audio);
+    seq.tracks.push(titles);
+    p.sequences.push(seq);
+    let out = compile_project(&p).unwrap();
+    let names = ops(&out.graph);
+    assert!(names.contains(&"rf.audio.mix"), "{names:?}");
+    assert!(names.contains(&"rf.subtitle.burn"), "{names:?}");
+    let compiled = reelforge_render_graph::compile_graph(
+        &out.graph,
+        &reelforge_render_graph::OperationRegistry::with_builtins(),
+    )
+    .unwrap();
+    let main = compiled
+        .outputs
+        .iter()
+        .find(|output| output.name == "main")
+        .expect("main");
+    assert!(
+        compiled.nodes[main.node.as_usize()].output.audio,
+        "sequence audio must survive subtitle burn"
+    );
+}
+
+#[test]
 fn video_track_refuses_audio_media() {
     let mut p = CaptureProject::new(ProjectId::new("p"), "av");
     p.media.push(MediaRef {
