@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Audio concatenation crosses all clip boundaries in a requested block without
+  reading past source EOF. Mix tracks use bounded sample-clock overlaps.
+- Linear mix buses preserve float headroom; legacy hard clipping stays the
+  default. `rf.audio.mix` accepts `mode: "linear"` or `"hard_clip"`.
+- PCM buffers reject invalid formats and nonfinite samples; mixes reject
+  nonfinite timing/gains and arithmetic overflow.
+
 ## 0.2.1 — 2026-08-18
 
 - CLI: `reelforge graph --explain` / `--run` `[--output] [--mask-package]`.

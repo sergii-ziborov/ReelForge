@@ -3,6 +3,18 @@
 use crate::error::{CoreError, Result};
 use crate::time::Duration;
 
+/// Output treatment of an audio mix bus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+pub enum AudioMixMode {
+    /// Preserve finite float headroom for subsequent buses or mastering.
+    Linear,
+    /// Legacy hard clipping to `[-1, 1]` at this bus output.
+    #[default]
+    HardClip,
+}
+
 /// Channel packing of interleaved PCM samples.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum SampleLayout {
@@ -120,7 +132,9 @@ impl AudioFormat {
     }
 }
 
-/// Owned interleaved PCM buffer (`f32` samples in `-1.0..=1.0`).
+/// Owned interleaved finite float PCM buffer.
+///
+/// Internal buses may exceed `[-1, 1]`. Output limiting is explicit.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AudioBuffer {
     format: AudioFormat,
@@ -133,9 +147,10 @@ impl AudioBuffer {
     ///
     /// # Errors
     ///
-    /// Returns [`CoreError::InvalidAudio`] when the sample count is not a
-    /// multiple of the channel count.
+    /// Returns [`CoreError::InvalidAudio`] for an invalid format, nonfinite
+    /// samples, or a sample count not divisible by the channel count.
     pub fn from_interleaved(format: AudioFormat, samples: Vec<f32>) -> Result<Self> {
+        AudioFormat::new(format.sample_rate, format.layout)?;
         let ch = format.channels() as usize;
         if !samples.len().is_multiple_of(ch) {
             return Err(CoreError::invalid_audio(format!(
@@ -144,6 +159,9 @@ impl AudioBuffer {
                 ch
             )));
         }
+        if samples.iter().any(|sample| !sample.is_finite()) {
+            return Err(CoreError::invalid_audio("PCM samples must be finite"));
+        }
         Ok(Self { format, samples })
     }
 
@@ -151,8 +169,9 @@ impl AudioBuffer {
     ///
     /// # Errors
     ///
-    /// Returns [`CoreError::InvalidAudio`] when allocation size overflows.
+    /// Returns [`CoreError::InvalidAudio`] for an invalid format or size overflow.
     pub fn silence(format: AudioFormat, frames: usize) -> Result<Self> {
+        AudioFormat::new(format.sample_rate, format.layout)?;
         let ch = format.channels() as usize;
         let len = frames
             .checked_mul(ch)

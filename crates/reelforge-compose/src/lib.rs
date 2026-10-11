@@ -2,6 +2,7 @@
 
 mod audio_concat;
 mod audio_mix;
+mod audio_read;
 mod blit;
 mod composite;
 mod concat;
@@ -10,7 +11,7 @@ mod scene_pose;
 mod timeline;
 
 pub use audio_concat::{ConcatAudio, concatenate_audio};
-pub use audio_mix::{MixAudio, MixTrack, mix_audio, mix_audio_clips};
+pub use audio_mix::{MixAudio, MixTrack, mix_audio, mix_audio_clips, mix_audio_with_mode};
 pub use composite::{CompositeVideo, composite_video, composite_video_with_background};
 pub use concat::{ConcatVideo, concatenate_video};
 pub use layer::CompositeLayer;

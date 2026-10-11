@@ -75,6 +75,33 @@ write_video_with(&clip, &WriteVideoOptions::new("out.mp4", 24.0), &control)?;
 
 Audio PCM for `write_av` is written in ~1 s chunks (no full-timeline buffer).
 
+### PCM reads and mix buses
+
+`ConcatAudio` reads every segment crossed by a requested block. It bounds each
+source read to that segment and pads only the part beyond the concatenation's
+end. An incomplete block inside a declared source interval is an error.
+`MixAudio` likewise reads only each track's overlap, including negative start
+offsets for preroll. Formats must match in both sample rate and channel layout.
+
+Use `samples_at_media` with an `AudioTimeline` for exact integer sample clocks.
+Floating input durations and start offsets round once to the nearest sample.
+For fractional video rates, derive audio windows from absolute rational
+boundaries with `AudioTimeline::range`, rather than rounding each window length.
+
+Internal PCM is finite float data and may exceed `[-1, 1]`. For a bus that feeds
+another bus, use `MixAudio::new_with_mode(tracks, AudioMixMode::Linear)` or
+`mix_audio_with_mode`. `MixAudio::new` and `mix_audio` keep their legacy hard
+clipping. The `rf.audio.mix` graph operation exposes the same `mode`:
+
+```json
+{"mode":"linear","tracks":[{"gain":1.0,"start":0.0}]}
+```
+
+`mode` defaults to `hard_clip` for existing graphs. Select the output treatment
+explicitly before export; hard clipping is not loudness normalization or a
+true-peak limiter. Invalid formats, nonfinite PCM/gains, and accumulation
+overflow return errors.
+
 ```rust
 WriteVideoOptions::new("out.mp4", 24.0)
     .with_crf(18)

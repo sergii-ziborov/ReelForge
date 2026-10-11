@@ -13,7 +13,7 @@
 
 use crate::error::{GraphError, Result};
 use crate::op::{BackendClass, OperationId, OperationRegistry, SemVer};
-use reelforge_core::{MediaRange, MediaTime};
+use reelforge_core::{AudioMixMode, MediaRange, MediaTime};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -213,6 +213,9 @@ pub enum TypedParams {
         /// Track params.
         #[serde(default)]
         tracks: Value,
+        /// Linear float headroom or legacy hard clipping (default).
+        #[serde(default)]
+        mode: AudioMixMode,
     },
     /// `rf.encode.h264`
     EncodeH264 {
@@ -713,6 +716,15 @@ fn parse_typed_params(id: &str, raw: &Value) -> Result<TypedParams> {
                 .get("tracks")
                 .cloned()
                 .unwrap_or_else(|| Value::Array(vec![])),
+            mode: match raw.get("mode") {
+                None => AudioMixMode::default(),
+                Some(value) => serde_json::from_value(value.clone()).map_err(|error| {
+                    GraphError::InvalidParams {
+                        operation: id.into(),
+                        message: format!("audio mix mode: {error}"),
+                    }
+                })?,
+            },
         }),
         "rf.encode.h264" => {
             #[allow(clippy::cast_possible_truncation)]
@@ -787,6 +799,38 @@ fn estimate_cost(id: &str, params: &TypedParams) -> CostEstimate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn audio_mix_mode_is_explicit_and_legacy_defaults_are_preserved() {
+        let registry = OperationRegistry::with_builtins();
+        for (value, mode) in [
+            (serde_json::json!({}), AudioMixMode::HardClip),
+            (serde_json::json!({"mode":"linear"}), AudioMixMode::Linear),
+        ] {
+            let compiled =
+                compile_op(&registry, &OperationId::new("rf.audio.mix"), &value).unwrap();
+            assert!(
+                matches!(compiled.params, TypedParams::AudioMix { mode: found, .. } if found == mode)
+            );
+        }
+        assert!(
+            compile_op(
+                &registry,
+                &OperationId::new("rf.audio.mix"),
+                &serde_json::json!({"mode":"soft"})
+            )
+            .is_err()
+        );
+        let old: TypedParams =
+            serde_json::from_value(serde_json::json!({"op":"audio_mix","tracks":[]})).unwrap();
+        assert!(matches!(
+            old,
+            TypedParams::AudioMix {
+                mode: AudioMixMode::HardClip,
+                ..
+            }
+        ));
+    }
 
     #[test]
     fn timeline_concat_is_nary() {

@@ -393,7 +393,12 @@ impl OperationRegistry {
                   schema: Value,
                   tags: &[&str],
                   kind: ExecutorKind| {
-            OperationDescriptor::new(id, SemVer::V1, input, output, backend)
+            let version = match id {
+                "rf.audio.mix" => SemVer::new(1, 1, 0),
+                "rf.timeline.concat" => SemVer::new(1, 0, 1),
+                _ => SemVer::V1,
+            };
+            OperationDescriptor::new(id, version, input, output, backend)
                 .with_parameter_schema(schema)
                 .with_capabilities(tags.iter().copied())
                 .with_executor_kind(kind)
@@ -668,6 +673,7 @@ impl OperationRegistry {
             serde_json::json!({
                 "type": "object",
                 "properties": {
+                    "mode": { "type": "string", "enum": ["hard_clip", "linear"], "default": "hard_clip" },
                     "tracks": {
                         "type": "array",
                         "items": {

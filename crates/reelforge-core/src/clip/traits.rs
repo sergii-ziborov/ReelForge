@@ -101,6 +101,10 @@ pub trait AudioClip: Send + Sync {
     }
 
     /// Read `frame_count` sample frames starting at local time `t`.
+    /// Frame counts refer to complete interleaved channel frames. Sources may
+    /// refuse reads past their active interval; composition must bound pulls
+    /// to the overlap. A short read inside that interval is not intentional
+    /// silence and must not silently replace missing source data.
     ///
     /// # Errors
     ///

@@ -1,17 +1,22 @@
 //! Sequential audio concatenation.
 
-use crate::timeline::map_concat_time;
+use crate::audio_read::{read_source, source_frames, tick_at};
 use crate::{ComposeError, Result};
-use reelforge_core::{AudioBuffer, AudioClip, AudioFormat, Duration, Time};
+use reelforge_core::{
+    AudioBuffer, AudioClip, AudioFormat, AudioTimeline, CoreError, Duration, MediaTime, Time,
+};
 use std::sync::Arc;
 
 /// Concatenate audio clips end-to-end.
 ///
 /// All clips must share the same [`AudioFormat`]. Duration is the sum of inputs.
+/// Input durations and floating reads round once to the nearest PCM frame.
+/// Exact reads use the absolute sample clock. A block crosses every segment;
+/// only its portion after the concatenation's end is padded with silence.
 #[derive(Clone)]
 pub struct ConcatAudio {
     clips: Vec<Arc<dyn AudioClip>>,
-    ends: Vec<Duration>,
+    ends: Vec<i64>,
     format: AudioFormat,
     duration: Duration,
 }
@@ -30,7 +35,7 @@ impl ConcatAudio {
         }
         let format = clips[0].format();
         let mut ends = Vec::with_capacity(clips.len());
-        let mut total = Duration::ZERO;
+        let mut total = 0_i64;
 
         for clip in &clips {
             if clip.format() != format {
@@ -39,12 +44,9 @@ impl ConcatAudio {
                     clip.format()
                 )));
             }
-            if !clip.duration().is_positive() {
-                return Err(ComposeError::Message(
-                    "each audio clip must have positive duration".into(),
-                ));
-            }
-            total += clip.duration();
+            total = total
+                .checked_add(source_frames(clip.as_ref())?)
+                .ok_or_else(|| CoreError::invalid_timing("concat sample clock overflow"))?;
             ends.push(total);
         }
 
@@ -52,7 +54,8 @@ impl ConcatAudio {
             clips,
             ends,
             format,
-            duration: total,
+            duration: format
+                .duration_of_frames(u64::try_from(total).expect("positive sample count")),
         })
     }
 }
@@ -67,21 +70,50 @@ impl AudioClip for ConcatAudio {
     }
 
     fn samples_at(&self, t: Time, frame_count: usize) -> reelforge_core::Result<AudioBuffer> {
+        self.samples_at_media(
+            MediaTime::new(tick_at(t, self.format)?, self.format.sample_rate)?,
+            frame_count,
+        )
+    }
+
+    fn samples_at_media(
+        &self,
+        t: MediaTime,
+        frame_count: usize,
+    ) -> reelforge_core::Result<AudioBuffer> {
         if frame_count == 0 {
             return AudioBuffer::silence(self.format, 0);
         }
-        let (i, local) = map_concat_time(&self.ends, self.duration, t)?;
-        // Simple path: pull from the clip that owns `t`. Spans across boundaries
-        // zero-fill the remainder; boundary-aware mix can improve later.
-        let mut buf = self.clips[i].samples_at(local, frame_count)?;
-        let ch = self.format.channels() as usize;
-        let got = buf.frame_count();
-        if got < frame_count {
-            let mut samples = buf.samples().to_vec();
-            samples.resize(frame_count * ch, 0.0);
-            buf = AudioBuffer::from_interleaved(self.format, samples)?;
+        let first = i64::try_from(AudioTimeline::from_format(self.format)?.index_at(t))
+            .map_err(|_| CoreError::invalid_timing("concat read clock overflow"))?;
+        if t.ticks < 0 || t.timescale == 0 || first >= *self.ends.last().expect("nonempty concat") {
+            return Err(CoreError::TimeOutOfRange {
+                time: t.to_time(),
+                range: (Time::ZERO, Time::from_secs(self.duration.as_secs())),
+            });
         }
-        Ok(buf)
+        let mut output = AudioBuffer::silence(self.format, frame_count)?;
+        let ch = usize::from(self.format.channels());
+        let mut written = 0;
+        let mut cursor = first;
+        let mut index = self.ends.partition_point(|end| *end <= first);
+        while written < frame_count && index < self.clips.len() {
+            let start = if index == 0 { 0 } else { self.ends[index - 1] };
+            let available = usize::try_from(self.ends[index] - cursor).unwrap_or(usize::MAX);
+            let need = (frame_count - written).min(available);
+            let buffer = read_source(
+                self.clips[index].as_ref(),
+                self.format,
+                cursor - start,
+                need,
+            )?;
+            output.samples_mut()[written * ch..(written + need) * ch]
+                .copy_from_slice(buffer.samples());
+            written += need;
+            cursor = self.ends[index];
+            index += 1;
+        }
+        Ok(output)
     }
 }
 

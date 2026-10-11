@@ -9,11 +9,11 @@ use crate::graph_run::{GraphEncodeHints, NodeMedia};
 use crate::mask_bridge::{apply_region_redaction, region_redaction_from_value};
 use reelforge_compose::{
     CompositeLayer, CompositeVideo, MixTrack, ScenePartPose, ScenePoseVideo, composite_video,
-    concatenate_audio, concatenate_video, mix_audio,
+    concatenate_audio, concatenate_video, mix_audio_with_mode,
 };
 use reelforge_core::{
-    AudioClip, AudioEffect, AudioFormat, Duration, MediaTime, Position, Rgb8, SilenceClip, Size,
-    Time, VideoClip, VideoEffect, subclip_audio, subclip_video,
+    AudioClip, AudioEffect, AudioFormat, AudioMixMode, Duration, MediaTime, Position, Rgb8,
+    SilenceClip, Size, Time, VideoClip, VideoEffect, subclip_audio, subclip_video,
 };
 use reelforge_fx::{
     BlackAndWhite, Crop, CrossFadeIn, EvenSize, FadeIn, FadeOut, Freeze, InvertColors, Loop,
@@ -79,7 +79,7 @@ fn execute_nary(compiled: &CompiledOp, inputs: Vec<NodeMedia>) -> Result<NodeMed
                 encode: inputs.first().map(|m| m.encode.clone()).unwrap_or_default(),
             })
         }
-        TypedParams::AudioMix { tracks } => apply_audio_mix(inputs, tracks),
+        TypedParams::AudioMix { tracks, mode } => apply_audio_mix(inputs, tracks, *mode),
         TypedParams::TimelineConcat { .. } => apply_timeline_concat(inputs),
         other => Err(IoError::message(format!(
             "{} is not an n-ary executor ({other:?})",
@@ -255,7 +255,11 @@ fn execute_unary(
     }
 }
 
-fn apply_audio_mix(inputs: Vec<NodeMedia>, track_value: &serde_json::Value) -> Result<NodeMedia> {
+fn apply_audio_mix(
+    inputs: Vec<NodeMedia>,
+    track_value: &serde_json::Value,
+    mode: AudioMixMode,
+) -> Result<NodeMedia> {
     if inputs.is_empty() {
         return Err(IoError::message("rf.audio.mix needs at least one input"));
     }
@@ -288,7 +292,7 @@ fn apply_audio_mix(inputs: Vec<NodeMedia>, track_value: &serde_json::Value) -> R
             "rf.audio.mix: no input carries audio to mix",
         ));
     }
-    let mixed = mix_audio(tracks).map_err(|e| IoError::message(e.to_string()))?;
+    let mixed = mix_audio_with_mode(tracks, mode).map_err(|e| IoError::message(e.to_string()))?;
     Ok(NodeMedia {
         video,
         audio: Some(mixed),
@@ -1130,6 +1134,47 @@ mod tests {
     }
 
     #[test]
+    fn graph_audio_mix_keeps_linear_headroom_until_explicit_clipping() {
+        let format = AudioFormat::STEREO_48K;
+        let inputs = || {
+            (0..2)
+                .map(|_| {
+                    NodeMedia::new(
+                        Arc::new(ColorClip::new(
+                            Size::new(2, 2),
+                            Rgb8::WHITE,
+                            Duration::from_secs(1.0),
+                        )),
+                        Some(Arc::new(Tone {
+                            format,
+                            duration: Duration::from_secs(1.0),
+                            value: 0.8,
+                        })),
+                    )
+                })
+                .collect()
+        };
+        for (name, expected) in [("linear", 1.6), ("hard_clip", 1.0)] {
+            let compiled = reelforge_render_graph::compile_op(
+                &reelforge_render_graph::OperationRegistry::with_builtins(),
+                &reelforge_render_graph::OperationId::new("rf.audio.mix"),
+                &serde_json::json!({"mode":name}),
+            )
+            .unwrap();
+            let mut hints = GraphEncodeHints::default();
+            let media = execute_compiled(&compiled, inputs(), &mut hints).unwrap();
+            assert!(hints.preserve_audio);
+            let block = media.audio.unwrap().samples_at(Time::ZERO, 7).unwrap();
+            assert!(
+                block
+                    .samples()
+                    .iter()
+                    .all(|value| (*value - expected).abs() < 1e-6)
+            );
+        }
+    }
+
+    #[test]
     fn timeline_concat_plays_end_to_end() {
         assert_eq!(
             TypedParams::TimelineConcat {
@@ -1206,6 +1251,24 @@ mod tests {
                 .all(|sample| (*sample + 0.25).abs() < 1e-6)
         );
         assert!((out.video.duration().as_secs() - 3.0).abs() < 1e-6);
+        let crossing = audio
+            .samples_at_media(MediaTime::new(47_520, 48_000).unwrap(), 48_960)
+            .unwrap();
+        assert!(
+            crossing.samples()[..960]
+                .iter()
+                .all(|sample| (*sample - 0.5).abs() < 1e-6)
+        );
+        assert!(
+            crossing.samples()[960..96_960]
+                .iter()
+                .all(|sample| *sample == 0.0)
+        );
+        assert!(
+            crossing.samples()[96_960..]
+                .iter()
+                .all(|sample| (*sample + 0.25).abs() < 1e-6)
+        );
     }
 
     #[test]

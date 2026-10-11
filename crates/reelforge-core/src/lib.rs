@@ -24,7 +24,7 @@ mod time;
 mod yuv;
 
 pub use alpha::AlphaMode;
-pub use audio::{AudioBuffer, AudioFormat, SampleLayout};
+pub use audio::{AudioBuffer, AudioFormat, AudioMixMode, SampleLayout};
 pub use audio_time::AudioTimeline;
 pub use cache::{
     CacheConfig, CacheStats, CachedVideo, cache_video, cache_video_realtime, cache_video_with,

@@ -1,7 +1,11 @@
 //! Multi-track audio mix (sum with optional per-track gains).
 
+use crate::audio_read::{read_source, source_frames, tick_at};
 use crate::{ComposeError, Result};
-use reelforge_core::{AudioBuffer, AudioClip, AudioFormat, Duration, Time};
+use reelforge_core::{
+    AudioBuffer, AudioClip, AudioFormat, AudioMixMode, AudioTimeline, CoreError, Duration,
+    MediaTime, Time,
+};
 use std::sync::Arc;
 
 /// One input bus in a mix.
@@ -29,7 +33,11 @@ impl MixTrack {
     /// Set gain.
     #[must_use]
     pub fn with_gain(mut self, gain: f32) -> Self {
-        self.gain = gain.max(0.0);
+        self.gain = if gain.is_finite() {
+            gain.max(0.0)
+        } else {
+            gain
+        };
         self
     }
 
@@ -44,12 +52,17 @@ impl MixTrack {
 /// Sum multiple audio tracks (same [`AudioFormat`]) into one bus.
 ///
 /// Duration is the max of `start + clip.duration` across tracks.
-/// Samples are summed and soft-clamped to `[-1, 1]`.
+/// [`Self::new`] retains legacy hard clipping to `[-1, 1]`.
+/// Use [`Self::new_with_mode`] with [`AudioMixMode::Linear`] for internal buses.
+/// Floating offsets and durations round once onto the format's sample clock.
+/// Negative offsets provide preroll; reads only touch active source samples.
 #[derive(Clone)]
 pub struct MixAudio {
     tracks: Vec<MixTrack>,
     format: AudioFormat,
     duration: Duration,
+    intervals: Vec<(i64, i64)>,
+    mode: AudioMixMode,
 }
 
 impl MixAudio {
@@ -59,13 +72,23 @@ impl MixAudio {
     ///
     /// Empty list or mismatched formats.
     pub fn new(tracks: Vec<MixTrack>) -> Result<Self> {
+        Self::new_with_mode(tracks, AudioMixMode::HardClip)
+    }
+
+    /// Build a bus with explicit output clipping or linear float headroom.
+    ///
+    /// # Errors
+    ///
+    /// Empty or incompatible inputs, invalid gains or sample-clock intervals.
+    pub fn new_with_mode(tracks: Vec<MixTrack>, mode: AudioMixMode) -> Result<Self> {
         if tracks.is_empty() {
             return Err(ComposeError::Message(
                 "mix_audio requires at least one track".into(),
             ));
         }
         let format = tracks[0].clip.format();
-        let mut duration = Duration::ZERO;
+        let mut last = 0_i64;
+        let mut intervals = Vec::with_capacity(tracks.len());
         for t in &tracks {
             if t.clip.format() != format {
                 return Err(ComposeError::Message(format!(
@@ -73,20 +96,25 @@ impl MixAudio {
                     t.clip.format()
                 )));
             }
-            if !t.clip.duration().is_positive() {
-                return Err(ComposeError::Message(
-                    "each mix track must have positive duration".into(),
-                ));
+            if !t.gain.is_finite() || t.gain < 0.0 {
+                return Err(
+                    CoreError::invalid_audio("mix gain must be finite and nonnegative").into(),
+                );
             }
-            let end = Duration::from_secs(t.start.as_secs() + t.clip.duration().as_secs());
-            if end.as_secs() > duration.as_secs() {
-                duration = end;
-            }
+            let start = tick_at(t.start, format)?;
+            let end = start
+                .checked_add(source_frames(t.clip.as_ref())?)
+                .ok_or_else(|| CoreError::invalid_timing("mix sample clock overflow"))?;
+            last = last.max(end);
+            intervals.push((start, end));
         }
         Ok(Self {
             tracks,
             format,
-            duration,
+            duration: format
+                .duration_of_frames(u64::try_from(last).expect("nonnegative sample count")),
+            intervals,
+            mode,
         })
     }
 
@@ -106,59 +134,63 @@ impl AudioClip for MixAudio {
         self.format
     }
 
-    #[allow(
-        clippy::cast_precision_loss,
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss
-    )]
     fn samples_at(&self, t: Time, frame_count: usize) -> reelforge_core::Result<AudioBuffer> {
+        self.samples_at_media(
+            MediaTime::new(tick_at(t, self.format)?, self.format.sample_rate)?,
+            frame_count,
+        )
+    }
+
+    fn samples_at_media(
+        &self,
+        t: MediaTime,
+        frame_count: usize,
+    ) -> reelforge_core::Result<AudioBuffer> {
         if frame_count == 0 {
             return AudioBuffer::silence(self.format, 0);
         }
-        let ch = self.format.channels() as usize;
-        let mut acc = vec![0.0_f32; frame_count * ch];
-        let t0 = t.as_secs();
-        let dt = 1.0 / f64::from(self.format.sample_rate);
-
-        for track in &self.tracks {
-            let start = track.start.as_secs();
-            let end = start + track.clip.duration().as_secs();
-            // Overlap of [t0, t0 + frame_count*dt) with [start, end)
-            let mix_end = t0 + frame_count as f64 * dt;
-            if mix_end <= start || t0 >= end {
+        if t.ticks < 0 || t.timescale == 0 {
+            return Err(CoreError::invalid_timing(
+                "mix reads require a nonnegative valid clock",
+            ));
+        }
+        let first = i64::try_from(AudioTimeline::from_format(self.format)?.index_at(t))
+            .map_err(|_| CoreError::invalid_timing("mix read clock overflow"))?;
+        let count = i64::try_from(frame_count)
+            .map_err(|_| CoreError::invalid_audio("mix block too large"))?;
+        let end = first
+            .checked_add(count)
+            .ok_or_else(|| CoreError::invalid_timing("mix read clock overflow"))?;
+        let ch = usize::from(self.format.channels());
+        let mut output = AudioBuffer::silence(self.format, frame_count)?;
+        for (track, &(track_start, track_end)) in self.tracks.iter().zip(&self.intervals) {
+            let a = first.max(track_start);
+            let b = end.min(track_end);
+            if a >= b {
                 continue;
             }
-            let local_t0 = (t0 - start).max(0.0);
-            let skip_frames = if t0 < start {
-                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                {
-                    ((start - t0) / dt).ceil() as usize
-                }
-            } else {
-                0
-            };
-            if skip_frames >= frame_count {
-                continue;
-            }
-            let need = frame_count - skip_frames;
-            let local_start = if t0 < start { 0.0 } else { local_t0 };
-            let buf = track.clip.samples_at(Time::from_secs(local_start), need)?;
-            let got = buf.frame_count().min(need);
-            let samples = buf.samples();
-            let g = track.gain;
-            for f in 0..got {
-                let di = (skip_frames + f) * ch;
-                let si = f * ch;
-                for c in 0..ch {
-                    acc[di + c] += samples[si + c] * g;
+            let skip = usize::try_from(a - first).expect("overlap inside requested block");
+            let need = usize::try_from(b - a).expect("overlap fits requested block");
+            let local = a
+                .checked_sub(track_start)
+                .ok_or_else(|| CoreError::invalid_timing("mix local clock overflow"))?;
+            let buf = read_source(track.clip.as_ref(), self.format, local, need)?;
+            for (out, sample) in output.samples_mut()[skip * ch..(skip + need) * ch]
+                .iter_mut()
+                .zip(buf.samples())
+            {
+                *out += sample * track.gain;
+                if !out.is_finite() {
+                    return Err(CoreError::invalid_audio("mix accumulation overflow"));
                 }
             }
         }
-
-        for s in &mut acc {
-            *s = s.clamp(-1.0, 1.0);
+        if self.mode == AudioMixMode::HardClip {
+            for sample in output.samples_mut() {
+                *sample = sample.clamp(-1.0, 1.0);
+            }
         }
-        AudioBuffer::from_interleaved(self.format, acc)
+        Ok(output)
     }
 }
 
@@ -169,6 +201,18 @@ impl AudioClip for MixAudio {
 /// Propagates [`MixAudio::new`].
 pub fn mix_audio(tracks: Vec<MixTrack>) -> Result<Arc<dyn AudioClip>> {
     Ok(Arc::new(MixAudio::new(tracks)?))
+}
+
+/// Mix tracks with an explicit bus output mode.
+///
+/// # Errors
+///
+/// Propagates [`MixAudio::new_with_mode`].
+pub fn mix_audio_with_mode(
+    tracks: Vec<MixTrack>,
+    mode: AudioMixMode,
+) -> Result<Arc<dyn AudioClip>> {
+    Ok(Arc::new(MixAudio::new_with_mode(tracks, mode)?))
 }
 
 /// Convenience: mix equal-gain clips starting at zero.
