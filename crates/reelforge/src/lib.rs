@@ -29,12 +29,13 @@ pub use reelforge_core::{
 };
 pub use reelforge_fx::{
     AccelDecel, AudioDelay, AudioFadeIn, AudioFadeOut, AudioNormalize, BlackAndWhite, Blink,
-    CoverageMask, Crop, CrossFadeIn, CrossFadeOut, EvenSize, FadeIn, FadeOut, Freeze, FreezeRegion,
-    GammaCorrection, HeadBlur, Identity, InvertColors, Loop, LumContrast, Margin, MaskColor,
-    MasksAnd, MasksOr, MirrorX, MirrorY, MultiplyColor, MultiplyStereoVolume, Painting,
-    PrivacyStyle, RegionAt, RegionSample, RegionTrack, Resize, ResizeFilter, Rotate, Scroll,
-    SlideIn, SlideOut, SlideSide, Speed, SuperSample, TimeMirror, TimeSymmetrize, TrackSet,
-    TrackedBlur, TrackedPrivacy, VolumeGain, resize_bicubic, resize_bilinear, validate_gain,
+    CoverageMask, Crop, CrossFadeIn, CrossFadeOut, Displacement, DisplacementField, EvenSize,
+    FadeIn, FadeOut, Freeze, FreezeRegion, GammaCorrection, HeadBlur, Identity, InvertColors, Loop,
+    LumContrast, Margin, MaskColor, MasksAnd, MasksOr, MirrorX, MirrorY, MultiplyColor,
+    MultiplyStereoVolume, Painting, PrivacyStyle, RegionAt, RegionSample, RegionTrack, Resize,
+    ResizeFilter, Rotate, Scroll, SlideIn, SlideOut, SlideSide, Speed, SuperSample, TimeMirror,
+    TimeSymmetrize, TrackSet, TrackedBlur, TrackedPrivacy, VolumeGain, resize_bicubic,
+    resize_bilinear, sample_displaced, validate_gain,
 };
 pub use reelforge_io::{
     AdapterContext, AdapterExecutor, AdapterHost, AdapterOutput, AdapterRegistry, AdapterRequest,

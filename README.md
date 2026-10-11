@@ -370,3 +370,20 @@ Size::UHD_8K     7680×4320
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+### Continuous deformation
+
+`Displacement` applies a bounded, time-dependent source-space field. The same
+filtered coordinates deform pixels and an explicit coverage mask. Straight-alpha
+images are interpolated in premultiplied space to avoid transparent colour fringes.
+A pinned field can animate foliage, fabric, water or heat haze without generating
+an image for each output frame. This is image deformation; it does not reconstruct
+hidden geometry or simulate physical cloth.
+
+```rust,ignore
+let height = f64::from(clip.size().height);
+let animated = reelforge::Displacement::new(4.0, move |time, _, y| {
+    let pin = (1.0 - y / height).clamp(0.0, 1.0);
+    (4.0 * pin * (time * 5.0 + y * 0.08).sin(), 0.0)
+}).apply(clip)?; // VideoEffect must be in scope
+```
