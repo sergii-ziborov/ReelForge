@@ -99,6 +99,9 @@ impl Resize {
 impl VideoEffect for Resize {
     fn apply(&self, clip: Arc<dyn VideoClip>) -> Result<Arc<dyn VideoClip>> {
         let target = resolve_resize_size(clip.size(), self.width, self.height)?;
+        if target == clip.size() {
+            return Ok(clip);
+        }
         Ok(Arc::new(ResizedVideo {
             inner: clip,
             target,
@@ -124,6 +127,14 @@ impl VideoClip for ResizedVideo {
 
     fn fps(&self) -> Option<f64> {
         self.inner.fps()
+    }
+
+    fn sample_times(&self) -> Option<Vec<Time>> {
+        self.inner.sample_times()
+    }
+
+    fn requires_frame_grid(&self) -> bool {
+        self.inner.requires_frame_grid()
     }
 
     fn frame_at(&self, t: Time) -> Result<Frame> {

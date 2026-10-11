@@ -59,6 +59,10 @@ impl TextClip {
 }
 
 impl VideoClip for TextClip {
+    fn requires_frame_grid(&self) -> bool {
+        false
+    }
+
     fn duration(&self) -> Duration {
         self.duration
     }

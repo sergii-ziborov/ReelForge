@@ -87,6 +87,10 @@ fn load_oriented(path: &Path) -> Result<image::DynamicImage> {
 }
 
 impl VideoClip for ImageClip {
+    fn requires_frame_grid(&self) -> bool {
+        false
+    }
+
     fn duration(&self) -> Duration {
         self.duration
     }

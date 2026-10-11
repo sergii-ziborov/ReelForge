@@ -395,7 +395,13 @@ impl OperationRegistry {
                   kind: ExecutorKind| {
             let version = match id {
                 "rf.audio.mix" => SemVer::new(1, 1, 0),
-                "rf.timeline.concat" => SemVer::new(1, 0, 1),
+                "rf.timeline.concat"
+                | "rf.compose.layers"
+                | "rf.transform.crop"
+                | "rf.transform.resize"
+                | "rf.transform.rotate"
+                | "rf.color.invert"
+                | "rf.color.black_and_white" => SemVer::new(1, 0, 1),
                 _ => SemVer::V1,
             };
             OperationDescriptor::new(id, version, input, output, backend)

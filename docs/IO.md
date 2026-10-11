@@ -348,6 +348,41 @@ File clips override `surface_at` with a **native** rawvideo decode (`-pix_fmt yu
 
 [`Mask`](GUIDE.md) is per-pixel **coverage** for compose / redaction — it is not a color-alpha channel and has no premultiply tag.
 
+`InvertColors` uses `alpha - channel` for premultiplied RGBA; multiplication
+clamps premultiplied RGB to alpha. Both leave pixel alpha unchanged. Grayscale,
+invert, and multiply retain separate coverage. Crop, resize, rotate, and these
+color effects preserve an existing stored-picture schedule.
+
+## Final checkpoint sampling
+
+Final bundles store PNG pictures at declared times and restore them by holding
+the preceding picture. They preserve sampled pixels, alpha, and coverage; they
+do not serialize an interpolation function.
+
+`VideoClip::sample_times()` declares a complete stored raster schedule.
+Control key times for a moving pose are separate from that schedule. Procedural
+clips return `true` from `requires_frame_grid()` and must be evaluated on a
+render grid. Final stage persistence uses `GraphRunOptions::fps` (forwarded to
+`StageRunHooks::render_fps`), then the current branch's encode FPS, then source
+FPS. A procedural clip without a usable rate is refused before writing files.
+Known static image, color, and text clips can still persist one picture; restored
+bundles keep their original picture times. Source PNGs acquire no nominal FPS.
+
+For equality after restore, render on the same grid used to create the checkpoint:
+
+```rust,ignore
+let options = GraphRunOptions {
+    fps: Some(24.0),
+    checkpoint_fidelity: CheckpointFidelity::FinalLossless,
+    persist_stage_dir: Some(checkpoint_dir),
+    ..GraphRunOptions::default()
+};
+```
+
+Times between baked pictures use hold semantics. A later export on another grid
+must reevaluate the procedural source to retain its interpolated motion. The
+existing final limits (120 pictures and 240,000 PCM frames) still apply.
+
 ## Audio timeline and resample
 
 ```rust

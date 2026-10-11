@@ -31,10 +31,23 @@ pub trait VideoClip: Send + Sync {
 
     /// Stored presentation times, when this clip has an explicit frame list.
     ///
-    /// `None` leaves the caller on [`Self::fps`]. The default is `None`, so a
-    /// still with no fps and no stored times is still one instant.
+    /// `None` leaves the caller on [`Self::fps`] or a declared render grid.
+    /// A static clip with no fps and no stored times needs only one instant.
     fn sample_times(&self) -> Option<Vec<Time>> {
         None
+    }
+
+    /// Whether persistence must evaluate this clip on a declared output grid.
+    ///
+    /// Procedural motion can change between source pictures or control keys;
+    /// those instants are not a complete raster schedule. Such clips return
+    /// `true`, and a writer must use an explicit render rate or source FPS
+    /// (or refuse the checkpoint). This does not assign a nominal source FPS.
+    /// The conservative default is `true`; static pictures and clips with a
+    /// complete stored raster schedule can return `false`. Wrappers that leave
+    /// the clock unchanged should forward this requirement.
+    fn requires_frame_grid(&self) -> bool {
+        true
     }
 
     /// Optional stable id for graph tooling.

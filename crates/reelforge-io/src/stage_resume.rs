@@ -69,6 +69,8 @@ pub(crate) struct StageMediaParts<'a> {
     pub(crate) audio: Option<&'a dyn AudioClip>,
     pub(crate) masks: Option<&'a MaskTimeline>,
     pub(crate) encode: &'a StageEncodeState,
+    /// Evaluation grid for procedural pictures, separate from source FPS.
+    pub(crate) render_fps: Option<f64>,
     /// Preview writes CRF 30. Final writes PNG frames and PCM instead.
     pub(crate) fidelity: CheckpointFidelity,
 }
@@ -206,6 +208,9 @@ pub struct StageRunHooks {
     pub persist_dir: Option<PathBuf>,
     /// Preview or final bytes written into `persist_dir`.
     pub checkpoint_fidelity: CheckpointFidelity,
+    /// Explicit output grid for final procedural checkpoints. Source FPS is
+    /// used when this is absent; source pictures never acquire a nominal FPS.
+    pub render_fps: Option<f64>,
     /// Called after a stage is evaluated (and persisted, when configured).
     pub on_committed: Option<std::sync::Arc<dyn Fn(StageCommit) + Send + Sync>>,
 }
@@ -600,6 +605,7 @@ pub fn persist_stage_video(
             audio: None,
             masks: None,
             encode: &encode,
+            render_fps: None,
             fidelity: CheckpointFidelity::PreviewLossy,
         },
     )
@@ -668,7 +674,7 @@ fn persist_final_bundle(
     node_id: &str,
     media: &StageMediaParts<'_>,
 ) -> Result<StageArtifactRecord> {
-    let times = final_sample_times(media.video)?;
+    let times = final_sample_times(media.video, media.render_fps.or(media.encode.fps))?;
     let duration = MediaTime::from_secs(media.video.duration().as_secs(), MediaTime::HZ_1M)?;
     if times.is_empty() || duration.ticks <= 0 {
         return Err(IoError::message(
@@ -976,19 +982,36 @@ fn checkpoint_name(node_id: &str, fingerprint: &str) -> (String, String) {
     (safe_node, stem)
 }
 
-fn final_sample_times(video: &dyn VideoClip) -> Result<Vec<Time>> {
+fn final_sample_times(video: &dyn VideoClip, render_fps: Option<f64>) -> Result<Vec<Time>> {
     let duration = video.duration().as_secs();
     if !(duration.is_finite() && duration > 0.0) {
         return Err(IoError::message(
             "final bundle refuses a clip with no positive duration",
         ));
     }
-    if let Some(times) = kept_sample_times(video, duration)? {
+    if !video.requires_frame_grid()
+        && let Some(times) = kept_sample_times(video, duration)?
+    {
         return Ok(times);
     }
-    let Some(fps) = video.fps().filter(|fps| fps.is_finite() && *fps > 0.0) else {
+    let fps = if video.requires_frame_grid() {
+        render_fps.or(video.fps())
+    } else {
+        video.fps()
+    };
+    let Some(fps) = fps else {
+        if video.requires_frame_grid() {
+            return Err(IoError::message(
+                "final procedural checkpoint requires an explicit render FPS",
+            ));
+        }
         return Ok(vec![Time::ZERO]);
     };
+    if !fps.is_finite() || fps <= 0.0 {
+        return Err(IoError::message(
+            "final checkpoint render FPS must be finite and positive",
+        ));
+    }
     let count = frame_count_at(duration, fps);
     let Ok(count_usize) = usize::try_from(count) else {
         return Err(too_many_frames(count));
@@ -1493,6 +1516,10 @@ impl FinalPictureClip {
 }
 
 impl VideoClip for FinalPictureClip {
+    fn requires_frame_grid(&self) -> bool {
+        false
+    }
+
     fn duration(&self) -> Duration {
         self.duration
     }
@@ -2050,6 +2077,7 @@ mod tests {
             audio,
             masks,
             encode,
+            render_fps: None,
             fidelity: CheckpointFidelity::FinalLossless,
         }
     }
@@ -2231,6 +2259,91 @@ mod tests {
         let text = err.to_string();
         assert!(text.contains("refuses"), "{text}");
         assert!(fs::read_dir(dir.path()).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn restored_bundle_keeps_times_and_coverage_through_spatial_and_color_effects() {
+        use reelforge_core::VideoEffect;
+        use reelforge_fx::{BlackAndWhite, Crop, InvertColors, MultiplyColor, Resize, Rotate};
+        let dir = tempfile::tempdir().unwrap();
+        let video = StepVideo {
+            frames: vec![
+                rgba_step([80, 20, 10], 128).premultiply().unwrap(),
+                rgba_step([10, 80, 20], 64).premultiply().unwrap(),
+                rgba_step([20, 10, 80], 200).premultiply().unwrap(),
+            ],
+            masks: vec![
+                Some(Mask::from_raw(Size::new(2, 1), vec![0.0, 0.2]).unwrap()),
+                Some(Mask::from_raw(Size::new(2, 1), vec![1.0, 0.5]).unwrap()),
+                Some(Mask::from_raw(Size::new(2, 1), vec![0.25, 0.75]).unwrap()),
+            ],
+            fps: 2.0,
+            duration: Duration::from_secs(1.5),
+        };
+        let encode = StageEncodeState::default();
+        let rec = persist_stage_media(
+            dir.path(),
+            0,
+            "before-fx",
+            "src",
+            &final_parts(&video, None, None, &encode),
+        )
+        .unwrap();
+        let plan = restore_validated_prefix_for(
+            &[rec],
+            &["before-fx".into()],
+            &[],
+            CheckpointFidelity::FinalLossless,
+        )
+        .unwrap();
+        let source = plan.restored_video.get("src").unwrap();
+        let effects: Vec<Box<dyn VideoEffect>> = vec![
+            Box::new(Crop::new(1, 0, 1, 1)),
+            Box::new(MultiplyColor::new(1.0)),
+            Box::new(MultiplyColor::new(2.0)),
+            Box::new(BlackAndWhite),
+            Box::new(InvertColors),
+            Box::new(Resize::to_nearest(Size::new(4, 2))),
+            Box::new(Rotate::cw90()),
+        ];
+        for effect in effects {
+            let transformed = effect.apply(Arc::clone(source)).unwrap();
+            assert_eq!(transformed.sample_times(), source.sample_times());
+            let output_dir = tempfile::tempdir().unwrap();
+            let next = persist_stage_media(
+                output_dir.path(),
+                0,
+                "after-fx",
+                "src",
+                &final_parts(&transformed, None, None, &encode),
+            )
+            .unwrap();
+            let restored = restore_validated_prefix_for(
+                &[next],
+                &["after-fx".into()],
+                &[],
+                CheckpointFidelity::FinalLossless,
+            )
+            .unwrap();
+            let output = restored.restored_video.get("src").unwrap();
+            assert_eq!(output.sample_times(), source.sample_times());
+            for time in [1.0, 0.0, 0.5, 1.0] {
+                let time = Time::from_secs(time);
+                let expected = transformed.frame_at(time).unwrap();
+                let actual = output.frame_at(time).unwrap();
+                assert_eq!(actual.data(), expected.data());
+                assert_eq!(actual.alpha_mode(), AlphaMode::Premultiplied);
+                let coverage = transformed
+                    .mask_at(time)
+                    .unwrap()
+                    .expect("effect dropped coverage");
+                assert_eq!(coverage.size(), expected.size());
+                assert_eq!(
+                    output.mask_at(time).unwrap().unwrap().data(),
+                    coverage.data()
+                );
+            }
+        }
     }
 
     #[test]

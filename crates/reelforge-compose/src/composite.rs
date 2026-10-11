@@ -163,6 +163,10 @@ impl VideoClip for CompositeVideo {
         self.fps
     }
 
+    fn requires_frame_grid(&self) -> bool {
+        true
+    }
+
     fn frame_at(&self, t: Time) -> reelforge_core::Result<Frame> {
         if t.as_secs() < 0.0 || t.as_secs() >= self.duration.as_secs() {
             return Err(CoreError::TimeOutOfRange {

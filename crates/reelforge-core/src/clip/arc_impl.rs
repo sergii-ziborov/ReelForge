@@ -29,6 +29,10 @@ impl VideoClip for Arc<dyn VideoClip> {
         (**self).sample_times()
     }
 
+    fn requires_frame_grid(&self) -> bool {
+        (**self).requires_frame_grid()
+    }
+
     fn id(&self) -> Option<&ClipId> {
         (**self).id()
     }

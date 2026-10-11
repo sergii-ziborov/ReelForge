@@ -227,10 +227,11 @@ impl ScenePoseVideo {
         })
     }
 
-    /// Keep explicit instants for a later persist.
+    /// Declare the complete raster schedule for a later persist.
     ///
     /// Times outside `[0, duration)` are dropped. An empty list leaves sampling
-    /// on [`VideoClip::fps`].
+    /// on a declared render grid or [`VideoClip::fps`]. Control key times alone
+    /// are not a complete schedule for interpolated motion.
     #[must_use]
     pub fn with_sample_times(mut self, times: &[Time]) -> Self {
         let kept = keep_times(times, self.duration);
@@ -263,6 +264,10 @@ impl VideoClip for ScenePoseVideo {
 
     fn sample_times(&self) -> Option<Vec<Time>> {
         self.sample_times.clone()
+    }
+
+    fn requires_frame_grid(&self) -> bool {
+        self.sample_times.is_none()
     }
 
     fn frame_at(&self, t: Time) -> reelforge_core::Result<Frame> {

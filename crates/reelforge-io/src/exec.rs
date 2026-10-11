@@ -392,8 +392,6 @@ fn apply_scene_pose(
             "scene pose layer count does not match its inputs",
         ));
     }
-    let sources_have_fps = inputs.iter().any(|clip| clip.fps().is_some());
-    let mut times = Vec::new();
     let mut parts = Vec::with_capacity(inputs.len());
     for (index, clip) in inputs.into_iter().enumerate() {
         let layer = &layers[index];
@@ -401,9 +399,6 @@ fn apply_scene_pose(
             .get("start")
             .and_then(json_as_time)
             .unwrap_or(Time::ZERO);
-        if !sources_have_fps && let Some(stored) = clip.sample_times() {
-            times.extend(shift_sample_times(&stored, start));
-        }
         if layer.get("warp").is_some() {
             return Err(IoError::message(
                 "compose refuses warp; it is not a layer translate",
@@ -432,13 +427,6 @@ fn apply_scene_pose(
         require_finite_curve(&y, "y")?;
         require_finite_curve(&rotation, "rotation")?;
         let opacity = on_composite_clock(opacity_curve(layer.get("opacity"))?, start)?;
-        if !sources_have_fps {
-            push_key_times(&x, &mut times);
-            push_key_times(&y, &mut times);
-            push_key_times(&rotation, &mut times);
-            push_key_times(&scale, &mut times);
-            push_key_times(&opacity, &mut times);
-        }
         let order = layer
             .get("layer_index")
             .and_then(serde_json::Value::as_i64)
@@ -473,11 +461,6 @@ fn apply_scene_pose(
     let video =
         ScenePoseVideo::with_background(size, background_color(background), duration, parts)
             .map_err(|err| IoError::message(err.to_string()))?;
-    let video = if sources_have_fps {
-        video
-    } else {
-        video.with_sample_times(&times)
-    };
     Ok(Arc::new(video))
 }
 
@@ -612,15 +595,6 @@ fn require_finite_curve(curve: &Animated<f32>, name: &str) -> Result<()> {
     }
 }
 
-fn push_key_times(curve: &Animated<f32>, times: &mut Vec<Time>) {
-    let Animated::Keyframes { keys } = curve else {
-        return;
-    };
-    for key in keys {
-        times.push(key.t.to_time());
-    }
-}
-
 fn apply_layer_opacity(
     layer: CompositeLayer,
     value: &serde_json::Value,
@@ -746,16 +720,6 @@ fn on_composite_clock(curve: Animated<f32>, start: Time) -> Result<Animated<f32>
         )));
     }
     Ok(curve)
-}
-
-fn shift_sample_times(times: &[Time], start: Time) -> Vec<Time> {
-    if start.as_secs() == 0.0 {
-        return times.to_vec();
-    }
-    times
-        .iter()
-        .map(|time| Time::from_secs(time.as_secs() + start.as_secs()))
-        .collect()
 }
 
 fn sample_axis(curve: &Animated<f32>, time: Time) -> f32 {
@@ -1523,7 +1487,8 @@ mod tests {
             clip.frame_at(Time::from_secs(1.0)).unwrap().data(),
             later.data()
         );
-        assert_eq!(clip.sample_times().map(|times| times.len()), Some(2));
+        assert!(clip.sample_times().is_none());
+        assert!(clip.requires_frame_grid());
 
         let bad = serde_json::json!([{ "pivot": { "x": 0, "y": 0 }, "shear": 2 }]);
         let Err(err) = apply_compose_layers(
@@ -1560,6 +1525,118 @@ mod tests {
         let frame = clip.frame_at(Time::ZERO).unwrap();
         assert_eq!(pose_pixel(&frame, 1, 1), [255, 0, 0]);
         assert_eq!(pose_pixel(&frame, 1, 2), [0, 255, 0]);
+    }
+
+    #[test]
+    fn scene_pose_final_bundle_samples_motion_between_keys() {
+        use crate::stage_resume::{
+            CheckpointFidelity, StageEncodeState, StageMediaParts, persist_stage_media,
+            restore_validated_prefix_for,
+        };
+        let movement = Animated::keyframes(vec![
+            Keyframe::new(MediaTime::new(0, 1).unwrap(), 0.0),
+            Keyframe::new(MediaTime::new(1, 1).unwrap(), 8.0),
+        ]);
+        let layers = serde_json::json!([{"id": "actor", "x": movement, "rotation": 0}]);
+        let actor = Arc::new(ColorClip::new(
+            Size::new(1, 1),
+            Rgb8::RED,
+            Duration::from_secs(1.0),
+        ));
+        let clip =
+            apply_compose_layers(vec![actor], Some(10), Some(2), &layers, None, None).unwrap();
+        let clip = reelforge_fx::MultiplyColor::new(1.0).apply(clip).unwrap();
+        let clip = reelforge_fx::Crop::new(0, 0, 10, 2).apply(clip).unwrap();
+        assert!(clip.requires_frame_grid());
+        let dir = tempfile::tempdir().unwrap();
+        let encode = StageEncodeState {
+            fps: Some(8.0),
+            ..StageEncodeState::default()
+        };
+        let rec = persist_stage_media(
+            dir.path(),
+            0,
+            "motion",
+            "scene",
+            &StageMediaParts {
+                video: clip.as_ref(),
+                audio: None,
+                masks: None,
+                encode: &encode,
+                render_fps: None,
+                fidelity: CheckpointFidelity::FinalLossless,
+            },
+        )
+        .unwrap();
+        let restored = restore_validated_prefix_for(
+            &[rec],
+            &["motion".into()],
+            &[],
+            CheckpointFidelity::FinalLossless,
+        )
+        .unwrap();
+        let output = restored.restored_video.get("scene").unwrap();
+        assert_eq!(output.sample_times().unwrap().len(), 8);
+        for index in [4, 0, 7, 2, 4] {
+            let time = Time::from_secs(f64::from(index) / 8.0);
+            assert_eq!(
+                output.frame_at(time).unwrap().data(),
+                clip.frame_at(time).unwrap().data()
+            );
+        }
+        assert_eq!(
+            pose_pixel(&output.frame_at(Time::from_secs(0.5)).unwrap(), 4, 0),
+            [255, 0, 0]
+        );
+        assert!(output.frame_at(Time::from_secs(1.0)).is_err());
+    }
+
+    #[test]
+    fn scene_pose_refuses_missing_or_invalid_checkpoint_grid_before_writing() {
+        use crate::stage_resume::{
+            CheckpointFidelity, StageEncodeState, StageMediaParts, persist_stage_media,
+        };
+        let actor = Arc::new(ColorClip::new(
+            Size::new(1, 1),
+            Rgb8::RED,
+            Duration::from_secs(1.0),
+        ));
+        let clip = apply_compose_layers(
+            vec![actor],
+            Some(2),
+            Some(2),
+            &serde_json::json!([{"rotation": 0}]),
+            None,
+            None,
+        )
+        .unwrap();
+        let encode = StageEncodeState::default();
+        for fps in [
+            None,
+            Some(0.0),
+            Some(-1.0),
+            Some(f64::NAN),
+            Some(f64::INFINITY),
+            Some(1000.0),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let result = persist_stage_media(
+                dir.path(),
+                0,
+                "invalid-grid",
+                "scene",
+                &StageMediaParts {
+                    video: clip.as_ref(),
+                    audio: None,
+                    masks: None,
+                    encode: &encode,
+                    render_fps: fps,
+                    fidelity: CheckpointFidelity::FinalLossless,
+                },
+            );
+            assert!(result.is_err());
+            assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
+        }
     }
 
     #[test]

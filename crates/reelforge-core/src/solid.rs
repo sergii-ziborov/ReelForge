@@ -51,6 +51,10 @@ impl ColorClip {
 }
 
 impl VideoClip for ColorClip {
+    fn requires_frame_grid(&self) -> bool {
+        false
+    }
+
     fn duration(&self) -> Duration {
         self.duration
     }

@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- Final procedural checkpoints evaluate motion on an explicit render grid
+  (`GraphRunOptions::fps` / `StageRunHooks::render_fps`, then branch or source FPS).
+  Pose control keys no longer masquerade as stored pictures. Missing or invalid
+  rates are refused before writing; final job cache keys invalidate older bakes.
+- Crop, resize, rotate, grayscale, invert, and multiply preserve stored picture
+  times. Color effects retain separate coverage masks, and premultiplied invert
+  and multiply keep RGB within pixel alpha. Nonfinite color factors are refused.
+- `VideoClip::requires_frame_grid` distinguishes procedural evaluation from
+  static pictures or complete stored raster schedules. Its default is conservative;
+  implementers of static or stored-picture clips can return `false`.
 - Audio concatenation crosses all clip boundaries in a requested block without
   reading past source EOF. Mix tracks use bounded sample-clock overlaps.
 - Linear mix buses preserve float headroom; legacy hard clipping stays the

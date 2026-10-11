@@ -338,6 +338,7 @@ impl GraphRunOptions {
             restored_encode: self.restored_encode.clone(),
             persist_dir: self.persist_stage_dir.clone(),
             checkpoint_fidelity: self.checkpoint_fidelity,
+            render_fps: self.fps,
             on_committed: self.on_stage_committed.clone(),
         }
     }
@@ -905,6 +906,7 @@ fn materialize_plan_admitted<S: BuildHasher, A: BuildHasher>(
                     &ids,
                     &ctx.produced,
                     h.checkpoint_fidelity,
+                    h.render_fps,
                 )?;
             }
             if let Some(cb) = &h.on_committed {
@@ -989,6 +991,7 @@ fn persist_finished_stage(
     ids: &[String],
     produced: &HashMap<String, NodeMedia>,
     fidelity: crate::stage_resume::CheckpointFidelity,
+    render_fps: Option<f64>,
 ) -> Result<Vec<crate::StageArtifactRecord>> {
     let mut artifacts = Vec::new();
     for id in ids {
@@ -1006,6 +1009,7 @@ fn persist_finished_stage(
                 audio: media.audio.as_deref(),
                 masks: media.masks.as_ref(),
                 encode: &encode,
+                render_fps,
                 fidelity,
             },
         )?);
@@ -1187,7 +1191,7 @@ pub(crate) fn execution_cache_key(
     };
     let fidelity = match options.checkpoint_fidelity {
         crate::stage_resume::CheckpointFidelity::PreviewLossy => "preview_lossy",
-        crate::stage_resume::CheckpointFidelity::FinalLossless => "final_lossless",
+        crate::stage_resume::CheckpointFidelity::FinalLossless => "final_lossless_grid_v2",
     };
     Ok(format!(
         "{base}|fps={}|codec={}|crf={}|audio={}|admit={admission}|fidelity={fidelity}|src={sources}",
@@ -2287,6 +2291,75 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::cast_possible_truncation)]
+    fn final_checkpoint_uses_run_grid_through_color_chain() {
+        let g = rust_chain_graph();
+        let registry = OperationRegistry::with_builtins();
+        let plan = schedule_graph(&g, &registry).unwrap();
+        let actor = Arc::new(ColorClip::new(
+            Size::new(1, 1),
+            Rgb8::RED,
+            Duration::from_secs(1.0),
+        ));
+        let part = reelforge_compose::ScenePartPose::new("actor", actor)
+            .with_x_at(Arc::new(|time: Time| time.as_secs() as f32 * 8.0));
+        let seed: Arc<dyn VideoClip> = Arc::new(
+            reelforge_compose::ScenePoseVideo::new(
+                Size::new(10, 2),
+                Duration::from_secs(1.0),
+                vec![part],
+            )
+            .unwrap(),
+        );
+        let seeds = HashMap::from([(MediaAssetId("a".into()), seed)]);
+        let dir = tempfile::tempdir().unwrap();
+        let records = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let collect = Arc::clone(&records);
+        let options = GraphRunOptions {
+            fps: Some(8.0),
+            checkpoint_fidelity: crate::CheckpointFidelity::FinalLossless,
+            persist_stage_dir: Some(dir.path().to_path_buf()),
+            on_stage_committed: Some(Arc::new(move |commit| {
+                collect.lock().unwrap().extend(commit.artifacts);
+            })),
+            ..GraphRunOptions::default()
+        };
+        let hooks = options.stage_hooks();
+        let bundle = materialize_execution_plan_with_adapters(
+            &g,
+            &plan,
+            &registry,
+            &seeds,
+            &HashMap::new(),
+            false,
+            None,
+            None,
+            crate::AdapterContext::default(),
+            crate::GpuContext::default(),
+            Some(&hooks),
+        )
+        .unwrap();
+        let records = records.lock().unwrap();
+        let expected = plan_stage_fingerprints(&g, &plan, &registry).unwrap();
+        let resume = crate::restore_validated_prefix_for(
+            &records,
+            &expected,
+            &[],
+            crate::CheckpointFidelity::FinalLossless,
+        )
+        .unwrap();
+        let output = resume.restored_video.get("bw").unwrap();
+        assert_eq!(output.sample_times().unwrap().len(), 8);
+        for index in [4, 0, 7, 2, 4] {
+            let time = Time::from_secs(f64::from(index) / 8.0);
+            assert_eq!(
+                output.frame_at(time).unwrap().data(),
+                bundle.video.frame_at(time).unwrap().data()
+            );
+        }
+    }
+
+    #[test]
     fn checkpoint_persist_writes_frontier_only() {
         if !crate::ffmpeg_available() {
             return;
@@ -2370,6 +2443,7 @@ mod tests {
                 audio: Some(&audio),
                 masks: Some(&masks),
                 encode: &encode,
+                render_fps: None,
                 fidelity: crate::stage_resume::CheckpointFidelity::PreviewLossy,
             },
         )

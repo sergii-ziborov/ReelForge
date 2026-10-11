@@ -45,6 +45,9 @@ impl VideoEffect for Crop {
                 "crop {self:?} exceeds source {src:?}"
             )));
         }
+        if self.x == 0 && self.y == 0 && Size::new(self.width, self.height) == src {
+            return Ok(clip);
+        }
         Ok(Arc::new(CroppedVideo {
             inner: clip,
             crop: *self,
@@ -68,6 +71,14 @@ impl VideoClip for CroppedVideo {
 
     fn fps(&self) -> Option<f64> {
         self.inner.fps()
+    }
+
+    fn sample_times(&self) -> Option<Vec<Time>> {
+        self.inner.sample_times()
+    }
+
+    fn requires_frame_grid(&self) -> bool {
+        self.inner.requires_frame_grid()
     }
 
     fn frame_at(&self, t: Time) -> Result<Frame> {

@@ -45,6 +45,9 @@ impl Rotate {
 
 impl VideoEffect for Rotate {
     fn apply(&self, clip: Arc<dyn VideoClip>) -> Result<Arc<dyn VideoClip>> {
+        if matches!(self, Self::Degrees(angle) if *angle == 0.0) {
+            return Ok(clip);
+        }
         Ok(Arc::new(RotatedVideo {
             inner: clip,
             rotate: *self,
@@ -72,6 +75,14 @@ impl VideoClip for RotatedVideo {
 
     fn fps(&self) -> Option<f64> {
         self.inner.fps()
+    }
+
+    fn sample_times(&self) -> Option<Vec<Time>> {
+        self.inner.sample_times()
+    }
+
+    fn requires_frame_grid(&self) -> bool {
+        self.inner.requires_frame_grid()
     }
 
     fn frame_at(&self, t: Time) -> Result<Frame> {
