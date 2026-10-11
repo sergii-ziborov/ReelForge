@@ -11,7 +11,7 @@ use reelforge_core::{
     AlphaMode, CoreError, Duration, Frame, FrameFormat, Mask, Rgb8, Size, Time, VideoClip,
 };
 use std::collections::BTreeSet;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// Point binding used by [`ScenePartPose::with_anchor`].
 #[derive(Debug, Clone, PartialEq)]
@@ -160,6 +160,7 @@ pub struct ScenePoseVideo {
     parts: Vec<ScenePartPose>,
     fps: Option<f64>,
     sample_times: Option<Vec<Time>>,
+    filtered: Mutex<Vec<FilteredSource>>,
 }
 
 impl ScenePoseVideo {
@@ -224,6 +225,7 @@ impl ScenePoseVideo {
             parts,
             fps,
             sample_times: None,
+            filtered: Mutex::new(Vec::new()),
         })
     }
 
@@ -285,7 +287,7 @@ impl VideoClip for ScenePoseVideo {
             .collect::<reelforge_core::Result<Vec<_>>>()?;
         let worlds = world_matrices(&self.parts, &locals)?;
         for (index, part) in self.parts.iter().enumerate() {
-            paint_part(&mut canvas, part, t, worlds[index])?;
+            paint_part(&mut canvas, part, t, worlds[index], &self.filtered)?;
         }
         Ok(canvas)
     }
@@ -576,6 +578,7 @@ fn paint_part(
     part: &ScenePartPose,
     t: Time,
     world: Aff,
+    filtered: &Mutex<Vec<FilteredSource>>,
 ) -> reelforge_core::Result<()> {
     let local = t.as_secs() - part.start.as_secs();
     if local < 0.0 || local >= part.clip.duration().as_secs() {
@@ -609,9 +612,127 @@ fn paint_part(
             part.id
         )));
     };
-    stamp(canvas, &frame, mask.as_ref(), world, inverse, opacity)
+    let footprint = inverse.a.hypot(inverse.b).max(inverse.c.hypot(inverse.d));
+    if footprint > 2.0 {
+        let (reduced, factor) = filtered_source(&frame, mask.as_ref(), footprint, filtered)?;
+        stamp(
+            canvas,
+            &reduced,
+            None,
+            world,
+            inverse,
+            opacity,
+            factor,
+            frame.size(),
+        )
+    } else {
+        stamp(
+            canvas,
+            &frame,
+            mask.as_ref(),
+            world,
+            inverse,
+            opacity,
+            1.0,
+            frame.size(),
+        )
+    }
 }
 
+// Retaining the shared input buffers makes pointer identity safe against reuse.
+// The bounded cache is shared by trail instances and invalidates on COW edits.
+struct FilteredSource {
+    source: Frame,
+    mask: Option<Mask>,
+    levels: Vec<Frame>,
+}
+
+fn filtered_source(
+    source: &Frame,
+    mask: Option<&Mask>,
+    footprint: f32,
+    cache: &Mutex<Vec<FilteredSource>>,
+) -> reelforge_core::Result<(Frame, f32)> {
+    let mut entries = cache
+        .lock()
+        .map_err(|_| CoreError::invalid_frame("filter cache poisoned"))?;
+    let index = entries
+        .iter()
+        .position(|entry| {
+            std::ptr::eq(entry.source.data().as_ptr(), source.data().as_ptr())
+                && entry.source.size() == source.size()
+                && entry.source.format() == source.format()
+                && entry.source.alpha_mode() == source.alpha_mode()
+                && match (entry.mask.as_ref(), mask) {
+                    (None, None) => true,
+                    (Some(a), Some(b)) => std::ptr::eq(a.data().as_ptr(), b.data().as_ptr()),
+                    _ => false,
+                }
+        })
+        .unwrap_or_else(|| {
+            if entries.len() == 16 {
+                entries.remove(0);
+            }
+            entries.push(FilteredSource {
+                source: source.clone(),
+                mask: mask.cloned(),
+                levels: Vec::new(),
+            });
+            entries.len() - 1
+        });
+    let entry = &mut entries[index];
+    let mut factor = 1.0;
+    let mut level = 0;
+    while footprint / factor > 2.0 {
+        if level == entry.levels.len() {
+            let (frame, coverage) = if level == 0 {
+                (&entry.source, entry.mask.as_ref())
+            } else {
+                (&entry.levels[level - 1], None)
+            };
+            entry.levels.push(half_covered(frame, coverage)?);
+        }
+        factor *= 2.0;
+        level += 1;
+        if entry.levels[level - 1].size() == Size::new(1, 1) {
+            break;
+        }
+    }
+    Ok((entry.levels[level - 1].clone(), factor))
+}
+
+fn half_covered(src: &Frame, mask: Option<&Mask>) -> reelforge_core::Result<Frame> {
+    let size = Size::new(src.size().width.div_ceil(2), src.size().height.div_ceil(2));
+    let mut out =
+        Frame::zeros(size, FrameFormat::Rgba8)?.with_alpha_mode(AlphaMode::Premultiplied)?;
+    let premul = src.alpha_mode() == AlphaMode::Premultiplied;
+    for y in 0..size.height {
+        for x in 0..size.width {
+            let mut sum = [0.0; 4];
+            for dy in 0..2 {
+                for dx in 0..2 {
+                    if let Some((rgb, alpha)) =
+                        tap(src, mask, u32_f32(x * 2 + dx), u32_f32(y * 2 + dy), premul)?
+                    {
+                        for c in 0..3 {
+                            sum[c] += rgb[c] * 0.25;
+                        }
+                        sum[3] += alpha * 255.0 * 0.25;
+                    }
+                }
+            }
+            let index = ((y as usize) * (size.width as usize) + x as usize) * 4;
+            for (channel, value) in sum.iter().enumerate() {
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let value = value.round().clamp(0.0, 255.0) as u8;
+                out.data_mut()[index + channel] = value;
+            }
+        }
+    }
+    Ok(out)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn stamp(
     canvas: &mut Frame,
     src: &Frame,
@@ -619,10 +740,12 @@ fn stamp(
     world: Aff,
     inverse: Aff,
     opacity: f32,
+    factor: f32,
+    original_size: Size,
 ) -> reelforge_core::Result<()> {
     let premul = src.alpha_mode() == AlphaMode::Premultiplied;
-    let src_w = src.size().width;
-    let src_h = src.size().height;
+    let src_w = original_size.width;
+    let src_h = original_size.height;
     let dst_w = canvas.size().width;
     let dst_h = canvas.size().height;
     let (x0, y0, x1, y1) = paint_span(world, src_w, src_h, dst_w, dst_h);
@@ -631,6 +754,8 @@ fn stamp(
     for y in y0..y1 {
         for x in x0..x1 {
             let (sx, sy) = inverse.apply(u32_f32(x), u32_f32(y));
+            let sx = (sx + 0.5) / factor - 0.5;
+            let sy = (sy + 0.5) / factor - 0.5;
             let Some((rgb, coverage)) = sample_covered(src, mask, premul, sx, sy)? else {
                 continue;
             };
@@ -886,6 +1011,54 @@ fn keep_times(times: &[Time], duration: Duration) -> Vec<Time> {
 mod tests {
     use super::*;
     use reelforge_core::{ColorClip, FrameFormat, Rgb8};
+
+    #[test]
+    fn minification_averages_detail_and_reuses_shared_source_without_shimmer() {
+        let mut pixels = Vec::new();
+        for y in 0..32 {
+            for x in 0..32 {
+                let value = if (x + y) % 2 == 0 { 255 } else { 0 };
+                pixels.extend([value, value, value]);
+            }
+        }
+        let source = Frame::from_raw(Size::new(32, 32), FrameFormat::Rgb8, pixels).unwrap();
+        let cache = Mutex::new(Vec::new());
+        let (filtered, factor) = filtered_source(&source, None, 8.0, &cache).unwrap();
+        assert!((factor - 4.0).abs() < f32::EPSILON);
+        for p in filtered.data().chunks_exact(4) {
+            assert_eq!(p, [128, 128, 128, 255]);
+        }
+        let (again, _) = filtered_source(&source.clone(), None, 8.0, &cache).unwrap();
+        assert!(std::ptr::eq(
+            filtered.data().as_ptr(),
+            again.data().as_ptr()
+        ));
+        let mut changed = source.clone();
+        changed.data_mut().fill(0);
+        let (dark, _) = filtered_source(&changed, None, 8.0, &cache).unwrap();
+        assert_eq!(&dark.data()[..4], &[0, 0, 0, 255]);
+        assert_eq!(cache.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn minification_averages_coverage_in_premultiplied_space() {
+        // Transparent blue must not contaminate half-covered red.
+        let source = Frame::from_raw(
+            Size::new(2, 2),
+            FrameFormat::Rgba8,
+            vec![255, 0, 0, 255, 0, 0, 255, 0, 255, 0, 0, 255, 0, 0, 255, 0],
+        )
+        .unwrap();
+        let filtered = half_covered(&source, None).unwrap();
+        assert_eq!(filtered.alpha_mode(), AlphaMode::Premultiplied);
+        assert_eq!(filtered.data(), [128, 0, 0, 128]);
+        let (rgb, coverage) = sample_covered(&filtered, None, true, 0.0, 0.0)
+            .unwrap()
+            .unwrap();
+        assert!((rgb[0] - 255.0).abs() < 0.01);
+        assert!(rgb[2].abs() < f32::EPSILON);
+        assert!((coverage - 0.5).abs() < 0.01);
+    }
 
     fn pixel(frame: &Frame, x: u32, y: u32) -> [u8; 3] {
         let width = usize::try_from(frame.size().width).unwrap();
