@@ -75,10 +75,13 @@ pub use reelforge_io::{
     write_thumbnail, write_video, write_video_with,
 };
 pub use reelforge_project::{
-    CAPTURE_PROJECT_VERSION, CaptureProject, CropRect, Gap, Marker, MediaRef, MediaRefId, Metadata,
-    NestedSequence, ProjectCompile, ProjectError, ProjectId, Retiming, SemanticRef, Sequence,
-    SequenceId, SourceRange, TimelineClip, TimelineClipId, TimelineItem, TimelineTrack,
-    TimelineTrackId, TrackKind, Transition, TransitionKind, compile_project,
+    CAPTURE_PROJECT_VERSION, CaptureProject, CropRect, Gap, GroupId, Marker, MediaRef, MediaRefId,
+    Metadata, MotionChannel, MotionKey, MotionProperty, MotionTimeline, NestedSequence, PartAnchor,
+    PartId, ProjectCompile, ProjectError, ProjectId, ResolvedPart, ResolvedScene, Retiming,
+    SCENE_DOCUMENT_VERSION, SceneCanvas, SceneCompile, SceneDocument, SceneGroup, SceneId,
+    SceneMedia, ScenePart, ScenePoint, SemanticRef, Sequence, SequenceId, SourceLink, SourceRange,
+    TimelineClip, TimelineClipId, TimelineItem, TimelineTrack, TimelineTrackId, TrackKind,
+    Transition, TransitionKind, compile_project, compile_scene,
 };
 pub use reelforge_render_graph::{
     ARTIFACT_MANIFEST_VERSION, AdapterStage, Animated, AppearanceId, ArtifactKind,

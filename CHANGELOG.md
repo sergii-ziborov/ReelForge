@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- The facade exports the existing editable scene document, motion types, and
+  `compile_scene` API for Host and application callers.
 - Final procedural checkpoints evaluate motion on an explicit render grid
   (`GraphRunOptions::fps` / `StageRunHooks::render_fps`, then branch or source FPS).
   Pose control keys no longer masquerade as stored pictures. Missing or invalid
