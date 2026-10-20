@@ -2,6 +2,7 @@
 
 pub mod cut;
 pub mod filter;
+pub mod generate;
 pub mod graph;
 pub mod plan;
 pub mod probe;

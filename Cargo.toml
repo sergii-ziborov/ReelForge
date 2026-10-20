@@ -5,6 +5,7 @@ members = [
     "crates/reelforge-compose",
     "crates/reelforge-core",
     "crates/reelforge-fx",
+    "crates/reelforge-generation",
     "crates/reelforge-io",
     "crates/reelforge-project",
     "crates/reelforge-render-graph",
@@ -32,6 +33,7 @@ reelforge-cli = { path = "crates/reelforge-cli", version = "0.2.1" }
 reelforge-compose = { path = "crates/reelforge-compose", version = "0.2.1" }
 reelforge-core = { path = "crates/reelforge-core", version = "0.2.1" }
 reelforge-fx = { path = "crates/reelforge-fx", version = "0.2.1" }
+reelforge-generation = { path = "crates/reelforge-generation", version = "0.2.1" }
 reelforge-io = { path = "crates/reelforge-io", version = "0.2.1" }
 reelforge-project = { path = "crates/reelforge-project", version = "0.2.1" }
 reelforge-render-graph = { path = "crates/reelforge-render-graph", version = "0.2.1" }

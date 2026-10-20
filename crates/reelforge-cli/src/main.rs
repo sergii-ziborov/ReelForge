@@ -16,6 +16,23 @@ struct Cli {
 enum Commands {
     /// Print version information.
     Version,
+    /// Plan/run sparse keyframes and model-generated intermediate frames.
+    Generate {
+        /// JSON containing spec, resources and local process provider bindings.
+        path: String,
+        /// Execute models; default only explains the complete generation plan.
+        #[arg(long)]
+        run: bool,
+        /// Shared owned frame/request storage (required with --run).
+        #[arg(long)]
+        store: Option<String>,
+        /// Write the generation receipt (required with --run).
+        #[arg(long)]
+        receipt: Option<String>,
+        /// Encode the verified generated sequence through native `ReelForge`.
+        #[arg(long)]
+        output: Option<String>,
+    },
     /// Probe media metadata via ffprobe.
     Probe {
         /// Input media path.
@@ -110,6 +127,19 @@ fn main() {
 
 fn run(cli: Cli) -> Result<(), String> {
     match cli.command {
+        Commands::Generate {
+            path,
+            run,
+            store,
+            receipt,
+            output,
+        } => commands::generate::run(
+            &path,
+            run,
+            store.as_deref(),
+            receipt.as_deref(),
+            output.as_deref(),
+        ),
         Commands::Version => {
             commands::version::run();
             Ok(())

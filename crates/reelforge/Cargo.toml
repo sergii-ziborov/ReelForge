@@ -17,6 +17,7 @@ readme = "../../README.md"
 reelforge-compose = { workspace = true }
 reelforge-core = { workspace = true }
 reelforge-fx = { workspace = true }
+reelforge-generation = { workspace = true }
 reelforge-io = { workspace = true }
 reelforge-project = { workspace = true }
 reelforge-render-graph = { workspace = true }

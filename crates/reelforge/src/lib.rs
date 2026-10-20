@@ -5,6 +5,7 @@
 pub use reelforge_compose as compose;
 pub use reelforge_core as core;
 pub use reelforge_fx as fx;
+pub use reelforge_generation as generation;
 pub use reelforge_io as io;
 pub use reelforge_project as project;
 pub use reelforge_render_graph as render_graph;

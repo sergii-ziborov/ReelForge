@@ -1,0 +1,20 @@
+[package]
+name = "reelforge-generation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Reusable keyframe and neural in-between generation with exact clocks and durable owned frame receipts"
+
+[dependencies]
+serde = { workspace = true, features = ["rc"] }
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+image.workspace = true
+reelforge-core.workspace = true
+tempfile = "3"
+
+[lints]
+workspace = true
